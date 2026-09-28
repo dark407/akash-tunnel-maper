@@ -85,11 +85,15 @@ export interface SheetLayoutComputation {
   crownW_px: number;
   roundH_px: number;
   wallW_px: number;
+  leftWallW_px: number;
+  rightWallW_px: number;
   crownLeftX: number;
   leftWallLeftX: number;
   rightWallLeftX: number;
   roundLen: number;
   crownSpan: number;
+  leftWallSpan: number;
+  rightWallSpan: number;
 
   // Right Column Non-Overlapping Blocks (Priorities 3, 4, 5, 7, 8)
   orientationBlock: SheetRect;
@@ -268,10 +272,18 @@ export function computeFinalSheetAutoLayout(params: {
 
   const roundLen = Math.max(1.5, settings.roundLength || 3.5);
   // Strict Geometric Rule: The Developed Perimeter Crown length MUST equal the Tunnel Face Crown Arc Length (geometry.crownArcLength),
-  // and each Developed Perimeter Side Wall width MUST equal the Tunnel Face Side Wall Height (geometry.wallHeight).
-  const crownSpan = Math.max(geometry.width, geometry.crownArcLength);
-  // Unfolded Left Wall + Crown Arc + Right Wall total horizontal span in meters (strictly follows fixed perimeter ratio)
-  const totalDevelopedWidthMeters = geometry.wallHeight * 2 + crownSpan;
+  // and each Developed Perimeter Side Wall width MUST equal the actual Left/Right Wall curvilinear/vertical span.
+  const crownSpan = Math.max(1.0, geometry.crownArcLength || geometry.width);
+  const leftWallSpan = Math.max(
+    0.5,
+    geometry.leftWallArcLength || geometry.leftWallHeight || geometry.wallHeight
+  );
+  const rightWallSpan = Math.max(
+    0.5,
+    geometry.rightWallArcLength || geometry.rightWallHeight || geometry.wallHeight
+  );
+  // Unfolded Left Wall + Crown Arc + Right Wall total horizontal span in meters (from actual vector geometry)
+  const totalDevelopedWidthMeters = leftWallSpan + crownSpan + rightWallSpan;
 
   // Reserve space for dimension lines & callout labels so nothing is ever clipped
   const hasDenseCallouts = joints.length + placedSymbolCount + controlPointCount > 8;
@@ -279,12 +291,9 @@ export function computeFinalSheetAutoLayout(params: {
   const arenaPadH = hasDenseCallouts ? 114 : 102;
 
   // UNIFIED TRUE ENGINEERING SCALE:
-  // Both the Developed Perimeter (Left Wall, Crown, Right Wall) AND the Tunnel Face
-  // use the EXACT SAME pxPerMeter scale so that:
-  //   1. Developed Crown length (crownW_px) === Tunnel Face Crown Arc Length (geometry.crownArcLength * facePxPerMeter)
-  //   2. Developed Left & Right Wall width (wallW_px) === Tunnel Face Wall Height (geometry.wallHeight * facePxPerMeter)
-  //   3. Round/Pull height (roundH_px) === roundLen * facePxPerMeter
-  const totalHorizontalMeters = showPerimeterPlan ? totalDevelopedWidthMeters : geometry.width;
+  const totalHorizontalMeters = showPerimeterPlan
+    ? Math.max(geometry.width, totalDevelopedWidthMeters)
+    : geometry.width;
   const totalVerticalMeters = showPerimeterPlan ? roundLen + geometry.height : geometry.height;
 
   const availDrawingW = Math.max(380, drawingArenaBox.width - arenaPadW);
@@ -305,10 +314,10 @@ export function computeFinalSheetAutoLayout(params: {
   const faceHeightPx = Number((geometry.height * facePxPerMeter).toFixed(2));
 
   // Exact 1:1 dimensional equality at unified engineering scale:
-  // crownW_px === Face Crown Arc Length in pixels (crownSpan * unifiedPxPerMeter)
-  // wallW_px  === Face Wall Height in pixels (geometry.wallHeight * unifiedPxPerMeter)
   const crownW_px = Number((crownSpan * perimeterPxPerMeter).toFixed(2));
-  const wallW_px = Number((geometry.wallHeight * perimeterPxPerMeter).toFixed(2));
+  const leftWallW_px = Number((leftWallSpan * perimeterPxPerMeter).toFixed(2));
+  const rightWallW_px = Number((rightWallSpan * perimeterPxPerMeter).toFixed(2));
+  const wallW_px = leftWallW_px;
   const roundH_px = Number((roundLen * perimeterPxPerMeter).toFixed(2));
 
   // Vertically center the unified [Developed Perimeter + Projection Gap + Tunnel Face] assembly
@@ -320,7 +329,7 @@ export function computeFinalSheetAutoLayout(params: {
 
   const planTopY = Number(assemblyTopY.toFixed(1));
   const crownLeftX = Number((planCenterX - crownW_px / 2).toFixed(2));
-  const leftWallLeftX = Number((crownLeftX - wallW_px).toFixed(2));
+  const leftWallLeftX = Number((crownLeftX - leftWallW_px).toFixed(2));
   const rightWallLeftX = Number((crownLeftX + crownW_px).toFixed(2));
 
   const faceCenterX = planCenterX;
@@ -613,9 +622,9 @@ export function computeFinalSheetAutoLayout(params: {
       return {
         x: leftWallLeftX,
         y: planTopY,
-        width: wallW_px,
+        width: leftWallW_px,
         height: roundH_px,
-        centerX: leftWallLeftX + wallW_px / 2,
+        centerX: leftWallLeftX + leftWallW_px / 2,
         centerY: planTopY + roundH_px / 2,
         pxPerMeter: perimeterPxPerMeter,
       };
@@ -623,9 +632,9 @@ export function computeFinalSheetAutoLayout(params: {
     return {
       x: rightWallLeftX,
       y: planTopY,
-      width: wallW_px,
+      width: rightWallW_px,
       height: roundH_px,
-      centerX: rightWallLeftX + wallW_px / 2,
+      centerX: rightWallLeftX + rightWallW_px / 2,
       centerY: planTopY + roundH_px / 2,
       pxPerMeter: perimeterPxPerMeter,
     };
@@ -647,6 +656,20 @@ export function computeFinalSheetAutoLayout(params: {
     return `translate(${rect.centerX + dxPx}, ${rect.centerY + dyPx}) rotate(${rot}) scale(${sx}, ${sy}) translate(${-rect.centerX}, ${-rect.centerY})`;
   };
 
+  const faceMinX =
+    typeof geometry.minX === 'number' && Number.isFinite(geometry.minX)
+      ? geometry.minX
+      : -geometry.width / 2;
+  const faceMaxX =
+    typeof geometry.maxX === 'number' && Number.isFinite(geometry.maxX)
+      ? geometry.maxX
+      : geometry.width / 2;
+  const faceMidX = (faceMinX + faceMaxX) / 2;
+  const faceMinY =
+    typeof geometry.minY === 'number' && Number.isFinite(geometry.minY)
+      ? geometry.minY
+      : 0;
+
   // Convert real-world tunnel meters on any surface to sheet SVG (x, y)
   const surfacePointToSheetXY = (
     pt: Point2D,
@@ -654,8 +677,8 @@ export function computeFinalSheetAutoLayout(params: {
   ): { x: number; y: number } => {
     if (surface === 'face') {
       return {
-        x: Number((faceCenterX + pt.x * facePxPerMeter).toFixed(2)),
-        y: Number((faceBottomY - pt.y * facePxPerMeter).toFixed(2)),
+        x: Number((faceCenterX + (pt.x - faceMidX) * facePxPerMeter).toFixed(2)),
+        y: Number((faceBottomY - (pt.y - faceMinY) * facePxPerMeter).toFixed(2)),
       };
     }
     if (surface === 'crown') {
@@ -666,16 +689,16 @@ export function computeFinalSheetAutoLayout(params: {
     }
     if (surface === 'leftWall') {
       const normAlongRound = Math.max(0, Math.min(1, pt.x / roundLen));
-      const normHeight = Math.max(0, Math.min(1, pt.y / Math.max(0.5, geometry.wallHeight)));
+      const normHeight = Math.max(0, Math.min(1, pt.y / Math.max(0.5, leftWallSpan)));
       return {
-        x: Number((leftWallLeftX + normHeight * wallW_px).toFixed(2)),
+        x: Number((leftWallLeftX + normHeight * leftWallW_px).toFixed(2)),
         y: Number((planTopY + roundH_px - normAlongRound * roundH_px).toFixed(2)),
       };
     }
     const normAlongRound = Math.max(0, Math.min(1, pt.x / roundLen));
-    const normHeight = Math.max(0, Math.min(1, pt.y / Math.max(0.5, geometry.wallHeight)));
+    const normHeight = Math.max(0, Math.min(1, pt.y / Math.max(0.5, rightWallSpan)));
     return {
-      x: Number((rightWallLeftX + (1 - normHeight) * wallW_px).toFixed(2)),
+      x: Number((rightWallLeftX + (1 - normHeight) * rightWallW_px).toFixed(2)),
       y: Number((planTopY + roundH_px - normAlongRound * roundH_px).toFixed(2)),
     };
   };
@@ -703,11 +726,15 @@ export function computeFinalSheetAutoLayout(params: {
     crownW_px,
     roundH_px,
     wallW_px,
+    leftWallW_px,
+    rightWallW_px,
     crownLeftX,
     leftWallLeftX,
     rightWallLeftX,
     roundLen,
     crownSpan,
+    leftWallSpan,
+    rightWallSpan,
     orientationBlock,
     legendBlock,
     jointTableBlock,

@@ -19,7 +19,12 @@ import {
   PlaneSurfaceConfig,
   Point2D,
   QIndexParameters,
+  QSystemParamKey,
+  RmrParameters,
+  RockMassClassificationMethodId,
   RockMassSummaryTable,
+  GsiParameters,
+  ParameterInputStatus,
   SessionLearningMemory,
   SurfaceTransform,
   SurfaceType,
@@ -32,7 +37,7 @@ import {
   VectorLayerVisibility,
 } from '../types/tunnel';
 import {
-  computeNonOverlappingLabelPlacement,
+   computeNonOverlappingLabelPlacement,
   DipDirectionSymbolGlyph,
   getGeologicalFeatureStrokeStyle,
   getStructuralSymbolMeta,
@@ -42,6 +47,11 @@ import {
   STRUCTURAL_GEOLOGICAL_SYMBOLS,
   StructuralGeologicalSymbolGlyph,
 } from '../engine/geologicalSymbolLibrary';
+import {
+  calculateBieniawskiRmr,
+  calculateHoekGsi,
+  evaluateQSystemWithValidation,
+} from '../engine/rockMassClassificationEngine';
 import {
   clipPolylineToSurface,
   createDefaultSurfaceTransform,
@@ -179,6 +189,14 @@ interface MappingWorkspaceProps {
   onResetAILearningFilters?: () => void;
   qIndexParams: QIndexParameters;
   onUpdateQIndexParams: (next: QIndexParameters) => void;
+  qParamStatus: Record<QSystemParamKey, ParameterInputStatus>;
+  onUpdateQParamStatus: (next: Record<QSystemParamKey, ParameterInputStatus>) => void;
+  selectedClassificationMethod: RockMassClassificationMethodId;
+  onChangeSelectedClassificationMethod: (method: RockMassClassificationMethodId) => void;
+  rmrParams: RmrParameters;
+  onUpdateRmrParams: (next: RmrParameters) => void;
+  gsiParams: GsiParameters;
+  onUpdateGsiParams: (next: GsiParameters) => void;
   rockMassSummary: RockMassSummaryTable;
   onUpdateRockMassSummary: (next: RockMassSummaryTable) => void;
   lithologyRegions: LithologyRegion[];
@@ -193,6 +211,7 @@ interface MappingWorkspaceProps {
   overbreakAnalysis: OverbreakUndercutAnalysis;
   onGenerateSampleAsBuiltProfile: () => void;
   onOpenProjectMemoryModal: (tab?: 'projects' | 'volumes' | 'geometries') => void;
+  onOpenCustomProfileEditor?: () => void;
 }
 
 type ActiveTool =
@@ -253,6 +272,14 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   onResetAILearningFilters,
   qIndexParams,
   onUpdateQIndexParams,
+  qParamStatus,
+  onUpdateQParamStatus,
+  selectedClassificationMethod,
+  onChangeSelectedClassificationMethod,
+  rmrParams,
+  onUpdateRmrParams,
+  gsiParams,
+  onUpdateGsiParams,
   rockMassSummary,
   onUpdateRockMassSummary,
   lithologyRegions,
@@ -267,6 +294,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   overbreakAnalysis,
   onGenerateSampleAsBuiltProfile,
   onOpenProjectMemoryModal,
+  onOpenCustomProfileEditor,
 }) => {
   const [activeTool, setActiveTool] = useState<ActiveTool>('select');
   const [selectedJointId, setSelectedJointId] = useState<string | null>(null);
@@ -2821,6 +2849,17 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             <span>Setup</span>
           </button>
 
+          {onOpenCustomProfileEditor && (
+            <button
+              onClick={onOpenCustomProfileEditor}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-cyan-950/90 hover:bg-cyan-900 text-cyan-200 rounded border border-cyan-600/70 transition-colors whitespace-nowrap"
+              title="Open Freeform Custom Profile, Irregular Cavern, Reference Drawing Tracer & Chainage Schedule Editor"
+            >
+              <Ruler className="w-3 h-3 text-cyan-400" />
+              Custom Profile / Cavern
+            </button>
+          )}
+
           <div className="h-3.5 w-px bg-slate-800 mx-0.5" />
 
           <button
@@ -3218,26 +3257,68 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             Tables ({jointSets.length})
           </button>
 
-          <button
-            onClick={() => {
-              if (showSetTableDrawer && geologyDrawerTab === 'q_index') {
-                setShowSetTableDrawer(false);
-              } else {
+          <div className="flex items-center bg-slate-900/90 border border-slate-700/80 rounded overflow-hidden">
+            <select
+              value={selectedClassificationMethod}
+              onChange={(e) => {
+                onChangeSelectedClassificationMethod(
+                  e.target.value as RockMassClassificationMethodId
+                );
                 setGeologyDrawerTab('q_index');
                 setShowSetTableDrawer(true);
                 setShowAILearningDrawer(false);
-              }
-            }}
-            className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap ${
-              showSetTableDrawer && geologyDrawerTab === 'q_index'
-                ? 'bg-cyan-700 text-white border-cyan-500'
-                : 'bg-slate-800/80 text-slate-300 border-slate-700/80 hover:bg-slate-800'
-            }`}
-            title="Barton NGI Tunnelling Quality Index (Q-System) Calculator"
-          >
-            <Calculator className="w-3 h-3 text-emerald-400" />
-            Q={qComputed.qValue.toFixed(1)}
-          </button>
+              }}
+              title="Select Rock Mass Classification Method for this Mapping Station"
+              className="bg-slate-950 text-indigo-300 text-[10px] font-mono font-bold px-1.5 py-1 border-r border-slate-700/80 outline-none cursor-pointer"
+            >
+              <option value="RMR">Method: RMR</option>
+              <option value="Q_SYSTEM">Method: Q-System</option>
+              <option value="BOTH_RMR_AND_Q">Method: RMR + Q</option>
+              <option value="GSI">Method: GSI</option>
+            </select>
+            <button
+              onClick={() => {
+                if (showSetTableDrawer && geologyDrawerTab === 'q_index') {
+                  setShowSetTableDrawer(false);
+                } else {
+                  setGeologyDrawerTab('q_index');
+                  setShowSetTableDrawer(true);
+                  setShowAILearningDrawer(false);
+                }
+              }}
+              className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono transition-colors whitespace-nowrap ${
+                showSetTableDrawer && geologyDrawerTab === 'q_index'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-slate-800/80 text-slate-200 hover:bg-slate-800'
+              }`}
+              title="Open Rock Mass Classification & Calculation Drawer (RMR / Q-System / GSI)"
+            >
+              <Calculator className="w-3 h-3 text-emerald-400" />
+              {(() => {
+                const rmrEval = calculateBieniawskiRmr(rmrParams);
+                const qEval = evaluateQSystemWithValidation(
+                  qIndexParams,
+                  geometry.width,
+                  qParamStatus
+                );
+                const gsiEval = calculateHoekGsi(gsiParams);
+                if (selectedClassificationMethod === 'RMR') {
+                  return rmrEval.isComplete && rmrEval.finalRmr !== null
+                    ? `RMR=${rmrEval.finalRmr}`
+                    : 'RMR=N/A';
+                }
+                if (selectedClassificationMethod === 'Q_SYSTEM') {
+                  return qEval.isComplete ? `Q=${qEval.qValue.toFixed(1)}` : 'Q=N/A';
+                }
+                if (selectedClassificationMethod === 'BOTH_RMR_AND_Q') {
+                  return `RMR=${rmrEval.finalRmr ?? 'N/A'} | Q=${
+                    qEval.isComplete ? qEval.qValue.toFixed(1) : 'N/A'
+                  }`;
+                }
+                return `GSI=${gsiEval.gsiValue ?? 'N/A'}`;
+              })()}
+            </button>
+          </div>
 
           {/* Vector Layer Visibility Popover Toggle */}
           <div className="relative">
@@ -3508,7 +3589,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           <span>
             MASTER:{' '}
             <strong className="text-slate-200">
-              {geometry.width.toFixed(2)}m W × {geometry.height.toFixed(2)}m H
+              {geometry.customProfile?.name ? `${geometry.customProfile.name} (${geometry.width.toFixed(2)}m×${geometry.height.toFixed(2)}m)` : `${geometry.width.toFixed(2)}m W × ${geometry.height.toFixed(2)}m H`}
             </strong>
           </span>
           <span>·</span>
@@ -7197,6 +7278,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           onClose={() => setShowSetTableDrawer(false)}
           geometry={geometry}
           settings={settings}
+          activeSurface={activeSurface}
           joints={joints}
           jointSets={jointSets}
           onUpdateJoints={onUpdateJointsWithHistory}
@@ -7204,6 +7286,14 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           onMergeJointSets={onMergeJointSets}
           qIndexParams={qIndexParams}
           onUpdateQIndexParams={onUpdateQIndexParams}
+          qParamStatus={qParamStatus}
+          onUpdateQParamStatus={onUpdateQParamStatus}
+          selectedMethod={selectedClassificationMethod}
+          onChangeSelectedMethod={onChangeSelectedClassificationMethod}
+          rmrParams={rmrParams}
+          onUpdateRmrParams={onUpdateRmrParams}
+          gsiParams={gsiParams}
+          onUpdateGsiParams={onUpdateGsiParams}
           rockMassSummary={rockMassSummary}
           onUpdateRockMassSummary={onUpdateRockMassSummary}
           onOpenExportSheet={onOpenExportSheet}

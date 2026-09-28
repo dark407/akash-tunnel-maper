@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ChainageProfileSegmentRecord,
   ConnectedSurveyProfile,
+  CustomTunnelProfileDefinition,
   Joint,
   JointSet,
   LithologyRegion,
@@ -10,7 +12,12 @@ import {
   PlaneSurfaceConfig,
   ProfileType,
   QIndexParameters,
+  QSystemParamKey,
+  RmrParameters,
+  RockMassClassificationMethodId,
   RockMassSummaryTable,
+  GsiParameters,
+  ParameterInputStatus,
   SavedDesignGeometryRecord,
   SavedProjectRecord,
   SessionLearningMemory,
@@ -23,9 +30,26 @@ import {
   VerifiedCorrectionRecord,
 } from './types/tunnel';
 import {
+  buildAuthoritativeCustomTunnelGeometry,
+  CUSTOM_PROFILE_PRESETS,
+  loadChainageProfileSchedule,
+  saveChainageProfileSchedule,
+  syncCustomProfileWithSurveyControlPoints,
+} from './engine/customProfileEngine';
+import {
+  FreeformCustomProfileEditor,
+  ProfileEditorMainTab,
+} from './components/FreeformCustomProfileEditor';
+import {
   analyzeOverbreakAndUndercut,
   generateRealisticSampleSurveyedProfile,
 } from './engine/overbreakEngine';
+import {
+  createDefaultGsiParameters,
+  createDefaultQParamStatus,
+  createDefaultRmrParameters,
+  saveStationClassificationRecord,
+} from './engine/rockMassClassificationEngine';
 import {
   computeSectionToSectionVolumes,
   createDefaultPlaneSurfaceConfig,
@@ -85,7 +109,13 @@ import {
   X,
 } from 'lucide-react';
 
-type ScreenStep = 'start' | 'geometry_manual' | 'geometry_cad' | 'drive_and_photos' | 'mapping';
+type ScreenStep =
+  | 'start'
+  | 'geometry_manual'
+  | 'geometry_cad'
+  | 'geometry_custom'
+  | 'drive_and_photos'
+  | 'mapping';
 
 const OFFLINE_DRAFT_STORAGE_KEY = 'akash_tunnel_mapper_field_draft_v1';
 
@@ -181,10 +211,17 @@ export default function App() {
     Record<string, Partial<JointSet>>
   >({});
 
-  // Barton's Q-Index & Rock Mass Summary Table State
+  // Barton's Q-Index, Bieniawski RMR, GSI & Rock Mass Classification Method State
+  const [selectedClassificationMethod, setSelectedClassificationMethod] =
+    useState<RockMassClassificationMethodId>('RMR');
   const [qIndexParams, setQIndexParams] = useState<QIndexParameters>(() =>
     createDefaultQIndexParameters()
   );
+  const [qParamStatus, setQParamStatus] = useState<Record<QSystemParamKey, ParameterInputStatus>>(
+    () => createDefaultQParamStatus()
+  );
+  const [rmrParams, setRmrParams] = useState<RmrParameters>(() => createDefaultRmrParameters());
+  const [gsiParams, setGsiParams] = useState<GsiParameters>(() => createDefaultGsiParameters());
   const [rockMassSummary, setRockMassSummary] = useState<RockMassSummaryTable>(() =>
     createDefaultRockMassSummary('Unmapped Rock Mass')
   );
@@ -216,6 +253,13 @@ export default function App() {
   const [savedProjects, setSavedProjects] = useState<SavedProjectRecord[]>(() =>
     loadSavedProjectsFromMemory()
   );
+  const [chainageSchedule, setChainageSchedule] = useState<ChainageProfileSegmentRecord[]>(() =>
+    loadChainageProfileSchedule()
+  );
+  const [customEditorInitialTab, setCustomEditorInitialTab] =
+    useState<ProfileEditorMainTab>('freeform_canvas');
+  const [returnScreenFromCustomEditor, setReturnScreenFromCustomEditor] =
+    useState<ScreenStep>('start');
   const [isProjectMemoryModalOpen, setIsProjectMemoryModalOpen] = useState<boolean>(false);
   const [projectMemoryTab, setProjectMemoryTab] = useState<
     'projects' | 'volumes' | 'geometries'
@@ -330,6 +374,36 @@ export default function App() {
     }
   }, []);
 
+  // Automatically persist Station Rock Mass Classification Record on change
+  useEffect(() => {
+    saveStationClassificationRecord({
+      project: settings.locationName || 'Underground Tunnel Works',
+      tunnel: settings.tunnelName,
+      location: settings.locationName || 'Underground Tunnel Works',
+      chainageRd: settings.faceChainage || settings.chainage,
+      surfaceSection: activeSurface,
+      selectedMethod: selectedClassificationMethod,
+      qParamStatus,
+      qUserConfirmed: Boolean(qIndexParams.userConfirmed),
+      qConfirmedAt: qIndexParams.confirmedAt,
+      rmrParams,
+      gsiParams,
+      dateVersion: new Date().toISOString(),
+    });
+  }, [
+    settings.locationName,
+    settings.tunnelName,
+    settings.faceChainage,
+    settings.chainage,
+    activeSurface,
+    selectedClassificationMethod,
+    qParamStatus,
+    qIndexParams.userConfirmed,
+    qIndexParams.confirmedAt,
+    rmrParams,
+    gsiParams,
+  ]);
+
   // Save offline field draft for underground / Process Later workflow (Section 20)
   const handleSaveOfflineDraft = useCallback(() => {
     try {
@@ -340,7 +414,11 @@ export default function App() {
         photos,
         joints,
         customJointSetOverrides,
+        selectedClassificationMethod,
         qIndexParams,
+        qParamStatus,
+        rmrParams,
+        gsiParams,
         rockMassSummary,
         lithologyRegions,
         controlPoints,
@@ -356,7 +434,24 @@ export default function App() {
     } catch {
       setStatusMessage('Warning: Browser localStorage quota exceeded while saving photo draft.');
     }
-  }, [geometry, settings, photos, joints, customJointSetOverrides, qIndexParams, rockMassSummary, lithologyRegions, controlPoints, placedSymbols, sessionMemory]);
+  }, [
+    geometry,
+    settings,
+    photos,
+    joints,
+    customJointSetOverrides,
+    selectedClassificationMethod,
+    qIndexParams,
+    qParamStatus,
+    rmrParams,
+    gsiParams,
+    rockMassSummary,
+    lithologyRegions,
+    controlPoints,
+    surveyProfile,
+    placedSymbols,
+    sessionMemory,
+  ]);
 
   // Resume saved offline field draft
   const handleResumeOfflineDraft = useCallback(() => {
@@ -370,7 +465,12 @@ export default function App() {
       if (Array.isArray(parsed.joints)) setJoints(parsed.joints);
       if (parsed.customJointSetOverrides)
         setCustomJointSetOverrides(parsed.customJointSetOverrides);
+      if (parsed.selectedClassificationMethod)
+        setSelectedClassificationMethod(parsed.selectedClassificationMethod);
       if (parsed.qIndexParams) setQIndexParams(parsed.qIndexParams);
+      if (parsed.qParamStatus) setQParamStatus(parsed.qParamStatus);
+      if (parsed.rmrParams) setRmrParams(parsed.rmrParams);
+      if (parsed.gsiParams) setGsiParams(parsed.gsiParams);
       if (parsed.rockMassSummary) setRockMassSummary(parsed.rockMassSummary);
       if (Array.isArray(parsed.lithologyRegions)) setLithologyRegions(parsed.lithologyRegions);
       if (Array.isArray(parsed.controlPoints)) setControlPoints(parsed.controlPoints);
@@ -416,6 +516,64 @@ export default function App() {
     [savedProjects]
   );
 
+  // Persist Chainage Profile Schedule & automatically sync Custom Profile if linked Survey Control Points (CP1..CPn) move
+  const handleUpdateChainageSchedule = useCallback((next: ChainageProfileSegmentRecord[]) => {
+    setChainageSchedule(next);
+    saveChainageProfileSchedule(next);
+  }, []);
+
+  useEffect(() => {
+    if (!geometry.customProfile || controlPoints.length === 0) return;
+    const { updatedProfile, changed } = syncCustomProfileWithSurveyControlPoints(
+      geometry.customProfile,
+      controlPoints
+    );
+    if (changed) {
+      const nextGeom = buildAuthoritativeCustomTunnelGeometry(updatedProfile, {
+        rdStartMeters: geometry.rdStartMeters,
+        rdEndMeters: geometry.rdEndMeters,
+      });
+      setGeometry(nextGeom);
+    }
+  }, [controlPoints, geometry.customProfile, geometry.rdStartMeters, geometry.rdEndMeters]);
+
+  const handleSyncProfileToSurveyControlPoints = useCallback(
+    (profileDef: CustomTunnelProfileDefinition) => {
+      const faceCPs: SurveyControlPoint[] = profileDef.controlPoints.map((pt, idx) => {
+        const label = pt.surveyControlPointId || `CP${idx + 1}`;
+        return {
+          id: `cp-custom-${pt.id}`,
+          label,
+          surface: 'face',
+          point: { x: Number(pt.x.toFixed(3)), y: Number(pt.y.toFixed(3)) },
+          color: '#22D3EE',
+          visible: true,
+          locked: Boolean(pt.locked),
+        };
+      });
+      setControlPoints((prev) => [
+        ...prev.filter((c) => c.surface !== 'face'),
+        ...faceCPs,
+      ]);
+      setSurveyProfile((prev) => ({
+        ...prev,
+        surface: 'face',
+        orderedControlPointIds: faceCPs.map((c) => c.id),
+        isClosed: true,
+        visible: true,
+      }));
+      const nextGeom = buildAuthoritativeCustomTunnelGeometry(profileDef, {
+        rdStartMeters: geometry.rdStartMeters,
+        rdEndMeters: geometry.rdEndMeters,
+      });
+      setGeometry(nextGeom);
+      setStatusMessage(
+        `Placed & linked ${faceCPs.length} Survey Control Points (CP1→CP${faceCPs.length}) on custom profile "${profileDef.name}". Moving any CP updates the profile automatically.`
+      );
+    },
+    [geometry.rdStartMeters, geometry.rdEndMeters]
+  );
+
   const handleOpenProjectMemoryModal = useCallback(
     (tab: 'projects' | 'volumes' | 'geometries' = 'projects') => {
       setProjectMemoryTab(tab);
@@ -459,6 +617,10 @@ export default function App() {
       joints: clusteredJoints,
       customJointSetOverrides,
       qIndexParams,
+      selectedClassificationMethod,
+      rmrParams,
+      gsiParams,
+      qParamStatus,
       rockMassSummary,
       lithologyRegions,
       controlPoints,
@@ -491,6 +653,10 @@ export default function App() {
     clusteredJoints,
     customJointSetOverrides,
     qIndexParams,
+    selectedClassificationMethod,
+    rmrParams,
+    gsiParams,
+    qParamStatus,
     rockMassSummary,
     lithologyRegions,
     controlPoints,
@@ -576,6 +742,18 @@ export default function App() {
     setJoints(record.joints || []);
     setCustomJointSetOverrides(record.customJointSetOverrides || {});
     setQIndexParams(record.qIndexParams);
+    if (record.selectedClassificationMethod) {
+      setSelectedClassificationMethod(record.selectedClassificationMethod);
+    }
+    if (record.rmrParams) {
+      setRmrParams(record.rmrParams);
+    }
+    if (record.gsiParams) {
+      setGsiParams(record.gsiParams);
+    }
+    if (record.qParamStatus) {
+      setQParamStatus(record.qParamStatus);
+    }
     setRockMassSummary(record.rockMassSummary);
     setLithologyRegions(record.lithologyRegions || []);
     setControlPoints(record.controlPoints || []);
@@ -1355,6 +1533,21 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => {
+                setCustomEditorInitialTab('freeform_canvas');
+                setReturnScreenFromCustomEditor('start');
+                setScreen('geometry_custom');
+              }}
+              className={`w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-mono font-semibold border rounded-lg transition-colors cursor-pointer ${
+                isLight
+                  ? 'bg-sky-50 hover:bg-sky-100 text-sky-950 border-sky-400'
+                  : 'bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-200 border-cyan-600/70'
+              }`}
+            >
+              [ Freeform Custom Profile / Cavern Editor ]
+            </button>
+
+            <button
               onClick={() => setScreen('geometry_cad')}
               className={`w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-mono font-semibold border rounded-lg transition-colors cursor-pointer ${
                 isLight
@@ -1453,11 +1646,41 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5 items-center flex-1 min-h-0 overflow-y-auto pr-0.5">
             <div className="space-y-3 text-xs font-mono">
               <label className="block space-y-1">
-                <span className="text-slate-400">Tunnel Excavation Shape</span>
+                <span className="text-slate-400">Tunnel / Cavern Excavation Shape</span>
                 <select
                   value={manProfileType}
                   onChange={(e) => {
                     const nextType = e.target.value as ProfileType;
+                    if (
+                      nextType === 'freeform_custom' ||
+                      nextType === 'powerhouse_cavern' ||
+                      nextType === 'transformer_hall' ||
+                      nextType === 'cavern_junction' ||
+                      nextType === 'asymmetric_cavern'
+                    ) {
+                      const presetMap: Record<string, string> = {
+                        powerhouse_cavern: 'powerhouse_cavern',
+                        transformer_hall: 'transformer_hall',
+                        cavern_junction: 'cavern_junction',
+                        asymmetric_cavern: 'asymmetric_sloping_crown',
+                      };
+                      const presetKey = presetMap[nextType];
+                      if (presetKey) {
+                        const found = CUSTOM_PROFILE_PRESETS.find((p) => p.id === presetKey);
+                        if (found) {
+                          const built = buildAuthoritativeCustomTunnelGeometry(found.createProfile());
+                          setGeometry(built);
+                          setManWidth(String(built.width));
+                          setManHeight(String(built.height));
+                          setManWallHeight(String(built.wallHeight));
+                          setManCrownRadius(String(built.crownRadius));
+                        }
+                      }
+                      setCustomEditorInitialTab('freeform_canvas');
+                      setReturnScreenFromCustomEditor('geometry_manual');
+                      setScreen('geometry_custom');
+                      return;
+                    }
                     setManProfileType(nextType);
                     const c = enforceStrictTunnelGeometryConstraints(
                       parseFloat(manWidth) || 8.4,
@@ -1474,8 +1697,48 @@ export default function App() {
                   <option value="horseshoe">Horseshoe Profile (Curved Sidewalls)</option>
                   <option value="circular">Circular / TBM Profile</option>
                   <option value="flat_arch">Modified Flat-Arch / Basket-Handle</option>
+                  <option value="powerhouse_cavern">
+                    Powerhouse Cavern (Multi-Radius Arch + Stepped Walls)
+                  </option>
+                  <option value="transformer_hall">
+                    Transformer Hall Cavern (Asymmetric Wall Heights)
+                  </option>
+                  <option value="cavern_junction">
+                    Cavern Junction &amp; Enlarged Side-Chamber
+                  </option>
+                  <option value="asymmetric_cavern">
+                    Asymmetric Sloping Crown &amp; Inclined Wall
+                  </option>
+                  <option value="freeform_custom">
+                    Freeform Custom Vector Profile (Draw / Trace / Coordinates)
+                  </option>
                 </select>
               </label>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomEditorInitialTab('freeform_canvas');
+                    setReturnScreenFromCustomEditor('geometry_manual');
+                    setScreen('geometry_custom');
+                  }}
+                  className="flex-1 py-1.5 px-2.5 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 border border-cyan-600/70 rounded text-[11px] font-semibold cursor-pointer"
+                >
+                  Open Freeform Custom Profile &amp; Cavern Editor
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomEditorInitialTab('trace_image');
+                    setReturnScreenFromCustomEditor('geometry_manual');
+                    setScreen('geometry_custom');
+                  }}
+                  className="py-1.5 px-2.5 bg-amber-950/70 hover:bg-amber-900/80 text-amber-200 border border-amber-600/70 rounded text-[11px] font-semibold cursor-pointer"
+                >
+                  Trace Engineering Drawing
+                </button>
+              </div>
 
               <div className="grid grid-cols-2 gap-2.5">
                 <label className="block space-y-1">
@@ -1746,13 +2009,25 @@ export default function App() {
           </div>
 
           <div className="flex items-center justify-between pt-2.5 border-t border-slate-800 shrink-0">
-            <button
-              onClick={() => handleOpenProjectMemoryModal('geometries')}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono text-cyan-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded"
-            >
-              <Database className="w-3.5 h-3.5 text-cyan-400" />
-              Load Saved Geometry ({savedGeometries.length})
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleOpenProjectMemoryModal('geometries')}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono text-cyan-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded"
+              >
+                <Database className="w-3.5 h-3.5 text-cyan-400" />
+                Load Saved Geometry ({savedGeometries.length})
+              </button>
+              <button
+                onClick={() => {
+                  setCustomEditorInitialTab('freeform_canvas');
+                  setReturnScreenFromCustomEditor('geometry_cad');
+                  setScreen('geometry_custom');
+                }}
+                className="px-3 py-2 text-xs font-mono text-amber-200 hover:text-white bg-amber-950/60 hover:bg-amber-900/70 border border-amber-600/60 rounded"
+              >
+                Edit Control Points in Custom Editor
+              </button>
+            </div>
             <button
               onClick={() => setScreen('drive_and_photos')}
               className="flex items-center gap-2 px-4 sm:px-5 py-2 text-xs font-mono font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded transition-colors"
@@ -1762,6 +2037,69 @@ export default function App() {
             </button>
           </div>
         </div>
+        {projectMemoryModalNode}
+      </main>
+    );
+  }
+
+  // ============================================================================
+  // SCREEN 2C: FREEFORM CUSTOM PROFILE, CAVERN & DRAWING TRACE EDITOR
+  // ============================================================================
+  if (screen === 'geometry_custom') {
+    return (
+      <main className="h-dvh w-full flex flex-col bg-[#0B0E14] text-slate-100 overflow-hidden">
+        <FreeformCustomProfileEditor
+          geometry={geometry}
+          settings={settings}
+          onUpdateSettings={setSettings}
+          onConfirmGeometry={(confirmedGeom, proceedToNext = true) => {
+            setGeometry(confirmedGeom);
+            setManWidth(String(confirmedGeom.width));
+            setManHeight(String(confirmedGeom.height));
+            setManWallHeight(String(confirmedGeom.wallHeight));
+            setManCrownRadius(String(confirmedGeom.crownRadius));
+            setManProfileType(confirmedGeom.crownGeometry);
+            setStatusMessage(
+              `Confirmed authoritative custom profile "${confirmedGeom.customProfile?.name || confirmedGeom.profileName || 'Custom Profile'}" (${confirmedGeom.width.toFixed(3)}m W × ${confirmedGeom.height.toFixed(3)}m H · Area ${(confirmedGeom.designAreaSqMeters || 0).toFixed(2)}m² · Perim ${(confirmedGeom.totalPerimeterMeters || 0).toFixed(2)}m).`
+            );
+            if (proceedToNext) {
+              setScreen(
+                returnScreenFromCustomEditor === 'mapping' ? 'mapping' : 'drive_and_photos'
+              );
+            }
+          }}
+          onBack={() => setScreen(returnScreenFromCustomEditor)}
+          onUploadCADFile={handleCADFileUpload}
+          onDownloadSampleDXF={handleDownloadSampleDXF}
+          cadStatus={cadStatus}
+          savedGeometries={savedGeometries}
+          onSaveGeometryToLibrary={(customName, geomToSave) => {
+            const next = saveDesignGeometryToLibrary({
+              name: customName,
+              tunnelName: settings.tunnelName,
+              location: settings.locationName || 'Underground Tunnel Works',
+              chainage: settings.faceChainage || settings.chainage,
+              geometry: geomToSave,
+            });
+            setSavedGeometries(next);
+          }}
+          onLoadSavedGeometry={(rec) => {
+            setGeometry(rec.geometry);
+            setManWidth(String(rec.geometry.width));
+            setManHeight(String(rec.geometry.height));
+            setManWallHeight(String(rec.geometry.wallHeight));
+            setManCrownRadius(String(rec.geometry.crownRadius));
+          }}
+          onDeleteSavedGeometry={(id) => {
+            const next = deleteSavedDesignGeometry(id);
+            setSavedGeometries(next);
+          }}
+          chainageSchedule={chainageSchedule}
+          onUpdateChainageSchedule={handleUpdateChainageSchedule}
+          surveyControlPoints={controlPoints}
+          onSyncProfileToSurveyControlPoints={handleSyncProfileToSurveyControlPoints}
+          initialTab={customEditorInitialTab}
+        />
         {projectMemoryModalNode}
       </main>
     );
@@ -1837,7 +2175,7 @@ export default function App() {
                 </label>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono text-xs pt-2 border-t border-slate-800/80">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 font-mono text-xs pt-2 border-t border-slate-800/80">
                 <label className="block space-y-1">
                   <span className="text-slate-400">Location / Project Site</span>
                   <input
@@ -1882,6 +2220,23 @@ export default function App() {
                     className="w-full px-2.5 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
                   />
                 </label>
+                <label className="block space-y-1">
+                  <span className="text-indigo-300 font-semibold">Classification Method</span>
+                  <select
+                    value={selectedClassificationMethod}
+                    onChange={(e) =>
+                      setSelectedClassificationMethod(
+                        e.target.value as RockMassClassificationMethodId
+                      )
+                    }
+                    className="w-full px-2.5 py-1 bg-slate-950 border border-indigo-500/60 rounded text-indigo-200 font-semibold"
+                  >
+                    <option value="RMR">RMR (Bieniawski)</option>
+                    <option value="Q_SYSTEM">Q-System (Barton NGI)</option>
+                    <option value="BOTH_RMR_AND_Q">Both (RMR + Q-System)</option>
+                    <option value="GSI">GSI (Hoek &amp; Marinos)</option>
+                  </select>
+                </label>
               </div>
             </div>
 
@@ -1899,22 +2254,22 @@ export default function App() {
                     {
                       id: 'face',
                       title: '1. TUNNEL FACE',
-                      desc: `Fits ${geometry.width}m × ${geometry.height}m cross-section`,
+                      desc: `Fits ${geometry.customProfile?.name ? `${geometry.customProfile.name} (${geometry.width}m × ${geometry.height}m)` : `${geometry.width}m × ${geometry.height}m cross-section`}`,
                     },
                     {
                       id: 'leftWall',
                       title: '2. LEFT WALL',
-                      desc: `Fits ${settings.roundLength}m pull × ${geometry.wallHeight}m wall`,
+                      desc: `Fits ${settings.roundLength}m pull × ${(geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight).toFixed(2)}m wall`,
                     },
                     {
                       id: 'rightWall',
                       title: '3. RIGHT WALL',
-                      desc: `Fits ${settings.roundLength}m pull × ${geometry.wallHeight}m wall`,
+                      desc: `Fits ${settings.roundLength}m pull × ${(geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight).toFixed(2)}m wall`,
                     },
                     {
                       id: 'crown',
                       title: '4. CROWN',
-                      desc: `Fits ${geometry.crownArcLength}m arch × ${settings.roundLength}m pull`,
+                      desc: `Fits ${geometry.crownArcLength.toFixed(2)}m arch × ${settings.roundLength}m pull`,
                     },
                   ] as { id: SurfaceType; title: string; desc: string }[]
                 ).map((slot) => {
@@ -2143,6 +2498,14 @@ export default function App() {
         onResetAILearningFilters={handleResetAILearningFilters}
         qIndexParams={qIndexParams}
         onUpdateQIndexParams={setQIndexParams}
+        qParamStatus={qParamStatus}
+        onUpdateQParamStatus={setQParamStatus}
+        selectedClassificationMethod={selectedClassificationMethod}
+        onChangeSelectedClassificationMethod={setSelectedClassificationMethod}
+        rmrParams={rmrParams}
+        onUpdateRmrParams={setRmrParams}
+        gsiParams={gsiParams}
+        onUpdateGsiParams={setGsiParams}
         rockMassSummary={rockMassSummary}
         onUpdateRockMassSummary={setRockMassSummary}
         lithologyRegions={lithologyRegions}
@@ -2174,6 +2537,11 @@ export default function App() {
         overbreakAnalysis={overbreakAnalysis}
         onGenerateSampleAsBuiltProfile={handleGenerateSampleAsBuiltProfile}
         onOpenProjectMemoryModal={handleOpenProjectMemoryModal}
+        onOpenCustomProfileEditor={() => {
+          setCustomEditorInitialTab('freeform_canvas');
+          setReturnScreenFromCustomEditor('mapping');
+          setScreen('geometry_custom');
+        }}
       />
 
       <EngineeringSheetModal
@@ -2191,6 +2559,11 @@ export default function App() {
           );
         }}
         qIndexParams={qIndexParams}
+        qParamStatus={qParamStatus}
+        selectedClassificationMethod={selectedClassificationMethod}
+        onChangeSelectedClassificationMethod={setSelectedClassificationMethod}
+        rmrParams={rmrParams}
+        gsiParams={gsiParams}
         rockMassSummary={rockMassSummary}
         lithologyRegions={lithologyRegions}
         controlPoints={controlPoints}

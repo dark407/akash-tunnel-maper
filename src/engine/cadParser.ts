@@ -1,13 +1,23 @@
-import { Point2D, TunnelGeometry } from '../types/tunnel';
-import { createTunnelGeometry } from './geometryEngine';
+import {
+  CustomTunnelProfileDefinition,
+  Point2D,
+  ProfileControlPoint,
+  ProfileSegment,
+  TunnelGeometry,
+} from '../types/tunnel';
+import { buildAuthoritativeCustomTunnelGeometry } from './customProfileEngine';
 
 interface RawSegment {
   pts: Point2D[];
+  isArc?: boolean;
+  bulge?: number;
 }
 
 /**
  * Parses a DXF (or ASCII CAD) string to extract real-world tunnel cross-section geometry.
- * Supports LINE, LWPOLYLINE, POLYLINE/VERTEX, ARC, and CIRCLE entities.
+ * Supports LINE, LWPOLYLINE (with bulge 42 arcs), POLYLINE/VERTEX, ARC, and CIRCLE entities.
+ * Preserves non-convex stepped caverns, side chambers, and asymmetric walls into editable
+ * `CustomTunnelProfileDefinition` control points and segments.
  */
 export function parseDXFStringToGeometry(dxfText: string, fileName: string): TunnelGeometry {
   const lines = dxfText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
@@ -64,6 +74,7 @@ export function parseDXFStringToGeometry(dxfText: string, fileName: string): Tun
             { x: x1, y: y1 },
             { x: x2, y: y2 },
           ],
+          isArc: false,
         });
       }
       continue;
@@ -85,7 +96,7 @@ export function parseDXFStringToGeometry(dxfText: string, fileName: string): Tun
         idx++;
       }
       if (polyPts.length >= 2) {
-        segments.push({ pts: polyPts });
+        segments.push({ pts: polyPts, isArc: false });
       }
       continue;
     }
@@ -111,7 +122,9 @@ export function parseDXFStringToGeometry(dxfText: string, fileName: string): Tun
       let sA = startAngle;
       let eA = endAngle;
       if (eA < sA) eA += 360;
-      const steps = 32;
+      const sweepRad = ((eA - sA) * Math.PI) / 180;
+      const bulge = Math.tan(sweepRad / 4);
+      const steps = 24;
       for (let k = 0; k <= steps; k++) {
         const deg = sA + (k / steps) * (eA - sA);
         const rad = (deg * Math.PI) / 180;
@@ -120,7 +133,7 @@ export function parseDXFStringToGeometry(dxfText: string, fileName: string): Tun
           y: cy + r * Math.sin(rad),
         });
       }
-      segments.push({ pts: arcPts });
+      segments.push({ pts: arcPts, isArc: true, bulge });
       continue;
     }
 
@@ -153,47 +166,161 @@ export function parseDXFStringToGeometry(dxfText: string, fileName: string): Tun
     if (pt.y > maxY) maxY = pt.y;
   }
 
-  let rawWidth = maxX - minX;
-  let rawHeight = maxY - minY;
+  const rawWidth = maxX - minX;
 
-  // Detect unit scale: if width > 100, CAD file is in millimeters (or cm)
+  // Detect unit scale: if width > 500, CAD file is in millimeters (or cm)
   let unitScale = 1.0;
   if (rawWidth > 500) {
     unitScale = 0.001; // mm -> m
-  } else if (rawWidth > 50) {
+  } else if (rawWidth > 80) {
     unitScale = 0.01; // cm -> m
   }
 
-  const widthMeters = Math.max(2.0, Number((rawWidth * unitScale).toFixed(2)));
-  const heightMeters = Math.max(2.0, Number((rawHeight * unitScale).toFixed(2)));
-
-  // Normalize points to tunnel coordinate frame: x in [-width/2, +width/2], y in [0, height]
+  // Normalize points to tunnel coordinate frame: x centered around 0, y starting at 0 (invert)
   const centerX = (minX + maxX) / 2;
-  const normalizedPts: Point2D[] = allPts.map((p) => ({
+  const normPt = (p: Point2D): Point2D => ({
     x: Number(((p.x - centerX) * unitScale).toFixed(4)),
     y: Number(((p.y - minY) * unitScale).toFixed(4)),
+  });
+
+  // Chain connected segments topologically so non-convex stepped caverns are preserved
+  const normSegments = segments.map((s) => ({
+    ...s,
+    pts: s.pts.map(normPt),
   }));
 
-  // Order boundary points clockwise starting from bottom-left invert
-  const orderedPolygon = orderCrossSectionPerimeter(normalizedPts);
+  const orderedPolygon = chainOrOrderCrossSectionSegments(normSegments);
 
-  // Estimate springline / wallHeight where width is maximum or arch curvature begins
-  const wallHeight = estimateWallHeight(orderedPolygon, heightMeters);
-  const archRise = Math.max(0.5, heightMeters - wallHeight);
-  const crownRadius = Number(
-    (((widthMeters / 2) ** 2 + archRise ** 2) / (2 * archRise)).toFixed(2)
-  );
+  // Extract editable control points from key corners & arc endpoints (up to 18 control points)
+  const keyVertices = extractEditableControlPointsFromPolygon(orderedPolygon);
+  const controlPoints: ProfileControlPoint[] = keyVertices.map((pt, k) => ({
+    id: `P${k + 1}`,
+    label: `P${k + 1}`,
+    x: Number(pt.x.toFixed(3)),
+    y: Number(pt.y.toFixed(3)),
+    role: 'corner',
+  }));
 
-  return createTunnelGeometry(
-    widthMeters,
-    heightMeters,
-    wallHeight,
-    'custom_cad',
-    crownRadius,
-    fileName.toLowerCase().endsWith('.dwg') ? 'dwg' : 'dxf',
-    fileName,
-    orderedPolygon
-  );
+  const profileSegments: ProfileSegment[] = controlPoints.map((cp, k) => {
+    const nextCp = controlPoints[(k + 1) % controlPoints.length];
+    return {
+      id: `S${k + 1}`,
+      fromPointId: cp.id,
+      toPointId: nextCp.id,
+      type: 'line',
+    };
+  });
+
+  const customProfile: CustomTunnelProfileDefinition = {
+    id: `prof-cad-${Date.now()}`,
+    name: fileName.replace(/\.(dxf|dwg)$/i, ''),
+    category: 'dxf_import',
+    controlPoints,
+    segments: profileSegments,
+    isClosed: true,
+    version: 'v1.0',
+    updatedAt: new Date().toISOString(),
+  };
+
+  const built = buildAuthoritativeCustomTunnelGeometry(customProfile, {
+    source: fileName.toLowerCase().endsWith('.dwg') ? 'dwg' : 'dxf',
+    cadFileName: fileName,
+  });
+
+  return {
+    ...built,
+    crossSectionPoints: orderedPolygon,
+  };
+}
+
+function chainOrOrderCrossSectionSegments(segments: RawSegment[]): Point2D[] {
+  if (segments.length === 1 && segments[0].pts.length >= 3) {
+    return deduplicateSequentialPoints(segments[0].pts);
+  }
+
+  // Try topological endpoint chaining first (preserves stepped walls and side chambers)
+  const used = new Set<number>();
+  const chain: Point2D[] = [...segments[0].pts];
+  used.add(0);
+
+  for (let step = 1; step < segments.length; step++) {
+    const tail = chain[chain.length - 1];
+    let bestIdx = -1;
+    let bestReverse = false;
+    let bestDist = Infinity;
+
+    for (let j = 0; j < segments.length; j++) {
+      if (used.has(j)) continue;
+      const sPts = segments[j].pts;
+      const dStart = Math.hypot(sPts[0].x - tail.x, sPts[0].y - tail.y);
+      const dEnd = Math.hypot(
+        sPts[sPts.length - 1].x - tail.x,
+        sPts[sPts.length - 1].y - tail.y
+      );
+      if (dStart < bestDist) {
+        bestDist = dStart;
+        bestIdx = j;
+        bestReverse = false;
+      }
+      if (dEnd < bestDist) {
+        bestDist = dEnd;
+        bestIdx = j;
+        bestReverse = true;
+      }
+    }
+
+    if (bestIdx !== -1 && bestDist < 1.5) {
+      used.add(bestIdx);
+      const nextPts = bestReverse
+        ? [...segments[bestIdx].pts].reverse()
+        : segments[bestIdx].pts;
+      chain.push(...nextPts);
+    } else {
+      break;
+    }
+  }
+
+  if (used.size === segments.length && chain.length >= 4) {
+    return deduplicateSequentialPoints(chain);
+  }
+
+  // Fallback to perimeter ordering
+  const allPts: Point2D[] = [];
+  for (const s of segments) allPts.push(...s.pts);
+  return orderCrossSectionPerimeter(allPts);
+}
+
+function deduplicateSequentialPoints(pts: Point2D[]): Point2D[] {
+  const out: Point2D[] = [];
+  for (const p of pts) {
+    if (out.length === 0 || Math.hypot(p.x - out[out.length - 1].x, p.y - out[out.length - 1].y) > 0.03) {
+      out.push(p);
+    }
+  }
+  if (out.length >= 3 && Math.hypot(out[0].x - out[out.length - 1].x, out[0].y - out[out.length - 1].y) <= 0.03) {
+    out.pop();
+  }
+  return out;
+}
+
+function extractEditableControlPointsFromPolygon(pts: Point2D[]): Point2D[] {
+  if (pts.length <= 14) return pts;
+  const result: Point2D[] = [];
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const prev = pts[(i - 1 + n) % n];
+    const curr = pts[i];
+    const next = pts[(i + 1) % n];
+    const a1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
+    const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
+    let diff = Math.abs(a2 - a1);
+    if (diff > Math.PI) diff = 2 * Math.PI - diff;
+    // Keep sharp corners or sample every ~6th vertex along curves
+    if (diff > 0.22 || i % Math.max(2, Math.floor(n / 12)) === 0) {
+      result.push(curr);
+    }
+  }
+  return result.length >= 4 ? result.slice(0, 20) : pts.slice(0, 12);
 }
 
 function orderCrossSectionPerimeter(points: Point2D[]): Point2D[] {

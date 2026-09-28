@@ -184,13 +184,26 @@ export function buildTunnelCrossSection(
   const halfW = safeWidth / 2;
   const archRise = Math.max(0.25, safeHeight - safeWallHeight);
 
-  if (profileType === 'custom_cad' && customPoints && customPoints.length >= 4) {
-    const crownArcLength = computeCrownArcLength(customPoints, safeWallHeight);
+  const isCustomProfileType =
+    profileType === 'custom_cad' ||
+    profileType === 'freeform_custom' ||
+    profileType === 'powerhouse_cavern' ||
+    profileType === 'transformer_hall' ||
+    profileType === 'cavern_junction' ||
+    profileType === 'asymmetric_cavern';
+
+  if (isCustomProfileType && customPoints && customPoints.length >= 3) {
+    const xs = customPoints.map((p) => p.x);
+    const ys = customPoints.map((p) => p.y);
+    const actualW = Math.max(1.0, Math.max(...xs) - Math.min(...xs));
+    const actualH = Math.max(1.0, Math.max(...ys) - Math.min(...ys));
+    const safeWallH = Math.max(0.5, Math.min(actualH * 0.92, wallHeight || actualH * 0.58));
+    const crownArcLength = computeCrownArcLength(customPoints, safeWallH);
     return {
       crossSectionPoints: customPoints,
       crownArcLength: Number(crownArcLength.toFixed(2)),
-      effectiveCrownRadius: constrained.crownRadius,
-      constrainedWallHeight: safeWallHeight,
+      effectiveCrownRadius: Number((crownRadius || actualW * 0.55).toFixed(2)),
+      constrainedWallHeight: Number(safeWallH.toFixed(2)),
     };
   }
 
@@ -311,7 +324,7 @@ export function createTunnelGeometry(
   wallHeight: number,
   crownGeometry: ProfileType,
   crownRadius?: number,
-  source: 'manual' | 'dxf' | 'dwg' = 'manual',
+  source: TunnelGeometry['source'] = 'manual',
   cadFileName?: string,
   customPoints?: Point2D[]
 ): TunnelGeometry {
@@ -329,10 +342,37 @@ export function createTunnelGeometry(
     customPoints
   );
 
+  const xs = crossSectionPoints.map((p) => p.x);
+  const ys = crossSectionPoints.map((p) => p.y);
+  const minX = xs.length > 0 ? Number(Math.min(...xs).toFixed(3)) : -width / 2;
+  const maxX = xs.length > 0 ? Number(Math.max(...xs).toFixed(3)) : width / 2;
+  const minY = ys.length > 0 ? Number(Math.min(...ys).toFixed(3)) : 0;
+  const maxY = ys.length > 0 ? Number(Math.max(...ys).toFixed(3)) : height;
+
+  // Compute exact closed perimeter and Shoelace area from crossSectionPoints
+  let totalPerimeter = 0;
+  let shoelaceSum = 0;
+  for (let i = 0; i < crossSectionPoints.length; i++) {
+    const a = crossSectionPoints[i];
+    const b = crossSectionPoints[(i + 1) % crossSectionPoints.length];
+    totalPerimeter += Math.hypot(b.x - a.x, b.y - a.y);
+    shoelaceSum += a.x * b.y - b.x * a.y;
+  }
+
   return {
-    width: Number(Math.max(1.5, width).toFixed(2)),
-    height: Number(Math.max(1.5, height).toFixed(2)),
-    wallHeight: Number(constrainedWallHeight.toFixed(2)),
+    width: Number(Math.max(1.5, maxX - minX || width).toFixed(3)),
+    height: Number(Math.max(1.5, maxY - minY || height).toFixed(3)),
+    wallHeight: Number(constrainedWallHeight.toFixed(3)),
+    leftWallHeight: Number(constrainedWallHeight.toFixed(3)),
+    rightWallHeight: Number(constrainedWallHeight.toFixed(3)),
+    leftWallArcLength: Number(constrainedWallHeight.toFixed(3)),
+    rightWallArcLength: Number(constrainedWallHeight.toFixed(3)),
+    totalPerimeterMeters: Number(totalPerimeter.toFixed(3)),
+    designAreaSqMeters: Number((Math.abs(shoelaceSum) * 0.5).toFixed(3)),
+    minX,
+    maxX,
+    minY,
+    maxY,
     crownGeometry,
     crownRadius: effectiveCrownRadius,
     units: 'm',
@@ -350,18 +390,35 @@ export function getSurfaceBoundsMeters(
 ): { minX: number; maxX: number; minY: number; maxY: number; width: number; height: number } {
   const roundLen = Math.max(1.0, settings.roundLength || 3.5);
   switch (surface) {
-    case 'face':
+    case 'face': {
+      const minX =
+        typeof geometry.minX === 'number' && Number.isFinite(geometry.minX)
+          ? geometry.minX
+          : -geometry.width / 2;
+      const maxX =
+        typeof geometry.maxX === 'number' && Number.isFinite(geometry.maxX)
+          ? geometry.maxX
+          : geometry.width / 2;
+      const minY =
+        typeof geometry.minY === 'number' && Number.isFinite(geometry.minY)
+          ? geometry.minY
+          : 0;
+      const maxY =
+        typeof geometry.maxY === 'number' && Number.isFinite(geometry.maxY)
+          ? geometry.maxY
+          : geometry.height;
       return {
-        minX: -geometry.width / 2,
-        maxX: geometry.width / 2,
-        minY: 0,
-        maxY: geometry.height,
-        width: geometry.width,
-        height: geometry.height,
+        minX,
+        maxX,
+        minY,
+        maxY,
+        width: Math.max(1.0, maxX - minX),
+        height: Math.max(1.0, maxY - minY),
       };
+    }
     case 'crown': {
-      // Unfolded Crown surface width strictly equals the Tunnel Face Crown Arc Length (geometry.crownArcLength)
-      const span = Math.max(geometry.width, geometry.crownArcLength);
+      // Unfolded Crown surface width strictly equals the actual developed Crown Arc Length (geometry.crownArcLength)
+      const span = Math.max(1.0, geometry.crownArcLength || geometry.width);
       return {
         minX: -span / 2,
         maxX: span / 2,
@@ -371,16 +428,34 @@ export function getSurfaceBoundsMeters(
         height: roundLen,
       };
     }
-    case 'leftWall':
-    case 'rightWall':
+    case 'leftWall': {
+      const leftH = Math.max(
+        1.0,
+        geometry.leftWallArcLength || geometry.leftWallHeight || geometry.wallHeight
+      );
       return {
         minX: 0,
         maxX: roundLen,
         minY: 0,
-        maxY: Math.max(1.0, geometry.wallHeight),
+        maxY: leftH,
         width: roundLen,
-        height: Math.max(1.0, geometry.wallHeight),
+        height: leftH,
       };
+    }
+    case 'rightWall': {
+      const rightH = Math.max(
+        1.0,
+        geometry.rightWallArcLength || geometry.rightWallHeight || geometry.wallHeight
+      );
+      return {
+        minX: 0,
+        maxX: roundLen,
+        minY: 0,
+        maxY: rightH,
+        width: roundLen,
+        height: rightH,
+      };
+    }
   }
 }
 

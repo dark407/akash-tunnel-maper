@@ -9,7 +9,12 @@ import {
   PhotoSurface,
   PlacedGeologicalSymbol,
   QIndexParameters,
+  QSystemParamKey,
+  RmrParameters,
+  RockMassClassificationMethodId,
   RockMassSummaryTable,
+  GsiParameters,
+  ParameterInputStatus,
   SectionToSectionVolumeRow,
   SurfaceType,
   SurveyControlPoint,
@@ -42,6 +47,14 @@ import {
   wrapSheetTextLines,
 } from '../engine/sheetLayoutEngine';
 import {
+  calculateBieniawskiRmr,
+  calculateHoekGsi,
+  createDefaultGsiParameters,
+  createDefaultQParamStatus,
+  createDefaultRmrParameters,
+  evaluateQSystemWithValidation,
+} from '../engine/rockMassClassificationEngine';
+import {
   AlertTriangle,
   CheckCircle2,
   Download,
@@ -63,6 +76,11 @@ interface EngineeringSheetModalProps {
   traceFitMode: TraceFitMode;
   onConfirmAllOrientations: () => void;
   qIndexParams?: QIndexParameters;
+  qParamStatus?: Record<QSystemParamKey, ParameterInputStatus>;
+  selectedClassificationMethod?: RockMassClassificationMethodId;
+  onChangeSelectedClassificationMethod?: (method: RockMassClassificationMethodId) => void;
+  rmrParams?: RmrParameters;
+  gsiParams?: GsiParameters;
   rockMassSummary?: RockMassSummaryTable;
   lithologyRegions?: LithologyRegion[];
   controlPoints?: SurveyControlPoint[];
@@ -82,6 +100,11 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   traceFitMode,
   onConfirmAllOrientations,
   qIndexParams: propQIndex,
+  qParamStatus: propQParamStatus,
+  selectedClassificationMethod = 'Q_SYSTEM',
+  onChangeSelectedClassificationMethod,
+  rmrParams: propRmrParams,
+  gsiParams: propGsiParams,
   rockMassSummary: propRockMass,
   lithologyRegions = [],
   controlPoints = [],
@@ -112,10 +135,18 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   ]);
 
   const qIndex = useMemo(() => propQIndex || createDefaultQIndexParameters(), [propQIndex]);
-  const qResult = useMemo(
-    () => calculateBartonQSystem(qIndex, geometry.width),
-    [qIndex, geometry.width]
+  const qStatus = useMemo(
+    () => propQParamStatus || createDefaultQParamStatus(),
+    [propQParamStatus]
   );
+  const qResult = useMemo(
+    () => evaluateQSystemWithValidation(qIndex, geometry.width, qStatus),
+    [qIndex, geometry.width, qStatus]
+  );
+  const rmr = useMemo(() => propRmrParams || createDefaultRmrParameters(), [propRmrParams]);
+  const rmrResult = useMemo(() => calculateBieniawskiRmr(rmr), [rmr]);
+  const gsi = useMemo(() => propGsiParams || createDefaultGsiParameters(), [propGsiParams]);
+  const gsiResult = useMemo(() => calculateHoekGsi(gsi), [gsi]);
   const rockMass = useMemo(
     () => propRockMass || createDefaultRockMassSummary(settings.lithology),
     [propRockMass, settings.lithology]
@@ -200,6 +231,8 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     crownW_px,
     roundH_px,
     wallW_px,
+    leftWallW_px,
+    rightWallW_px,
     crownLeftX,
     leftWallLeftX,
     rightWallLeftX,
@@ -651,6 +684,25 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             <option value="125">125% Zoom</option>
             <option value="150">150% Zoom</option>
           </select>
+
+          {/* Classification Method Selector for Final Engineering Sheet */}
+          {onChangeSelectedClassificationMethod && (
+            <select
+              value={selectedClassificationMethod}
+              onChange={(e) =>
+                onChangeSelectedClassificationMethod(
+                  e.target.value as RockMassClassificationMethodId
+                )
+              }
+              className="bg-indigo-950 text-indigo-200 font-mono text-xs font-bold px-2 py-1 rounded border border-indigo-500/60"
+              title="Select Rock Mass Classification Method displayed on Final Engineering Sheet"
+            >
+              <option value="RMR">Sheet Method: RMR ({rmr.version})</option>
+              <option value="Q_SYSTEM">Sheet Method: Q-System (NGI)</option>
+              <option value="BOTH_RMR_AND_Q">Sheet Method: Both (RMR + Q-System)</option>
+              <option value="GSI">Sheet Method: GSI (Hoek &amp; Marinos)</option>
+            </select>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -769,10 +821,10 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 <rect x={crownLeftX} y={planTopY} width={crownW_px} height={roundH_px} />
               </clipPath>
               <clipPath id="sheet-leftwall-clip">
-                <rect x={leftWallLeftX} y={planTopY} width={wallW_px} height={roundH_px} />
+                <rect x={leftWallLeftX} y={planTopY} width={leftWallW_px} height={roundH_px} />
               </clipPath>
               <clipPath id="sheet-rightwall-clip">
-                <rect x={rightWallLeftX} y={planTopY} width={wallW_px} height={roundH_px} />
+                <rect x={rightWallLeftX} y={planTopY} width={rightWallW_px} height={roundH_px} />
               </clipPath>
 
               {/* Right Column Table Clip Paths to Prevent Any Text Intersection (Section 16) */}
@@ -872,7 +924,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   TUNNEL: {settings.tunnelName.toUpperCase()}
                 </text>
                 <text x="36" y={headerBox.y + 63} fontSize="10.5" fill="#334155">
-                  LITHOLOGY: {settings.lithology.slice(0, 38)} · PROFILE: {geometry.crownGeometry.toUpperCase().replace('_', '-')} ({geometry.width.toFixed(2)}m × {geometry.height.toFixed(2)}m)
+                  LITHOLOGY: {settings.lithology.slice(0, 34)} · PROFILE: {(geometry.customProfile?.name || geometry.crownGeometry.replace(/_/g, '-')).toUpperCase().slice(0, 26)} ({geometry.width.toFixed(2)}m × {geometry.height.toFixed(2)}m{geometry.designAreaSqMeters ? ` · A=${geometry.designAreaSqMeters.toFixed(1)}m²` : ''})
                 </text>
 
                 {/* Zone 2: Chainage & Pull */}
@@ -894,7 +946,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E (Az {settings.driveDirection.toFixed(1)}°)
                 </text>
                 <text x="894" y={headerBox.y + 53} fontSize="9.5" fill="#475569">
-                  W: <tspan fontWeight="700" fill="#0F172A">{geometry.width.toFixed(2)}m</tspan> · H: <tspan fontWeight="700" fill="#0F172A">{geometry.height.toFixed(2)}m</tspan> · WALL: <tspan fontWeight="700" fill="#0F172A">{geometry.wallHeight.toFixed(2)}m</tspan> · CROWN ARC: <tspan fontWeight="700" fill="#0F172A">{geometry.crownArcLength.toFixed(2)}m</tspan>
+                  W: <tspan fontWeight="700" fill="#0F172A">{geometry.width.toFixed(2)}m</tspan> · H: <tspan fontWeight="700" fill="#0F172A">{geometry.height.toFixed(2)}m</tspan> · WALL L/R: <tspan fontWeight="700" fill="#0F172A">{(geometry.leftWallHeight ?? geometry.wallHeight).toFixed(2)}/{(geometry.rightWallHeight ?? geometry.wallHeight).toFixed(2)}m</tspan> · CROWN: <tspan fontWeight="700" fill="#0F172A">{geometry.crownArcLength.toFixed(2)}m</tspan>
                 </text>
 
                 {/* Zone 4: Date, Geologist & Scale */}
@@ -947,7 +999,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 <rect
                   x={leftWallLeftX}
                   y={planTopY}
-                  width={wallW_px * 2 + crownW_px}
+                  width={leftWallW_px + crownW_px + rightWallW_px}
                   height={roundH_px}
                   fill="#F8FAFC"
                 />
@@ -960,7 +1012,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         href={photos.leftWall.warpedImage || photos.leftWall.image}
                         x={leftWallLeftX}
                         y={planTopY}
-                        width={wallW_px}
+                        width={leftWallW_px}
                         height={roundH_px}
                         preserveAspectRatio="none"
                         opacity={outputMode === 'PHOTO_AND_AI_TRACING' ? 0.88 : photos.leftWall.opacity / 100}
@@ -990,7 +1042,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         href={photos.rightWall.warpedImage || photos.rightWall.image}
                         x={rightWallLeftX}
                         y={planTopY}
-                        width={wallW_px}
+                        width={rightWallW_px}
                         height={roundH_px}
                         preserveAspectRatio="none"
                         opacity={outputMode === 'PHOTO_AND_AI_TRACING' ? 0.88 : photos.rightWall.opacity / 100}
@@ -1003,21 +1055,21 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 <rect
                   x={leftWallLeftX}
                   y={planTopY}
-                  width={wallW_px}
+                  width={leftWallW_px}
                   height={roundH_px}
                   fill="none"
                   stroke="#0F172A"
                   strokeWidth="1.5"
                 />
                 <text
-                  x={leftWallLeftX + wallW_px / 2}
+                  x={leftWallLeftX + leftWallW_px / 2}
                   y={planTopY + roundH_px + 13}
                   textAnchor="middle"
                   fontSize="8.5"
                   fontWeight="700"
                   fill="#334155"
                 >
-                  LEFT WALL = {geometry.wallHeight.toFixed(2)} m
+                  LEFT WALL = {(geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight).toFixed(2)} m
                 </text>
 
                 {/* Crown Box (Length strictly equals Tunnel Face Crown Arc Length = geometry.crownArcLength) */}
@@ -1047,28 +1099,28 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   fontWeight="700"
                   fill="#0F172A"
                 >
-                  CROWN ARC = {geometry.crownArcLength.toFixed(2)} m (FACE SPAN {geometry.width.toFixed(2)}m · C.L.)
+                  CROWN ARC = {geometry.crownArcLength.toFixed(2)} m (SPAN {geometry.width.toFixed(2)}m · DEV PERIM {((geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight) + geometry.crownArcLength + (geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight)).toFixed(2)}m)
                 </text>
 
                 {/* Right Wall Box */}
                 <rect
                   x={rightWallLeftX}
                   y={planTopY}
-                  width={wallW_px}
+                  width={rightWallW_px}
                   height={roundH_px}
                   fill="none"
                   stroke="#0F172A"
                   strokeWidth="1.5"
                 />
                 <text
-                  x={rightWallLeftX + wallW_px / 2}
+                  x={rightWallLeftX + rightWallW_px / 2}
                   y={planTopY + roundH_px + 13}
                   textAnchor="middle"
                   fontSize="8.5"
                   fontWeight="700"
                   fill="#334155"
                 >
-                  RIGHT WALL = {geometry.wallHeight.toFixed(2)} m
+                  RIGHT WALL = {(geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight).toFixed(2)} m
                 </text>
 
                 {/* Orthographic Projection Alignment Lines connecting Crown Edges & Centerline directly to Tunnel Face */}
@@ -1076,7 +1128,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   x1={crownLeftX}
                   y1={planTopY + roundH_px}
                   x2={faceCenterX - faceWidthPx / 2}
-                  y2={faceBottomY - geometry.wallHeight * facePxPerMeter}
+                  y2={faceBottomY - (geometry.leftWallHeight ?? geometry.wallHeight) * facePxPerMeter}
                   stroke="#64748B"
                   strokeWidth="0.85"
                   strokeDasharray="4,4"
@@ -1085,7 +1137,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   x1={rightWallLeftX}
                   y1={planTopY + roundH_px}
                   x2={faceCenterX + faceWidthPx / 2}
-                  y2={faceBottomY - geometry.wallHeight * facePxPerMeter}
+                  y2={faceBottomY - (geometry.rightWallHeight ?? geometry.wallHeight) * facePxPerMeter}
                   stroke="#64748B"
                   strokeWidth="0.85"
                   strokeDasharray="4,4"
@@ -1105,37 +1157,37 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   <line x1={leftWallLeftX} y1="-4" x2={leftWallLeftX} y2="4" stroke="#0F172A" strokeWidth="1" />
                   <line x1={crownLeftX} y1="-4" x2={crownLeftX} y2="4" stroke="#0F172A" strokeWidth="1" />
                   <line x1={rightWallLeftX} y1="-4" x2={rightWallLeftX} y2="4" stroke="#0F172A" strokeWidth="1" />
-                  <line x1={rightWallLeftX + wallW_px} y1="-4" x2={rightWallLeftX + wallW_px} y2="4" stroke="#0F172A" strokeWidth="1" />
-                  <line x1={leftWallLeftX} y1="0" x2={rightWallLeftX + wallW_px} y2="0" stroke="#0F172A" strokeWidth="0.9" />
+                  <line x1={rightWallLeftX + rightWallW_px} y1="-4" x2={rightWallLeftX + rightWallW_px} y2="4" stroke="#0F172A" strokeWidth="1" />
+                  <line x1={leftWallLeftX} y1="0" x2={rightWallLeftX + rightWallW_px} y2="0" stroke="#0F172A" strokeWidth="0.9" />
                 </g>
 
                 {/* Pull Dimension on Right Side of Perimeter Plan */}
                 <line
-                  x1={rightWallLeftX + wallW_px + 6}
+                  x1={rightWallLeftX + rightWallW_px + 6}
                   y1={planTopY}
-                  x2={rightWallLeftX + wallW_px + 16}
+                  x2={rightWallLeftX + rightWallW_px + 16}
                   y2={planTopY}
                   stroke="#0F172A"
                   strokeWidth="0.9"
                 />
                 <line
-                  x1={rightWallLeftX + wallW_px + 6}
+                  x1={rightWallLeftX + rightWallW_px + 6}
                   y1={planTopY + roundH_px}
-                  x2={rightWallLeftX + wallW_px + 16}
+                  x2={rightWallLeftX + rightWallW_px + 16}
                   y2={planTopY + roundH_px}
                   stroke="#0F172A"
                   strokeWidth="0.9"
                 />
                 <line
-                  x1={rightWallLeftX + wallW_px + 12}
+                  x1={rightWallLeftX + rightWallW_px + 12}
                   y1={planTopY}
-                  x2={rightWallLeftX + wallW_px + 12}
+                  x2={rightWallLeftX + rightWallW_px + 12}
                   y2={planTopY + roundH_px}
                   stroke="#0F172A"
                   strokeWidth="1.0"
                 />
                 <text
-                  x={rightWallLeftX + wallW_px + 18}
+                  x={rightWallLeftX + rightWallW_px + 18}
                   y={planTopY + roundH_px / 2 + 3}
                   fontSize="8.5"
                   fontWeight="700"
@@ -1388,6 +1440,22 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 stroke="#0F172A"
                 strokeWidth="2.6"
               />
+              {/* Custom Profile Control Point Nodes on Face Boundary */}
+              {geometry.customProfile &&
+                geometry.customProfile.controlPoints.map((cp) => {
+                  const s = surfacePointToSheetXY({ x: cp.x, y: cp.y }, 'face');
+                  return (
+                    <circle
+                      key={`sheet-custom-cp-${cp.id}`}
+                      cx={s.x}
+                      cy={s.y}
+                      r="2.8"
+                      fill="#0284C7"
+                      stroke="#FFFFFF"
+                      strokeWidth="0.9"
+                    />
+                  );
+                })}
             </g>
 
             {/* ==============================================================
@@ -2594,7 +2662,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                       )}
                     </g>
 
-                    {/* 7D. BARTON Q-INDEX (Priority 7) & CONTENT-AWARE GEOLOGICAL DESCRIPTION / NOTES (Priority 8) */}
+                    {/* 7D. ROCK MASS CLASSIFICATION (Method-Specific: RMR / Q-System / Both / GSI) & CONTENT-AWARE GEOLOGICAL DESCRIPTION */}
                     <g transform={`translate(${qIndexAndNotesBlock.x}, ${qIndexAndNotesBlock.y})`}>
                       <rect
                         x="0"
@@ -2619,74 +2687,422 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         fontWeight="700"
                         fill="#FFFFFF"
                       >
-                        BARTON Q-INDEX (NGI ROCK MASS RATING) &amp; GEOLOGY DESCRIPTION
+                        {selectedClassificationMethod === 'RMR'
+                          ? `ROCK MASS CLASSIFICATION (METHOD: RMR — BIENIAWSKI ${rmr.version}) & GEOLOGY DESCRIPTION`
+                          : selectedClassificationMethod === 'BOTH_RMR_AND_Q'
+                          ? `ROCK MASS CLASSIFICATION (METHODS: RMR ${rmr.version} + BARTON Q-SYSTEM) & GEOLOGY DESCRIPTION`
+                          : selectedClassificationMethod === 'GSI'
+                          ? `ROCK MASS CLASSIFICATION (METHOD: GSI — HOEK & MARINOS) & GEOLOGY DESCRIPTION`
+                          : `ROCK MASS CLASSIFICATION (METHOD: Q-SYSTEM — BARTON NGI) & GEOLOGY DESCRIPTION`}
                       </text>
 
-                      {/* Formula & 6 Parameters Row */}
-                      <rect
-                        x="8"
-                        y="27"
-                        width={qIndexAndNotesBlock.width - 16}
-                        height="40"
-                        fill="#FFFFFF"
-                        stroke="#CBD5E1"
-                        strokeWidth="0.9"
-                      />
-                      <text
-                        x="14"
-                        y="41"
-                        fontSize={contentMetrics.notesFontSize + 0.3}
-                        fontWeight="700"
-                        fill="#0F172A"
-                      >
-                        Q = (RQD/Jn) × (Jr/Ja) × (Jw/SRF) = ({qIndex.rqd}%/{qResult.effectiveJn}) × ({qIndex.jr}/{qIndex.ja}) × ({qIndex.jw}/{qIndex.srf})
-                      </text>
-                      <text x="14" y="56" fontSize={contentMetrics.notesFontSize} fill="#334155">
-                        RQD: <tspan fontWeight="700" fill="#0F172A">{qIndex.rqd}%</tspan> · Jn: <tspan fontWeight="700" fill="#0F172A">{qResult.effectiveJn}</tspan> · Jr: <tspan fontWeight="700" fill="#0F172A">{qIndex.jr}</tspan> · Ja: <tspan fontWeight="700" fill="#0F172A">{qIndex.ja}</tspan> · Jw: <tspan fontWeight="700" fill="#0F172A">{qIndex.jw}</tspan> · SRF: <tspan fontWeight="700" fill="#0F172A">{qIndex.srf}</tspan>
-                      </text>
+                      {/* Method-Specific Parameters & Result Box */}
+                      {selectedClassificationMethod === 'RMR' ? (
+                        <>
+                          <rect
+                            x="8"
+                            y="27"
+                            width={qIndexAndNotesBlock.width - 16}
+                            height="40"
+                            fill="#FFFFFF"
+                            stroke="#CBD5E1"
+                            strokeWidth="0.9"
+                          />
+                          <text
+                            x="14"
+                            y="41"
+                            fontSize={contentMetrics.notesFontSize + 0.2}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            Method: RMR ({rmr.version}) ·{' '}
+                            {rmrResult.isComplete
+                              ? `RMR = R1(${rmrResult.r1StrengthRating}) + R2(${rmrResult.r2RqdRating}) + R3(${rmrResult.r3SpacingRating}) + R4(${rmrResult.r4ConditionRating}) + R5(${rmrResult.r5GroundwaterRating}) [Basic=${rmrResult.basicRmr}] + Adj(${rmrResult.orientationAdjustment})`
+                              : 'Required input not available — Confirm missing RMR parameters'}
+                          </text>
+                          <text x="14" y="56" fontSize={contentMetrics.notesFontSize} fill="#334155">
+                            UCS:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {rmr.intactStrengthValueMPa !== null
+                                ? `${rmr.intactStrengthValueMPa}MPa (R1=${rmrResult.r1StrengthRating})`
+                                : 'N/A'}
+                            </tspan>{' '}
+                            · RQD:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {rmr.rqdPercent !== null
+                                ? `${rmr.rqdPercent}% (R2=${rmrResult.r2RqdRating})`
+                                : 'N/A'}
+                            </tspan>{' '}
+                            · Spc:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {rmr.spacingMeters !== null
+                                ? `${rmr.spacingMeters}m (R3=${rmrResult.r3SpacingRating})`
+                                : 'N/A'}
+                            </tspan>{' '}
+                            · Cond:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              R4={rmrResult.r4ConditionRating ?? 'N/A'}
+                            </tspan>{' '}
+                            · Water:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              R5={rmrResult.r5GroundwaterRating ?? 'N/A'}
+                            </tspan>{' '}
+                            · Adj:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {rmrResult.orientationAdjustment ?? 'N/A'}
+                            </tspan>
+                          </text>
 
-                      {/* Highlighted Q-Value & Rock Class Box */}
-                      <rect
-                        x={qIndexAndNotesBlock.width - 134}
-                        y="30"
-                        width="120"
-                        height="34"
-                        rx="2"
-                        fill="#0F172A"
-                      />
-                      <text
-                        x={qIndexAndNotesBlock.width - 74}
-                        y="44"
-                        textAnchor="middle"
-                        fontSize="10"
-                        fontWeight="700"
-                        fill="#38BDF8"
-                      >
-                        Q = {qResult.qValue.toFixed(3)}
-                      </text>
-                      <text
-                        x={qIndexAndNotesBlock.width - 74}
-                        y="57"
-                        textAnchor="middle"
-                        fontSize="7.3"
-                        fontWeight="700"
-                        fill="#FFFFFF"
-                      >
-                        {qResult.rockMassClass.toUpperCase()}
-                      </text>
+                          {/* Highlighted RMR Value & Class Box */}
+                          <rect
+                            x={qIndexAndNotesBlock.width - 150}
+                            y="30"
+                            width="136"
+                            height="34"
+                            rx="2"
+                            fill="#0F172A"
+                          />
+                          <text
+                            x={qIndexAndNotesBlock.width - 82}
+                            y="44"
+                            textAnchor="middle"
+                            fontSize="9.8"
+                            fontWeight="700"
+                            fill="#818CF8"
+                          >
+                            {rmrResult.isComplete && rmrResult.finalRmr !== null
+                              ? `RMR: ${rmrResult.finalRmr}`
+                              : 'RMR: N/A'}
+                          </text>
+                          <text
+                            x={qIndexAndNotesBlock.width - 82}
+                            y="57"
+                            textAnchor="middle"
+                            fontSize="6.9"
+                            fontWeight="700"
+                            fill="#FFFFFF"
+                          >
+                            {rmrResult.rockMassClassLabel.toUpperCase().slice(0, 26)}
+                          </text>
 
-                      <text
-                        x="12"
-                        y="81"
-                        fontSize={contentMetrics.notesFontSize + 0.2}
-                        fontWeight="700"
-                        fill="#0F172A"
-                      >
-                        EST. RMR89: {qResult.estimatedRmr} · ESR: {qIndex.esr} · De: {qResult.equivalentDimensionDe.toFixed(2)}m · SUPPORT:{' '}
-                        <tspan fontWeight="600">
-                          {qResult.recommendedSupport.slice(0, Math.max(34, contentMetrics.notesMaxCharsPerLine - 44))}
-                        </tspan>
-                      </text>
+                          <text
+                            x="12"
+                            y="81"
+                            fontSize={contentMetrics.notesFontSize + 0.2}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            STAND-UP: {rmrResult.averageStandUpTime} · Em:{' '}
+                            {rmrResult.deformationModulusGPa !== null
+                              ? `${rmrResult.deformationModulusGPa} GPa`
+                              : 'N/A'}{' '}
+                            · SUPPORT:{' '}
+                            <tspan fontWeight="600">
+                              {rmrResult.recommendedSupportGuidelines.slice(
+                                0,
+                                Math.max(34, contentMetrics.notesMaxCharsPerLine - 44)
+                              )}
+                            </tspan>
+                          </text>
+                        </>
+                      ) : selectedClassificationMethod === 'BOTH_RMR_AND_Q' ? (
+                        <>
+                          {/* Dual Separate Boxes for RMR and Q-System (Without Mixing Parameters) */}
+                          <rect
+                            x="8"
+                            y="27"
+                            width={(qIndexAndNotesBlock.width - 22) / 2}
+                            height="42"
+                            fill="#FFFFFF"
+                            stroke="#6366F1"
+                            strokeWidth="1"
+                          />
+                          <text
+                            x="14"
+                            y="40"
+                            fontSize={contentMetrics.notesFontSize}
+                            fontWeight="700"
+                            fill="#312E81"
+                          >
+                            METHOD 1: RMR ({rmr.version}) →{' '}
+                            {rmrResult.isComplete && rmrResult.finalRmr !== null
+                              ? `RMR = ${rmrResult.finalRmr} (${rmrResult.rockMassClassLabel})`
+                              : 'Required input not available'}
+                          </text>
+                          <text
+                            x="14"
+                            y="53"
+                            fontSize={contentMetrics.notesFontSize - 0.5}
+                            fill="#334155"
+                          >
+                            R1(UCS):{rmrResult.r1StrengthRating ?? '—'} · R2(RQD):
+                            {rmrResult.r2RqdRating ?? '—'} · R3(Spc):
+                            {rmrResult.r3SpacingRating ?? '—'} · R4(Cnd):
+                            {rmrResult.r4ConditionRating ?? '—'} · R5(H2O):
+                            {rmrResult.r5GroundwaterRating ?? '—'} · Adj:
+                            {rmrResult.orientationAdjustment ?? '—'}
+                          </text>
+                          <text
+                            x="14"
+                            y="64"
+                            fontSize={contentMetrics.notesFontSize - 0.6}
+                            fontWeight="600"
+                            fill="#475569"
+                          >
+                            Basic RMR: {rmrResult.basicRmr ?? '—'} · Em:{' '}
+                            {rmrResult.deformationModulusGPa ?? '—'} GPa · c: {rmrResult.cohesionKPa}
+                          </text>
+
+                          <rect
+                            x={14 + (qIndexAndNotesBlock.width - 22) / 2}
+                            y="27"
+                            width={(qIndexAndNotesBlock.width - 22) / 2}
+                            height="42"
+                            fill="#FFFFFF"
+                            stroke="#0284C7"
+                            strokeWidth="1"
+                          />
+                          <text
+                            x={20 + (qIndexAndNotesBlock.width - 22) / 2}
+                            y="40"
+                            fontSize={contentMetrics.notesFontSize}
+                            fontWeight="700"
+                            fill="#0C4A6E"
+                          >
+                            METHOD 2: Q-SYSTEM →{' '}
+                            {qResult.isComplete
+                              ? `Q = ${qResult.qValue.toFixed(2)} (${qResult.rockMassClass})`
+                              : 'Required input not available'}
+                          </text>
+                          <text
+                            x={20 + (qIndexAndNotesBlock.width - 22) / 2}
+                            y="53"
+                            fontSize={contentMetrics.notesFontSize - 0.5}
+                            fill="#334155"
+                          >
+                            RQD:{qStatus.rqd === 'MISSING' ? '—' : `${qIndex.rqd}%`} · Jn:
+                            {qStatus.jn === 'MISSING' ? '—' : qResult.effectiveJn} · Jr:
+                            {qStatus.jr === 'MISSING' ? '—' : qIndex.jr} · Ja:
+                            {qStatus.ja === 'MISSING' ? '—' : qIndex.ja} · Jw:
+                            {qStatus.jw === 'MISSING' ? '—' : qIndex.jw} · SRF:
+                            {qStatus.srf === 'MISSING' ? '—' : qIndex.srf}
+                          </text>
+                          <text
+                            x={20 + (qIndexAndNotesBlock.width - 22) / 2}
+                            y="64"
+                            fontSize={contentMetrics.notesFontSize - 0.6}
+                            fontWeight="600"
+                            fill="#475569"
+                          >
+                            Q = (RQD/Jn)×(Jr/Ja)×(Jw/SRF) · De: {qResult.equivalentDimensionDe.toFixed(2)}m · ESR: {qIndex.esr}
+                          </text>
+
+                          <text
+                            x="12"
+                            y="81"
+                            fontSize={contentMetrics.notesFontSize + 0.1}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            SUPPORT (RMR &amp; Q):{' '}
+                            <tspan fontWeight="600">
+                              {qResult.recommendedSupport.slice(
+                                0,
+                                Math.max(40, contentMetrics.notesMaxCharsPerLine - 24)
+                              )}
+                            </tspan>
+                          </text>
+                        </>
+                      ) : selectedClassificationMethod === 'GSI' ? (
+                        <>
+                          <rect
+                            x="8"
+                            y="27"
+                            width={qIndexAndNotesBlock.width - 16}
+                            height="40"
+                            fill="#FFFFFF"
+                            stroke="#CBD5E1"
+                            strokeWidth="0.9"
+                          />
+                          <text
+                            x="14"
+                            y="41"
+                            fontSize={contentMetrics.notesFontSize + 0.2}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            Method: GSI (Hoek &amp; Marinos) ·{' '}
+                            {gsiResult.isComplete
+                              ? gsiResult.calculationSummaryFormula
+                              : 'Required input not available'}
+                          </text>
+                          <text x="14" y="56" fontSize={contentMetrics.notesFontSize} fill="#334155">
+                            Structure Rating:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {gsi.structureRating ?? 'N/A'} ({gsi.structureCategory})
+                            </tspan>{' '}
+                            · Surface Condition:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {gsi.surfaceConditionRating ?? 'N/A'} ({gsi.surfaceConditionCategory})
+                            </tspan>{' '}
+                            · UCS:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {gsi.intactUcsMPa ?? 'N/A'} MPa
+                            </tspan>
+                          </text>
+
+                          <rect
+                            x={qIndexAndNotesBlock.width - 150}
+                            y="30"
+                            width="136"
+                            height="34"
+                            rx="2"
+                            fill="#0F172A"
+                          />
+                          <text
+                            x={qIndexAndNotesBlock.width - 82}
+                            y="44"
+                            textAnchor="middle"
+                            fontSize="9.8"
+                            fontWeight="700"
+                            fill="#34D399"
+                          >
+                            {gsiResult.isComplete && gsiResult.gsiValue !== null
+                              ? `GSI: ${gsiResult.gsiValue}`
+                              : 'GSI: N/A'}
+                          </text>
+                          <text
+                            x={qIndexAndNotesBlock.width - 82}
+                            y="57"
+                            textAnchor="middle"
+                            fontSize="6.9"
+                            fontWeight="700"
+                            fill="#FFFFFF"
+                          >
+                            {gsiResult.rockMassClassLabel.toUpperCase().slice(0, 26)}
+                          </text>
+
+                          <text
+                            x="12"
+                            y="81"
+                            fontSize={contentMetrics.notesFontSize + 0.2}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            HOEK-BROWN: mb={gsiResult.mbReducedConstant ?? '—'} · s=
+                            {gsiResult.sConstant ?? '—'} · Em=
+                            {gsiResult.deformationModulusGPa ?? '—'} GPa · SUPPORT:{' '}
+                            <tspan fontWeight="600">
+                              {gsiResult.recommendedSupportGuidelines.slice(
+                                0,
+                                Math.max(34, contentMetrics.notesMaxCharsPerLine - 44)
+                              )}
+                            </tspan>
+                          </text>
+                        </>
+                      ) : (
+                        <>
+                          {/* Q-System (Default / Selected) */}
+                          <rect
+                            x="8"
+                            y="27"
+                            width={qIndexAndNotesBlock.width - 16}
+                            height="40"
+                            fill="#FFFFFF"
+                            stroke="#CBD5E1"
+                            strokeWidth="0.9"
+                          />
+                          <text
+                            x="14"
+                            y="41"
+                            fontSize={contentMetrics.notesFontSize + 0.3}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            Method: Q-System ·{' '}
+                            {qResult.isComplete
+                              ? `Q = (RQD/Jn) × (Jr/Ja) × (Jw/SRF) = (${qIndex.rqd}%/${qResult.effectiveJn}) × (${qIndex.jr}/${qIndex.ja}) × (${qIndex.jw}/${qIndex.srf})`
+                              : 'Required input not available — Confirm missing Q-System parameters'}
+                          </text>
+                          <text x="14" y="56" fontSize={contentMetrics.notesFontSize} fill="#334155">
+                            RQD:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {qStatus.rqd === 'MISSING' ? 'N/A' : `${qIndex.rqd}%`}
+                            </tspan>{' '}
+                            · Jn:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {qStatus.jn === 'MISSING' ? 'N/A' : qResult.effectiveJn}
+                            </tspan>{' '}
+                            · Jr:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {qStatus.jr === 'MISSING' ? 'N/A' : qIndex.jr}
+                            </tspan>{' '}
+                            · Ja:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {qStatus.ja === 'MISSING' ? 'N/A' : qIndex.ja}
+                            </tspan>{' '}
+                            · Jw:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {qStatus.jw === 'MISSING' ? 'N/A' : qIndex.jw}
+                            </tspan>{' '}
+                            · SRF:{' '}
+                            <tspan fontWeight="700" fill="#0F172A">
+                              {qStatus.srf === 'MISSING' ? 'N/A' : qIndex.srf}
+                            </tspan>
+                          </text>
+
+                          {/* Highlighted Q-Value & Rock Class Box */}
+                          <rect
+                            x={qIndexAndNotesBlock.width - 134}
+                            y="30"
+                            width="120"
+                            height="34"
+                            rx="2"
+                            fill="#0F172A"
+                          />
+                          <text
+                            x={qIndexAndNotesBlock.width - 74}
+                            y="44"
+                            textAnchor="middle"
+                            fontSize="10"
+                            fontWeight="700"
+                            fill="#38BDF8"
+                          >
+                            {qResult.isComplete ? `Q: ${qResult.qValue.toFixed(3)}` : 'Q: N/A'}
+                          </text>
+                          <text
+                            x={qIndexAndNotesBlock.width - 74}
+                            y="57"
+                            textAnchor="middle"
+                            fontSize="7.3"
+                            fontWeight="700"
+                            fill="#FFFFFF"
+                          >
+                            {qResult.isComplete
+                              ? qResult.rockMassClass.toUpperCase()
+                              : 'INPUT NOT AVAILABLE'}
+                          </text>
+
+                          <text
+                            x="12"
+                            y="81"
+                            fontSize={contentMetrics.notesFontSize + 0.2}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            ESR: {qIndex.esr} · De: {qResult.equivalentDimensionDe.toFixed(2)}m ·
+                            SUPPORT:{' '}
+                            <tspan fontWeight="600">
+                              {qResult.isComplete
+                                ? qResult.recommendedSupport.slice(
+                                    0,
+                                    Math.max(34, contentMetrics.notesMaxCharsPerLine - 44)
+                                  )
+                                : 'Required input not available'}
+                            </tspan>
+                          </text>
+                        </>
+                      )}
 
                       <line
                         x1="8"

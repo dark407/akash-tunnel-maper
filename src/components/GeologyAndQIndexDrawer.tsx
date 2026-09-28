@@ -1,18 +1,59 @@
 import React, { useState } from 'react';
 import {
+  GsiParameters,
   Joint,
   JointSet,
+  ParameterInputStatus,
   QIndexParameters,
+  QSystemParamKey,
+  RmrMethodologyVersion,
+  RmrParamKey,
+  RmrParameters,
+  RockMassClassificationMethodId,
   RockMassSummaryTable,
+  SurfaceType,
   TunnelGeometry,
   TunnelSettings,
 } from '../types/tunnel';
+import { exportGeologyAndQIndexToCSV } from '../engine/photoWarpEngine';
 import {
-  autoEstimateQIndexFromMappedJoints,
-  calculateBartonQSystem,
-  exportGeologyAndQIndexToCSV,
-} from '../engine/photoWarpEngine';
-import { Calculator, CheckCircle2, Download, FileSpreadsheet, Sparkles, X } from 'lucide-react';
+  calculateBieniawskiRmr,
+  calculateHoekGsi,
+  CLASSIFICATION_METHODS_REGISTRY,
+  computeRmrRqdRating,
+  computeRmrSpacingRating,
+  computeRmrStrengthRating,
+  createBlankQParamStatus,
+  createBlankRmrParameters,
+  evaluateQSystemWithValidation,
+  GSI_STRUCTURE_OPTIONS,
+  GSI_SURFACE_CONDITION_OPTIONS,
+  RMR_CONDITION_OPTIONS,
+  RMR_GROUNDWATER_OPTIONS,
+  RMR_ORIENTATION_ADJUSTMENT_OPTIONS,
+  RMR_RQD_OPTIONS,
+  RMR_SPACING_OPTIONS,
+  RMR_STRENGTH_OPTIONS,
+  RMR_SUB_APERTURE_OPTIONS,
+  RMR_SUB_INFILLING_OPTIONS,
+  RMR_SUB_PERSISTENCE_OPTIONS,
+  RMR_SUB_ROUGHNESS_OPTIONS,
+  RMR_SUB_WEATHERING_OPTIONS,
+  suggestQSystemWithConfirmation,
+  suggestRmrFromMappedTraces,
+} from '../engine/rockMassClassificationEngine';
+import {
+  AlertTriangle,
+  Calculator,
+  Check,
+  CheckCircle2,
+  Download,
+  FileSpreadsheet,
+  RotateCcw,
+  ShieldCheck,
+  Sparkles,
+  X,
+} from 'lucide-react';
 
 interface GeologyAndQIndexDrawerProps {
   activeTab: 'geology_tables' | 'q_index';
@@ -20,6 +61,7 @@ interface GeologyAndQIndexDrawerProps {
   onClose: () => void;
   geometry: TunnelGeometry;
   settings: TunnelSettings;
+  activeSurface?: SurfaceType;
   joints: Joint[];
   jointSets: JointSet[];
   onUpdateJoints?: (nextJoints: Joint[]) => void;
@@ -27,6 +69,14 @@ interface GeologyAndQIndexDrawerProps {
   onMergeJointSets: (fromSetId: string, toSetId: string) => void;
   qIndexParams: QIndexParameters;
   onUpdateQIndexParams: (next: QIndexParameters) => void;
+  qParamStatus: Record<QSystemParamKey, ParameterInputStatus>;
+  onUpdateQParamStatus: (next: Record<QSystemParamKey, ParameterInputStatus>) => void;
+  selectedMethod: RockMassClassificationMethodId;
+  onChangeSelectedMethod: (method: RockMassClassificationMethodId) => void;
+  rmrParams: RmrParameters;
+  onUpdateRmrParams: (next: RmrParameters) => void;
+  gsiParams: GsiParameters;
+  onUpdateGsiParams: (next: GsiParameters) => void;
   rockMassSummary: RockMassSummaryTable;
   onUpdateRockMassSummary: (next: RockMassSummaryTable) => void;
   onOpenExportSheet: () => void;
@@ -79,7 +129,10 @@ const SRF_OPTIONS = [
   { val: 2.5, label: '2.5 — Single shear zone in competent rock (excavation depth > 50m)' },
   { val: 5.0, label: '5.0 — Single weakness zone with clay OR depth <= 50m OR loose open joints' },
   { val: 7.5, label: '7.5 — Multiple shear zones in competent rock (clay-free), loose rock' },
-  { val: 10.0, label: '10.0 — Multiple occurrences of weakness zones containing clay / chemically disintegrated rock' },
+  {
+    val: 10.0,
+    label: '10.0 — Multiple occurrences of weakness zones containing clay / chemically disintegrated rock',
+  },
   { val: 15.0, label: '15.0 — Mild to Heavy squeezing rock pressure or slabbing' },
   { val: 20.0, label: '20.0 — Heavy squeezing or swelling rock pressure' },
 ];
@@ -90,6 +143,7 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   onClose,
   geometry,
   settings,
+  activeSurface = 'face',
   joints,
   jointSets,
   onUpdateJoints,
@@ -97,6 +151,14 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   onMergeJointSets,
   qIndexParams,
   onUpdateQIndexParams,
+  qParamStatus,
+  onUpdateQParamStatus,
+  selectedMethod,
+  onChangeSelectedMethod,
+  rmrParams,
+  onUpdateRmrParams,
+  gsiParams,
+  onUpdateGsiParams,
   rockMassSummary,
   onUpdateRockMassSummary,
   onOpenExportSheet,
@@ -104,10 +166,12 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   const [mergeSourceSet, setMergeSourceSet] = useState<string>('J2');
   const [mergeTargetSet, setMergeTargetSet] = useState<string>('J1');
 
-  const qResult = calculateBartonQSystem(qIndexParams, geometry.width);
+  const qResult = evaluateQSystemWithValidation(qIndexParams, geometry.width, qParamStatus);
+  const rmrResult = calculateBieniawskiRmr(rmrParams);
+  const gsiResult = calculateHoekGsi(gsiParams);
 
   const handleDownloadCSV = () => {
-    const csvContent = exportGeologyAndQIndexToCSV(
+    const baseCsv = exportGeologyAndQIndexToCSV(
       geometry,
       settings,
       joints,
@@ -115,22 +179,1651 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
       qIndexParams,
       rockMassSummary
     );
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const classificationLines = [
+      '',
+      '=== STATION ROCK MASS CLASSIFICATION RECORD ===',
+      `Project / Tunnel,${settings.tunnelName}`,
+      `Location,${settings.location}`,
+      `Station / Face Chainage,${settings.faceChainage}`,
+      `Surface / Section,${activeSurface.toUpperCase()}`,
+      `Selected Classification Method,${selectedMethod}`,
+      `RMR Version,${rmrParams.version}`,
+      `RMR Basic Score,${rmrResult.basicRmr !== null ? rmrResult.basicRmr : 'Required input not available'}`,
+      `RMR Orientation Adjustment,${rmrResult.orientationAdjustment !== null ? rmrResult.orientationAdjustment : 'Required input not available'}`,
+      `Final RMR,${rmrResult.finalRmr !== null ? rmrResult.finalRmr : 'Required input not available'}`,
+      `RMR Classification,${rmrResult.rockMassClassLabel}`,
+      `Q-System Value,${qResult.isComplete ? qResult.qValue.toFixed(3) : 'Required input not available'}`,
+      `Q-System Classification,${qResult.isComplete ? qResult.rockMassClass : 'Required input not available'}`,
+      `GSI Value,${gsiResult.gsiValue !== null ? gsiResult.gsiValue : 'Required input not available'}`,
+    ].join('\n');
+
+    const blob = new Blob([baseCsv + '\n' + classificationLines], {
+      type: 'text/csv;charset=utf-8;',
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${settings.tunnelName.replace(/\s+/g, '_')}_${settings.faceChainage.replace(/\s+/g, '_')}_geology_qindex.csv`;
+    a.download = `${settings.tunnelName.replace(/\s+/g, '_')}_${settings.faceChainage.replace(
+      /\s+/g,
+      '_'
+    )}_classification.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
-  return (
-    <div className="h-[340px] bg-[#0E131D] border-t border-slate-700/90 flex flex-col shrink-0 z-30 shadow-2xl">
-      {/* Top Drawer Header & Workflow Switcher */}
-      <div className="flex items-center justify-between px-4 py-2 bg-[#131A28] border-b border-slate-800 shrink-0">
+  // Helper badge for parameter input status
+  const renderParamStatusBadge = (
+    status: ParameterInputStatus,
+    onConfirmSuggestion: () => void,
+    onMarkMissing: () => void
+  ) => {
+    if (status === 'MISSING') {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-950/90 border border-rose-500/60 text-rose-200 text-[9px] font-bold">
+          <AlertTriangle className="w-2.5 h-2.5 text-rose-400" />
+          Required input not available
+        </span>
+      );
+    }
+    if (status === 'AI_SUGGESTED_UNCONFIRMED') {
+      return (
+        <span className="inline-flex items-center gap-1">
+          <span className="px-1.5 py-0.5 rounded bg-amber-950/90 border border-amber-500/60 text-amber-200 text-[9px] font-bold">
+            AI SUGGESTION — CONFIRM?
+          </span>
+          <button
+            type="button"
+            onClick={onConfirmSuggestion}
+            className="px-1.5 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] font-bold flex items-center gap-0.5"
+            title="Confirm this suggested parameter value"
+          >
+            <Check className="w-2.5 h-2.5" />
+            Confirm
+          </button>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1">
+        <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-600/40 text-emerald-300 text-[9px] font-semibold">
+          CONFIRMED
+        </span>
+        <button
+          type="button"
+          onClick={onMarkMissing}
+          className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-rose-300 text-[9px]"
+          title="Clear value (set as 'Required input not available')"
+        >
+          Clear
+        </button>
+      </span>
+    );
+  };
+
+  const setRmrParamConfirmed = (key: RmrParamKey, partial: Partial<RmrParameters>) => {
+    const nextStatus = {
+      ...rmrParams.paramStatus,
+      [key]: 'USER_ENTERED' as ParameterInputStatus,
+    };
+    const allConfirmed = (Object.values(nextStatus) as ParameterInputStatus[]).every(
+      (s) => s === 'USER_ENTERED' || s === 'USER_CONFIRMED'
+    );
+    onUpdateRmrParams({
+      ...rmrParams,
+      ...partial,
+      paramStatus: nextStatus,
+      userConfirmed: allConfirmed,
+      confirmedAt: allConfirmed ? new Date().toISOString() : rmrParams.confirmedAt,
+    });
+  };
+
+  const setRmrParamMissing = (key: RmrParamKey) => {
+    const nextStatus = {
+      ...rmrParams.paramStatus,
+      [key]: 'MISSING' as ParameterInputStatus,
+    };
+    const partial: Partial<RmrParameters> = {};
+    if (key === 'intactStrength') {
+      partial.intactStrengthValueMPa = null;
+      partial.intactStrengthRating = null;
+      partial.intactStrengthDescription = 'Required input not available';
+    } else if (key === 'rqd') {
+      partial.rqdPercent = null;
+      partial.rqdRating = null;
+      partial.rqdDescription = 'Required input not available';
+    } else if (key === 'spacing') {
+      partial.spacingMeters = null;
+      partial.spacingRating = null;
+      partial.spacingDescription = 'Required input not available';
+    } else if (key === 'condition') {
+      partial.conditionRating = null;
+      partial.conditionDescription = 'Required input not available';
+    } else if (key === 'groundwater') {
+      partial.groundwaterInflowLPerMin10m = null;
+      partial.groundwaterRating = null;
+      partial.groundwaterDescription = 'Required input not available';
+    } else if (key === 'orientationAdjustment') {
+      partial.orientationFavourability = 'Not Assessed';
+      partial.orientationAdjustmentRating = null;
+    }
+    onUpdateRmrParams({
+      ...rmrParams,
+      ...partial,
+      paramStatus: nextStatus,
+      userConfirmed: false,
+    });
+  };
+
+  const confirmAllRmrSuggestions = () => {
+    const nextStatus = { ...rmrParams.paramStatus };
+    (Object.keys(nextStatus) as RmrParamKey[]).forEach((k) => {
+      if (nextStatus[k] === 'AI_SUGGESTED_UNCONFIRMED') {
+        nextStatus[k] = 'USER_CONFIRMED';
+      }
+    });
+    onUpdateRmrParams({
+      ...rmrParams,
+      paramStatus: nextStatus,
+      userConfirmed: (Object.values(nextStatus) as ParameterInputStatus[]).every(
+        (s) => s === 'USER_ENTERED' || s === 'USER_CONFIRMED'
+      ),
+      confirmedAt: new Date().toISOString(),
+    });
+  };
+
+  const setQParamConfirmed = (key: QSystemParamKey, partial: Partial<QIndexParameters>) => {
+    const nextStatus = {
+      ...qParamStatus,
+      [key]: 'USER_ENTERED' as ParameterInputStatus,
+    };
+    onUpdateQParamStatus(nextStatus);
+    onUpdateQIndexParams({
+      ...qIndexParams,
+      ...partial,
+      userConfirmed: (Object.values(nextStatus) as ParameterInputStatus[]).every(
+        (s) => s === 'USER_ENTERED' || s === 'USER_CONFIRMED'
+      ),
+      confirmedAt: new Date().toISOString(),
+    });
+  };
+
+  const confirmAllQSuggestions = () => {
+    const nextStatus = { ...qParamStatus };
+    (Object.keys(nextStatus) as QSystemParamKey[]).forEach((k) => {
+      if (nextStatus[k] === 'AI_SUGGESTED_UNCONFIRMED') {
+        nextStatus[k] = 'USER_CONFIRMED';
+      }
+    });
+    onUpdateQParamStatus(nextStatus);
+    onUpdateQIndexParams({
+      ...qIndexParams,
+      userConfirmed: true,
+      confirmedAt: new Date().toISOString(),
+    });
+  };
+
+  // Summary badge string for tab button
+  const getMethodSummaryBadge = () => {
+    if (selectedMethod === 'RMR') {
+      return rmrResult.isComplete && rmrResult.finalRmr !== null
+        ? `${rmrParams.version} = ${rmrResult.finalRmr} · ${rmrResult.rockMassClassLabel}`
+        : `${rmrParams.version}: Required input not available`;
+    }
+    if (selectedMethod === 'Q_SYSTEM') {
+      return qResult.isComplete
+        ? `Q = ${qResult.qValue.toFixed(2)} · ${qResult.rockQualityCategory}`
+        : `Q-System: Required input not available`;
+    }
+    if (selectedMethod === 'BOTH_RMR_AND_Q') {
+      const rmrStr =
+        rmrResult.isComplete && rmrResult.finalRmr !== null
+          ? `RMR=${rmrResult.finalRmr}`
+          : 'RMR=Incomplete';
+      const qStr = qResult.isComplete ? `Q=${qResult.qValue.toFixed(2)}` : 'Q=Incomplete';
+      return `DUAL: ${rmrStr} | ${qStr}`;
+    }
+    return gsiResult.isComplete && gsiResult.gsiValue !== null
+      ? `GSI = ${gsiResult.gsiValue} (${gsiResult.gsiRangeLabel})`
+      : `GSI: Required input not available`;
+  };
+
+  // Render RMR Editor & Result Section
+  const renderRmrSection = (compact = false) => (
+    <div className="space-y-2.5">
+      {/* RMR Method Header Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/90 border border-indigo-500/40 rounded px-3 py-1.5">
+        <div className="flex items-center gap-2.5">
+          <span className="px-2 py-0.5 rounded bg-indigo-600 text-white text-[10px] font-bold">
+            METHOD: BIENIAWSKI RMR
+          </span>
+          <div className="flex items-center gap-1 text-[11px]">
+            <span className="text-slate-400">Version:</span>
+            {(['RMR89', 'RMR76'] as RmrMethodologyVersion[]).map((ver) => (
+              <button
+                key={ver}
+                type="button"
+                onClick={() => {
+                  const nextSpacingRating =
+                    rmrParams.spacingMeters !== null
+                      ? computeRmrSpacingRating(rmrParams.spacingMeters, ver)
+                      : rmrParams.spacingRating;
+                  onUpdateRmrParams({
+                    ...rmrParams,
+                    version: ver,
+                    spacingRating: nextSpacingRating,
+                  });
+                }}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                  rmrParams.version === ver
+                    ? 'bg-cyan-600 text-white'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                {ver === 'RMR89' ? 'RMR89 (1989 Standard)' : 'RMR76 (1976 Standard)'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          {rmrResult.hasUnconfirmedSuggestions && (
+            <button
+              type="button"
+              onClick={confirmAllRmrSuggestions}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold"
+            >
+              <ShieldCheck className="w-3 h-3" />
+              Confirm All AI Suggestions ({rmrResult.unconfirmedParamLabels.length})
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              const suggested = suggestRmrFromMappedTraces(
+                joints,
+                jointSets,
+                geometry,
+                settings,
+                rockMassSummary,
+                rmrParams
+              );
+              onUpdateRmrParams(suggested);
+            }}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600/25 hover:bg-amber-600/40 text-amber-200 border border-amber-500/40 text-[10px] font-semibold"
+            title="Suggest RMR parameters from mapped discontinuity traces (flagged as suggestions requiring your confirmation)"
+          >
+            <Sparkles className="w-3 h-3 text-amber-400" />
+            Suggest RMR from Mapped Traces
+          </button>
+          <button
+            type="button"
+            onClick={() => onUpdateRmrParams(createBlankRmrParameters(rmrParams.version))}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px]"
+            title="Clear all RMR inputs to 'Required input not available'"
+          >
+            <RotateCcw className="w-3 h-3" />
+            Set Inputs Unassessed
+          </button>
+        </div>
+      </div>
+
+      <div className={`grid grid-cols-1 ${compact ? 'lg:grid-cols-12' : 'xl:grid-cols-12'} gap-3`}>
+        {/* 6 RMR Input Parameter Cards */}
+        <div
+          className={`${
+            compact ? 'lg:col-span-8' : 'xl:col-span-8'
+          } grid grid-cols-1 md:grid-cols-3 gap-2`}
+        >
+          {/* A1. Strength of Intact Rock Material */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-indigo-300 font-bold text-[11px]">
+                A1. Intact Rock Strength
+              </span>
+              <span className="text-white font-bold text-xs px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700/60">
+                R1 ={' '}
+                {rmrResult.r1StrengthRating !== null
+                  ? `${rmrResult.r1StrengthRating} / 15`
+                  : 'N/A'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              {renderParamStatusBadge(
+                rmrParams.paramStatus.intactStrength,
+                () => setRmrParamConfirmed('intactStrength', {}),
+                () => setRmrParamMissing('intactStrength')
+              )}
+              <span className="text-[10px] text-slate-400">
+                {rmrParams.intactStrengthValueMPa !== null
+                  ? `${rmrParams.intactStrengthValueMPa} MPa`
+                  : 'Missing'}
+              </span>
+            </div>
+
+            <select
+              value={rmrParams.intactStrengthRating ?? ''}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  setRmrParamMissing('intactStrength');
+                  return;
+                }
+                const rVal = Number(e.target.value);
+                const opt = RMR_STRENGTH_OPTIONS.find((o) => o.rating89 === rVal);
+                setRmrParamConfirmed('intactStrength', {
+                  intactStrengthRating: rVal,
+                  intactStrengthValueMPa: opt ? opt.representativeNum : 75,
+                  intactStrengthDescription: opt ? opt.valueLabel : `Rating ${rVal}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {RMR_STRENGTH_OPTIONS.map((opt) => (
+                <option key={opt.rating89} value={opt.rating89}>
+                  [Rating {opt.rating89}] {opt.label}
+                </option>
+              ))}
+            </select>
+
+            <div className="flex items-center gap-1.5 text-[10px]">
+              <span className="text-slate-400">Exact UCS (MPa):</span>
+              <input
+                type="number"
+                min="0"
+                max="400"
+                step="1"
+                placeholder="Enter MPa"
+                value={rmrParams.intactStrengthValueMPa ?? ''}
+                onChange={(e) => {
+                  if (e.target.value === '') {
+                    setRmrParamMissing('intactStrength');
+                    return;
+                  }
+                  const val = Math.max(0, Number(e.target.value));
+                  const rating = computeRmrStrengthRating(val, rmrParams.strengthInputType);
+                  setRmrParamConfirmed('intactStrength', {
+                    intactStrengthValueMPa: val,
+                    intactStrengthRating: rating,
+                    intactStrengthDescription: `UCS = ${val} MPa`,
+                  });
+                }}
+                className="w-20 px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+              />
+            </div>
+          </div>
+
+          {/* A2. Rock Quality Designation (RQD %) */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-indigo-300 font-bold text-[11px]">A2. RQD (%)</span>
+              <span className="text-white font-bold text-xs px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700/60">
+                R2 = {rmrResult.r2RqdRating !== null ? `${rmrResult.r2RqdRating} / 20` : 'N/A'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              {renderParamStatusBadge(
+                rmrParams.paramStatus.rqd,
+                () => setRmrParamConfirmed('rqd', {}),
+                () => setRmrParamMissing('rqd')
+              )}
+              <span className="text-[10px] text-slate-300 font-bold">
+                {rmrParams.rqdPercent !== null ? `${rmrParams.rqdPercent}%` : 'Missing'}
+              </span>
+            </div>
+
+            <select
+              value={rmrParams.rqdRating ?? ''}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  setRmrParamMissing('rqd');
+                  return;
+                }
+                const rVal = Number(e.target.value);
+                const opt = RMR_RQD_OPTIONS.find((o) => o.rating89 === rVal);
+                setRmrParamConfirmed('rqd', {
+                  rqdRating: rVal,
+                  rqdPercent: opt ? opt.representativeNum : 65,
+                  rqdDescription: opt ? opt.valueLabel : `RQD Rating ${rVal}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {RMR_RQD_OPTIONS.map((opt) => (
+                <option key={opt.rating89} value={opt.rating89}>
+                  [Rating {opt.rating89}] {opt.label}
+                </option>
+              ))}
+            </select>
+
+            <div className="flex items-center gap-2 text-[10px]">
+              <span className="text-slate-400">Exact RQD %:</span>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                placeholder="0-100%"
+                value={rmrParams.rqdPercent ?? ''}
+                onChange={(e) => {
+                  if (e.target.value === '') {
+                    setRmrParamMissing('rqd');
+                    return;
+                  }
+                  const pct = Math.max(0, Math.min(100, Number(e.target.value)));
+                  const rating = computeRmrRqdRating(pct);
+                  setRmrParamConfirmed('rqd', {
+                    rqdPercent: pct,
+                    rqdRating: rating,
+                    rqdDescription: `${pct}%`,
+                  });
+                }}
+                className="w-20 px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+              />
+            </div>
+          </div>
+
+          {/* A3. Spacing of Discontinuities */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-indigo-300 font-bold text-[11px]">
+                A3. Discontinuity Spacing
+              </span>
+              <span className="text-white font-bold text-xs px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700/60">
+                R3 ={' '}
+                {rmrResult.r3SpacingRating !== null
+                  ? `${rmrResult.r3SpacingRating} / ${rmrParams.version === 'RMR89' ? 20 : 30}`
+                  : 'N/A'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              {renderParamStatusBadge(
+                rmrParams.paramStatus.spacing,
+                () => setRmrParamConfirmed('spacing', {}),
+                () => setRmrParamMissing('spacing')
+              )}
+              <span className="text-[10px] text-slate-300">
+                {rmrParams.spacingMeters !== null ? `${rmrParams.spacingMeters} m` : 'Missing'}
+              </span>
+            </div>
+
+            <select
+              value={rmrParams.spacingRating ?? ''}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  setRmrParamMissing('spacing');
+                  return;
+                }
+                const rVal = Number(e.target.value);
+                const opt = RMR_SPACING_OPTIONS.find(
+                  (o) => (rmrParams.version === 'RMR89' ? o.rating89 : o.rating76) === rVal
+                );
+                setRmrParamConfirmed('spacing', {
+                  spacingRating: rVal,
+                  spacingMeters: opt ? opt.representativeNum : 0.35,
+                  spacingDescription: opt ? opt.valueLabel : `Rating ${rVal}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {RMR_SPACING_OPTIONS.map((opt) => {
+                const r = rmrParams.version === 'RMR89' ? opt.rating89 : opt.rating76;
+                return (
+                  <option key={opt.label} value={r}>
+                    [Rating {r}] {opt.label}
+                  </option>
+                );
+              })}
+            </select>
+
+            <div className="flex items-center gap-2 text-[10px]">
+              <span className="text-slate-400">Spacing (m):</span>
+              <input
+                type="number"
+                min="0.01"
+                max="10"
+                step="0.05"
+                placeholder="e.g. 0.35"
+                value={rmrParams.spacingMeters ?? ''}
+                onChange={(e) => {
+                  if (e.target.value === '') {
+                    setRmrParamMissing('spacing');
+                    return;
+                  }
+                  const sp = Math.max(0.01, Number(e.target.value));
+                  const rating = computeRmrSpacingRating(sp, rmrParams.version);
+                  setRmrParamConfirmed('spacing', {
+                    spacingMeters: sp,
+                    spacingRating: rating,
+                    spacingDescription: `${sp} m`,
+                  });
+                }}
+                className="w-20 px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+              />
+            </div>
+          </div>
+
+          {/* A4. Condition of Discontinuities */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-indigo-300 font-bold text-[11px]">
+                A4. Discontinuity Condition
+              </span>
+              <span className="text-white font-bold text-xs px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700/60">
+                R4 ={' '}
+                {rmrResult.r4ConditionRating !== null
+                  ? `${rmrResult.r4ConditionRating} / ${rmrParams.version === 'RMR89' ? 30 : 25}`
+                  : 'N/A'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              {renderParamStatusBadge(
+                rmrParams.paramStatus.condition,
+                () => setRmrParamConfirmed('condition', {}),
+                () => setRmrParamMissing('condition')
+              )}
+              <label className="flex items-center gap-1 text-[9px] text-cyan-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={rmrParams.conditionSubRatings.useDetailedSubRatings}
+                  onChange={(e) => {
+                    const useSub = e.target.checked;
+                    const sub = rmrParams.conditionSubRatings;
+                    const sum =
+                      sub.persistenceRating +
+                      sub.apertureRating +
+                      sub.roughnessRating +
+                      sub.infillingRating +
+                      sub.weatheringRating;
+                    setRmrParamConfirmed('condition', {
+                      conditionRating: useSub ? sum : rmrParams.conditionRating ?? 25,
+                      conditionSubRatings: {
+                        ...sub,
+                        useDetailedSubRatings: useSub,
+                      },
+                    });
+                  }}
+                  className="rounded border-slate-700 bg-slate-900"
+                />
+                5-Subparam Table
+              </label>
+            </div>
+
+            {!rmrParams.conditionSubRatings.useDetailedSubRatings ? (
+              <select
+                value={rmrParams.conditionRating ?? ''}
+                onChange={(e) => {
+                  if (e.target.value === '') {
+                    setRmrParamMissing('condition');
+                    return;
+                  }
+                  const rVal = Number(e.target.value);
+                  const opt = RMR_CONDITION_OPTIONS.find(
+                    (o) => (rmrParams.version === 'RMR89' ? o.rating89 : o.rating76) === rVal
+                  );
+                  setRmrParamConfirmed('condition', {
+                    conditionRating: rVal,
+                    conditionDescription: opt ? opt.valueLabel : `Condition Rating ${rVal}`,
+                  });
+                }}
+                className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+              >
+                <option value="">-- Required input not available --</option>
+                {RMR_CONDITION_OPTIONS.map((opt) => {
+                  const r = rmrParams.version === 'RMR89' ? opt.rating89 : opt.rating76;
+                  return (
+                    <option key={opt.label} value={r}>
+                      [Rating {r}] {opt.label}
+                    </option>
+                  );
+                })}
+              </select>
+            ) : (
+              <div className="grid grid-cols-2 gap-1 text-[9px]">
+                <select
+                  value={rmrParams.conditionSubRatings.persistenceRating}
+                  onChange={(e) => {
+                    const r = Number(e.target.value);
+                    const opt = RMR_SUB_PERSISTENCE_OPTIONS.find((o) => o.rating === r);
+                    const nextSub = {
+                      ...rmrParams.conditionSubRatings,
+                      persistenceRating: r,
+                      persistenceValue: opt?.label || '',
+                    };
+                    setRmrParamConfirmed('condition', {
+                      conditionSubRatings: nextSub,
+                      conditionRating:
+                        nextSub.persistenceRating +
+                        nextSub.apertureRating +
+                        nextSub.roughnessRating +
+                        nextSub.infillingRating +
+                        nextSub.weatheringRating,
+                    });
+                  }}
+                  className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                  title="Persistence (0-6)"
+                >
+                  {RMR_SUB_PERSISTENCE_OPTIONS.map((o) => (
+                    <option key={o.label} value={o.rating}>
+                      Len [{o.rating}]: {o.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={rmrParams.conditionSubRatings.apertureRating}
+                  onChange={(e) => {
+                    const r = Number(e.target.value);
+                    const opt = RMR_SUB_APERTURE_OPTIONS.find((o) => o.rating === r);
+                    const nextSub = {
+                      ...rmrParams.conditionSubRatings,
+                      apertureRating: r,
+                      apertureValue: opt?.label || '',
+                    };
+                    setRmrParamConfirmed('condition', {
+                      conditionSubRatings: nextSub,
+                      conditionRating:
+                        nextSub.persistenceRating +
+                        nextSub.apertureRating +
+                        nextSub.roughnessRating +
+                        nextSub.infillingRating +
+                        nextSub.weatheringRating,
+                    });
+                  }}
+                  className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                  title="Aperture (0-6)"
+                >
+                  {RMR_SUB_APERTURE_OPTIONS.map((o) => (
+                    <option key={o.label} value={o.rating}>
+                      Aper [{o.rating}]: {o.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={rmrParams.conditionSubRatings.roughnessRating}
+                  onChange={(e) => {
+                    const r = Number(e.target.value);
+                    const opt = RMR_SUB_ROUGHNESS_OPTIONS.find((o) => o.rating === r);
+                    const nextSub = {
+                      ...rmrParams.conditionSubRatings,
+                      roughnessRating: r,
+                      roughnessValue: opt?.label || '',
+                    };
+                    setRmrParamConfirmed('condition', {
+                      conditionSubRatings: nextSub,
+                      conditionRating:
+                        nextSub.persistenceRating +
+                        nextSub.apertureRating +
+                        nextSub.roughnessRating +
+                        nextSub.infillingRating +
+                        nextSub.weatheringRating,
+                    });
+                  }}
+                  className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                  title="Roughness (0-6)"
+                >
+                  {RMR_SUB_ROUGHNESS_OPTIONS.map((o) => (
+                    <option key={o.label} value={o.rating}>
+                      Rough [{o.rating}]: {o.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={rmrParams.conditionSubRatings.infillingRating}
+                  onChange={(e) => {
+                    const r = Number(e.target.value);
+                    const opt = RMR_SUB_INFILLING_OPTIONS.find((o) => o.rating === r);
+                    const nextSub = {
+                      ...rmrParams.conditionSubRatings,
+                      infillingRating: r,
+                      infillingValue: opt?.label || '',
+                    };
+                    setRmrParamConfirmed('condition', {
+                      conditionSubRatings: nextSub,
+                      conditionRating:
+                        nextSub.persistenceRating +
+                        nextSub.apertureRating +
+                        nextSub.roughnessRating +
+                        nextSub.infillingRating +
+                        nextSub.weatheringRating,
+                    });
+                  }}
+                  className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                  title="Infilling (0-6)"
+                >
+                  {RMR_SUB_INFILLING_OPTIONS.map((o) => (
+                    <option key={o.label} value={o.rating}>
+                      Infill [{o.rating}]: {o.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={rmrParams.conditionSubRatings.weatheringRating}
+                  onChange={(e) => {
+                    const r = Number(e.target.value);
+                    const opt = RMR_SUB_WEATHERING_OPTIONS.find((o) => o.rating === r);
+                    const nextSub = {
+                      ...rmrParams.conditionSubRatings,
+                      weatheringRating: r,
+                      weatheringValue: opt?.label || '',
+                    };
+                    setRmrParamConfirmed('condition', {
+                      conditionSubRatings: nextSub,
+                      conditionRating:
+                        nextSub.persistenceRating +
+                        nextSub.apertureRating +
+                        nextSub.roughnessRating +
+                        nextSub.infillingRating +
+                        nextSub.weatheringRating,
+                    });
+                  }}
+                  className="col-span-2 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                  title="Weathering (0-6)"
+                >
+                  {RMR_SUB_WEATHERING_OPTIONS.map((o) => (
+                    <option key={o.label} value={o.rating}>
+                      Weathering [{o.rating}]: {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* A5. Groundwater Conditions */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-indigo-300 font-bold text-[11px]">A5. Groundwater</span>
+              <span className="text-white font-bold text-xs px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700/60">
+                R5 ={' '}
+                {rmrResult.r5GroundwaterRating !== null
+                  ? `${rmrResult.r5GroundwaterRating} / ${rmrParams.version === 'RMR89' ? 15 : 10}`
+                  : 'N/A'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              {renderParamStatusBadge(
+                rmrParams.paramStatus.groundwater,
+                () => setRmrParamConfirmed('groundwater', {}),
+                () => setRmrParamMissing('groundwater')
+              )}
+              <span className="text-[10px] text-slate-400 truncate max-w-[110px]">
+                {rmrParams.groundwaterDescription}
+              </span>
+            </div>
+
+            <select
+              value={rmrParams.groundwaterRating ?? ''}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  setRmrParamMissing('groundwater');
+                  return;
+                }
+                const rVal = Number(e.target.value);
+                const opt = RMR_GROUNDWATER_OPTIONS.find(
+                  (o) => (rmrParams.version === 'RMR89' ? o.rating89 : o.rating76) === rVal
+                );
+                setRmrParamConfirmed('groundwater', {
+                  groundwaterRating: rVal,
+                  groundwaterInflowLPerMin10m: opt ? opt.representativeNum : 5,
+                  groundwaterDescription: opt ? opt.valueLabel : `Rating ${rVal}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {RMR_GROUNDWATER_OPTIONS.map((opt) => {
+                const r = rmrParams.version === 'RMR89' ? opt.rating89 : opt.rating76;
+                return (
+                  <option key={opt.label} value={r}>
+                    [Rating {r}] {opt.label}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          {/* B. Discontinuity Orientation Adjustment */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-indigo-300 font-bold text-[11px]">
+                B. Orientation Adjustment
+              </span>
+              <span className="text-amber-300 font-bold text-xs px-1.5 py-0.5 rounded bg-amber-950/70 border border-amber-700/60">
+                Adj ={' '}
+                {rmrResult.orientationAdjustment !== null
+                  ? `${rmrResult.orientationAdjustment}`
+                  : 'N/A'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              {renderParamStatusBadge(
+                rmrParams.paramStatus.orientationAdjustment,
+                () => setRmrParamConfirmed('orientationAdjustment', {}),
+                () => setRmrParamMissing('orientationAdjustment')
+              )}
+              <span className="text-[10px] text-slate-300">
+                {rmrParams.orientationFavourability}
+              </span>
+            </div>
+
+            <select
+              value={
+                rmrParams.orientationAdjustmentRating !== null
+                  ? String(rmrParams.orientationAdjustmentRating)
+                  : ''
+              }
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  setRmrParamMissing('orientationAdjustment');
+                  return;
+                }
+                const adj = Number(e.target.value);
+                const opt = RMR_ORIENTATION_ADJUSTMENT_OPTIONS.find(
+                  (o) => o.adjustmentTunnel === adj
+                );
+                setRmrParamConfirmed('orientationAdjustment', {
+                  orientationAdjustmentRating: adj,
+                  orientationFavourability: opt ? opt.favourability : 'Fair',
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {RMR_ORIENTATION_ADJUSTMENT_OPTIONS.map((opt) => (
+                <option key={opt.favourability} value={opt.adjustmentTunnel}>
+                  [{opt.favourability}] {opt.description}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Right 4 Columns: RMR Calculation Summary & Classification Result Card */}
+        <div
+          className={`${
+            compact ? 'lg:col-span-4' : 'xl:col-span-4'
+          } p-3 bg-slate-950 border border-indigo-500/50 rounded flex flex-col justify-between space-y-2`}
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+            <div>
+              <div className="text-[10px] text-indigo-300 font-bold">
+                BIENIAWSKI ROCK MASS RATING ({rmrParams.version})
+              </div>
+              {rmrResult.isComplete && rmrResult.finalRmr !== null ? (
+                <div className="text-lg font-bold text-white flex items-center gap-2 mt-0.5">
+                  <span>RMR = {rmrResult.finalRmr}</span>
+                  <span
+                    className="text-xs px-2 py-0.5 rounded font-semibold text-white"
+                    style={{ backgroundColor: rmrResult.colorHex }}
+                  >
+                    {rmrResult.rockMassClassLabel}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-xs font-bold text-rose-300 bg-rose-950/70 border border-rose-500/40 rounded px-2 py-1 mt-1">
+                  Required input not available ({rmrResult.missingParamLabels.length} missing)
+                </div>
+              )}
+            </div>
+            <div className="text-right text-[10px] text-slate-400">
+              <div>Basic RMR: {rmrResult.basicRmr !== null ? rmrResult.basicRmr : 'N/A'} / 100</div>
+              <div>
+                Adj: {rmrResult.orientationAdjustment !== null ? rmrResult.orientationAdjustment : 'N/A'}
+              </div>
+            </div>
+          </div>
+
+          {/* Individual Parameter Ratings Breakdown */}
+          <div className="grid grid-cols-6 gap-1 text-center bg-slate-900/90 p-1.5 rounded border border-slate-800 text-[10px]">
+            <div>
+              <div className="text-slate-400">R1(UCS)</div>
+              <div className="text-indigo-300 font-bold">
+                {rmrResult.r1StrengthRating ?? '—'}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400">R2(RQD)</div>
+              <div className="text-indigo-300 font-bold">{rmrResult.r2RqdRating ?? '—'}</div>
+            </div>
+            <div>
+              <div className="text-slate-400">R3(Spc)</div>
+              <div className="text-indigo-300 font-bold">
+                {rmrResult.r3SpacingRating ?? '—'}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400">R4(Cnd)</div>
+              <div className="text-indigo-300 font-bold">
+                {rmrResult.r4ConditionRating ?? '—'}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400">R5(H2O)</div>
+              <div className="text-indigo-300 font-bold">
+                {rmrResult.r5GroundwaterRating ?? '—'}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-400">Adj</div>
+              <div className="text-amber-300 font-bold">
+                {rmrResult.orientationAdjustment ?? '—'}
+              </div>
+            </div>
+          </div>
+
+          {/* Supporting Calculation Summary */}
+          {rmrResult.isComplete ? (
+            <div className="space-y-1 text-[10px]">
+              <div className="grid grid-cols-2 gap-1 text-slate-300 bg-slate-900/60 p-1.5 rounded border border-slate-800/80">
+                <div>
+                  Stand-up Time: <span className="text-white font-semibold">{rmrResult.averageStandUpTime}</span>
+                </div>
+                <div>
+                  Modulus Em:{' '}
+                  <span className="text-cyan-300 font-semibold">
+                    {rmrResult.deformationModulusGPa} GPa
+                  </span>
+                </div>
+                <div>
+                  Cohesion c: <span className="text-white font-semibold">{rmrResult.cohesionKPa}</span>
+                </div>
+                <div>
+                  Friction φ: <span className="text-white font-semibold">{rmrResult.frictionAngleDeg}</span>
+                </div>
+              </div>
+              <div className="text-[10px] text-slate-300 bg-slate-900/70 p-2 rounded border border-slate-800">
+                <span className="text-emerald-400 font-bold block mb-0.5">
+                  BIENIAWSKI SUPPORT GUIDELINE ({rmrResult.rockMassClassLabel}):
+                </span>
+                {rmrResult.recommendedSupportGuidelines}
+              </div>
+            </div>
+          ) : (
+            <div className="text-[10px] text-rose-200 bg-rose-950/40 border border-rose-800/60 rounded p-2">
+              <div className="font-bold mb-1">Missing Required RMR Parameters:</div>
+              <ul className="list-disc list-inside space-y-0.5 text-rose-300">
+                {rmrResult.missingParamLabels.map((lbl) => (
+                  <li key={lbl}>{lbl}: Required input not available</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // Render Q-System Editor & Result Section
+  const renderQSystemSection = (compact = false) => (
+    <div className="space-y-2.5">
+      {/* Q-System Method Header Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/90 border border-cyan-500/40 rounded px-3 py-1.5">
         <div className="flex items-center gap-2">
+          <span className="px-2 py-0.5 rounded bg-cyan-600 text-white text-[10px] font-bold">
+            METHOD: BARTON Q-SYSTEM (NGI)
+          </span>
+          <span className="text-[10px] text-slate-300 font-mono">
+            Formula: Q = (RQD / Jn) × (Jr / Ja) × (Jw / SRF)
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          {qResult.hasUnconfirmedSuggestions && (
+            <button
+              type="button"
+              onClick={confirmAllQSuggestions}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold"
+            >
+              <ShieldCheck className="w-3 h-3" />
+              Confirm All AI Suggestions ({qResult.unconfirmedParamLabels.length})
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              const { nextParams, nextStatus } = suggestQSystemWithConfirmation(
+                joints,
+                jointSets,
+                geometry,
+                settings,
+                qIndexParams,
+                qParamStatus
+              );
+              onUpdateQIndexParams(nextParams);
+              onUpdateQParamStatus(nextStatus);
+            }}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600/25 hover:bg-amber-600/40 text-amber-200 border border-amber-500/40 text-[10px] font-semibold"
+            title="Suggest RQD, Jn, Jr, Ja, Jw, SRF from mapped discontinuity traces (requires user confirmation)"
+          >
+            <Sparkles className="w-3 h-3 text-amber-400" />
+            Suggest Q from Mapped Traces
+          </button>
+          <button
+            type="button"
+            onClick={() => onUpdateQParamStatus(createBlankQParamStatus())}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px]"
+            title="Mark all Q-System inputs as 'Required input not available'"
+          >
+            <RotateCcw className="w-3 h-3" />
+            Set Inputs Unassessed
+          </button>
+        </div>
+      </div>
+
+      <div className={`grid grid-cols-1 ${compact ? 'lg:grid-cols-12' : 'xl:grid-cols-12'} gap-3`}>
+        {/* Left 8 Columns: 6 NGI Q-System Parameters */}
+        <div
+          className={`${
+            compact ? 'lg:col-span-8' : 'xl:col-span-8'
+          } grid grid-cols-1 md:grid-cols-3 gap-2`}
+        >
+          {/* 1. RQD */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-cyan-400 font-bold text-[11px]">1. RQD (%)</span>
+              <span className="text-white font-bold text-xs">
+                {qParamStatus.rqd === 'MISSING' ? 'N/A' : `${qIndexParams.rqd}%`}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              {renderParamStatusBadge(
+                qParamStatus.rqd,
+                () => setQParamConfirmed('rqd', {}),
+                () => onUpdateQParamStatus({ ...qParamStatus, rqd: 'MISSING' })
+              )}
+              <span className="text-[9px] text-slate-400">
+                Jv ≈ {qIndexParams.volumetricJointCountJv ?? 14} jts/m³
+              </span>
+            </div>
+            <input
+              type="range"
+              min="10"
+              max="100"
+              step="1"
+              value={qIndexParams.rqd}
+              onChange={(e) => setQParamConfirmed('rqd', { rqd: Number(e.target.value) })}
+              className="w-full accent-cyan-500"
+            />
+          </div>
+
+          {/* 2. Jn */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-cyan-400 font-bold text-[11px]">2. Joint Set No. (Jn)</span>
+              <span className="text-white font-bold text-xs">
+                {qParamStatus.jn === 'MISSING' ? 'N/A' : qResult.effectiveJn}
+              </span>
+            </div>
+            <div>
+              {renderParamStatusBadge(
+                qParamStatus.jn,
+                () => setQParamConfirmed('jn', {}),
+                () => onUpdateQParamStatus({ ...qParamStatus, jn: 'MISSING' })
+              )}
+            </div>
+            <select
+              value={qParamStatus.jn === 'MISSING' ? '' : qIndexParams.jn}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  onUpdateQParamStatus({ ...qParamStatus, jn: 'MISSING' });
+                  return;
+                }
+                const val = Number(e.target.value);
+                const found = JN_OPTIONS.find((o) => o.val === val);
+                setQParamConfirmed('jn', {
+                  jn: val,
+                  jnDescription: found ? found.label : `Jn = ${val}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {JN_OPTIONS.map((opt) => (
+                <option key={opt.val} value={opt.val}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <div className="flex items-center gap-3 text-[10px] text-slate-300">
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(qIndexParams.isPortal)}
+                  onChange={(e) =>
+                    setQParamConfirmed('jn', {
+                      isPortal: e.target.checked,
+                      isIntersection: e.target.checked ? false : qIndexParams.isIntersection,
+                    })
+                  }
+                  className="rounded border-slate-700 bg-slate-800 text-cyan-500"
+                />
+                Portal (2×Jn)
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(qIndexParams.isIntersection)}
+                  onChange={(e) =>
+                    setQParamConfirmed('jn', {
+                      isIntersection: e.target.checked,
+                      isPortal: e.target.checked ? false : qIndexParams.isPortal,
+                    })
+                  }
+                  className="rounded border-slate-700 bg-slate-800 text-cyan-500"
+                />
+                Intersection (3×Jn)
+              </label>
+            </div>
+          </div>
+
+          {/* 3. Jr */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-cyan-400 font-bold text-[11px]">3. Joint Roughness (Jr)</span>
+              <span className="text-white font-bold text-xs">
+                {qParamStatus.jr === 'MISSING' ? 'N/A' : qIndexParams.jr}
+              </span>
+            </div>
+            <div>
+              {renderParamStatusBadge(
+                qParamStatus.jr,
+                () => setQParamConfirmed('jr', {}),
+                () => onUpdateQParamStatus({ ...qParamStatus, jr: 'MISSING' })
+              )}
+            </div>
+            <select
+              value={qParamStatus.jr === 'MISSING' ? '' : qIndexParams.jr}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  onUpdateQParamStatus({ ...qParamStatus, jr: 'MISSING' });
+                  return;
+                }
+                const val = Number(e.target.value);
+                const found = JR_OPTIONS.find((o) => o.val === val);
+                setQParamConfirmed('jr', {
+                  jr: val,
+                  jrDescription: found ? found.label : `Jr = ${val}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {JR_OPTIONS.map((opt) => (
+                <option key={opt.val} value={opt.val}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 4. Ja */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-cyan-400 font-bold text-[11px]">4. Joint Alteration (Ja)</span>
+              <span className="text-white font-bold text-xs">
+                {qParamStatus.ja === 'MISSING' ? 'N/A' : qIndexParams.ja}
+              </span>
+            </div>
+            <div>
+              {renderParamStatusBadge(
+                qParamStatus.ja,
+                () => setQParamConfirmed('ja', {}),
+                () => onUpdateQParamStatus({ ...qParamStatus, ja: 'MISSING' })
+              )}
+            </div>
+            <select
+              value={qParamStatus.ja === 'MISSING' ? '' : qIndexParams.ja}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  onUpdateQParamStatus({ ...qParamStatus, ja: 'MISSING' });
+                  return;
+                }
+                const val = Number(e.target.value);
+                const found = JA_OPTIONS.find((o) => o.val === val);
+                setQParamConfirmed('ja', {
+                  ja: val,
+                  jaDescription: found ? found.label : `Ja = ${val}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {JA_OPTIONS.map((opt) => (
+                <option key={opt.val} value={opt.val}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 5. Jw */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-cyan-400 font-bold text-[11px]">5. Joint Water (Jw)</span>
+              <span className="text-white font-bold text-xs">
+                {qParamStatus.jw === 'MISSING' ? 'N/A' : qIndexParams.jw}
+              </span>
+            </div>
+            <div>
+              {renderParamStatusBadge(
+                qParamStatus.jw,
+                () => setQParamConfirmed('jw', {}),
+                () => onUpdateQParamStatus({ ...qParamStatus, jw: 'MISSING' })
+              )}
+            </div>
+            <select
+              value={qParamStatus.jw === 'MISSING' ? '' : qIndexParams.jw}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  onUpdateQParamStatus({ ...qParamStatus, jw: 'MISSING' });
+                  return;
+                }
+                const val = Number(e.target.value);
+                const found = JW_OPTIONS.find((o) => o.val === val);
+                setQParamConfirmed('jw', {
+                  jw: val,
+                  jwDescription: found ? found.label : `Jw = ${val}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {JW_OPTIONS.map((opt) => (
+                <option key={opt.val} value={opt.val}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 6. SRF */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-cyan-400 font-bold text-[11px]">6. Stress Factor (SRF)</span>
+              <span className="text-white font-bold text-xs">
+                {qParamStatus.srf === 'MISSING' ? 'N/A' : qIndexParams.srf}
+              </span>
+            </div>
+            <div>
+              {renderParamStatusBadge(
+                qParamStatus.srf,
+                () => setQParamConfirmed('srf', {}),
+                () => onUpdateQParamStatus({ ...qParamStatus, srf: 'MISSING' })
+              )}
+            </div>
+            <select
+              value={qParamStatus.srf === 'MISSING' ? '' : qIndexParams.srf}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  onUpdateQParamStatus({ ...qParamStatus, srf: 'MISSING' });
+                  return;
+                }
+                const val = Number(e.target.value);
+                const found = SRF_OPTIONS.find((o) => o.val === val);
+                setQParamConfirmed('srf', {
+                  srf: val,
+                  srfDescription: found ? found.label : `SRF = ${val}`,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {SRF_OPTIONS.map((opt) => (
+                <option key={opt.val} value={opt.val}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Right 4 Columns: Computed Q-Value, Quotients & Support Recommendation */}
+        <div
+          className={`${
+            compact ? 'lg:col-span-4' : 'xl:col-span-4'
+          } p-3 bg-slate-950 border border-cyan-500/40 rounded flex flex-col justify-between space-y-2`}
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+            <div>
+              <div className="text-[10px] text-cyan-400 font-bold">
+                BARTON NGI TUNNELLING QUALITY INDEX
+              </div>
+              {qResult.isComplete ? (
+                <div className="text-lg font-bold text-white flex items-center gap-2 mt-0.5">
+                  <span>Q = {qResult.qValue.toFixed(2)}</span>
+                  <span
+                    className="text-xs px-2 py-0.5 rounded font-semibold text-white"
+                    style={{ backgroundColor: qResult.colorHex }}
+                  >
+                    {qResult.rockMassClass}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-xs font-bold text-rose-300 bg-rose-950/70 border border-rose-500/40 rounded px-2 py-1 mt-1">
+                  Required input not available ({qResult.missingParamLabels.length} missing)
+                </div>
+              )}
+            </div>
+            <div className="text-right text-[10px] text-slate-400">
+              <div>De = {qResult.equivalentDimensionDe.toFixed(1)} m</div>
+              <div>ESR = {qIndexParams.esr}</div>
+            </div>
+          </div>
+
+          {qResult.isComplete ? (
+            <>
+              <div className="grid grid-cols-3 gap-1.5 text-center bg-slate-900/90 p-2 rounded border border-slate-800 text-[10px]">
+                <div>
+                  <div className="text-slate-400">Block Size</div>
+                  <div className="text-cyan-300 font-bold">
+                    RQD/Jn = {qResult.blockSizeQuotient}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-400">Shear Strength</div>
+                  <div className="text-cyan-300 font-bold">
+                    Jr/Ja = {qResult.shearStrengthQuotient}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-400">Active Stress</div>
+                  <div className="text-cyan-300 font-bold">
+                    Jw/SRF = {qResult.activeStressQuotient}
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-[10px] text-slate-300 bg-slate-900/70 p-2 rounded border border-slate-800">
+                <span className="text-emerald-400 font-bold block mb-0.5">
+                  NGI RECOMMENDED SUPPORT:
+                </span>
+                {qResult.recommendedSupport}
+              </div>
+            </>
+          ) : (
+            <div className="text-[10px] text-rose-200 bg-rose-950/40 border border-rose-800/60 rounded p-2">
+              <div className="font-bold mb-1">Missing Required Q-System Parameters:</div>
+              <ul className="list-disc list-inside space-y-0.5 text-rose-300">
+                {qResult.missingParamLabels.map((lbl) => (
+                  <li key={lbl}>{lbl}: Required input not available</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // Render GSI Editor & Result Section (Modular 3rd Method)
+  const renderGsiSection = () => (
+    <div className="space-y-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/90 border border-emerald-500/40 rounded px-3 py-1.5">
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold">
+            METHOD: HOEK &amp; MARINOS GSI
+          </span>
+          <span className="text-[10px] text-slate-300">
+            Geological Strength Index &amp; Generalized Hoek-Brown Parameters
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+        <div className="xl:col-span-8 grid grid-cols-1 md:grid-cols-3 gap-2">
+          {/* 1. Structure Category */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-emerald-400 font-bold text-[11px]">
+                1. Rock Mass Structure
+              </span>
+              <span className="text-white font-bold text-xs">
+                {gsiParams.structureRating ?? 'N/A'}
+              </span>
+            </div>
+            <div>
+              {renderParamStatusBadge(
+                gsiParams.paramStatus.structure,
+                () =>
+                  onUpdateGsiParams({
+                    ...gsiParams,
+                    paramStatus: { ...gsiParams.paramStatus, structure: 'USER_CONFIRMED' },
+                  }),
+                () =>
+                  onUpdateGsiParams({
+                    ...gsiParams,
+                    structureCategory: 'MISSING',
+                    structureRating: null,
+                    paramStatus: { ...gsiParams.paramStatus, structure: 'MISSING' },
+                  })
+              )}
+            </div>
+            <select
+              value={gsiParams.structureCategory === 'MISSING' ? '' : gsiParams.structureCategory}
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  onUpdateGsiParams({
+                    ...gsiParams,
+                    structureCategory: 'MISSING',
+                    structureRating: null,
+                    paramStatus: { ...gsiParams.paramStatus, structure: 'MISSING' },
+                  });
+                  return;
+                }
+                const opt = GSI_STRUCTURE_OPTIONS.find((o) => o.id === e.target.value);
+                onUpdateGsiParams({
+                  ...gsiParams,
+                  structureCategory: (opt?.id || 'BLOCKY') as GsiParameters['structureCategory'],
+                  structureRating: opt?.rating ?? 65,
+                  paramStatus: { ...gsiParams.paramStatus, structure: 'USER_ENTERED' },
+                  userConfirmed: true,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {GSI_STRUCTURE_OPTIONS.map((o) => (
+                <option key={o.id} value={o.id}>
+                  [SR={o.rating}] {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 2. Discontinuity Surface Condition */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-emerald-400 font-bold text-[11px]">
+                2. Surface Condition
+              </span>
+              <span className="text-white font-bold text-xs">
+                {gsiParams.surfaceConditionRating ?? 'N/A'}
+              </span>
+            </div>
+            <div>
+              {renderParamStatusBadge(
+                gsiParams.paramStatus.surfaceCondition,
+                () =>
+                  onUpdateGsiParams({
+                    ...gsiParams,
+                    paramStatus: {
+                      ...gsiParams.paramStatus,
+                      surfaceCondition: 'USER_CONFIRMED',
+                    },
+                  }),
+                () =>
+                  onUpdateGsiParams({
+                    ...gsiParams,
+                    surfaceConditionCategory: 'MISSING',
+                    surfaceConditionRating: null,
+                    paramStatus: { ...gsiParams.paramStatus, surfaceCondition: 'MISSING' },
+                  })
+              )}
+            </div>
+            <select
+              value={
+                gsiParams.surfaceConditionCategory === 'MISSING'
+                  ? ''
+                  : gsiParams.surfaceConditionCategory
+              }
+              onChange={(e) => {
+                if (e.target.value === '') {
+                  onUpdateGsiParams({
+                    ...gsiParams,
+                    surfaceConditionCategory: 'MISSING',
+                    surfaceConditionRating: null,
+                    paramStatus: { ...gsiParams.paramStatus, surfaceCondition: 'MISSING' },
+                  });
+                  return;
+                }
+                const opt = GSI_SURFACE_CONDITION_OPTIONS.find((o) => o.id === e.target.value);
+                onUpdateGsiParams({
+                  ...gsiParams,
+                  surfaceConditionCategory: (opt?.id ||
+                    'GOOD') as GsiParameters['surfaceConditionCategory'],
+                  surfaceConditionRating: opt?.rating ?? 65,
+                  paramStatus: { ...gsiParams.paramStatus, surfaceCondition: 'USER_ENTERED' },
+                  userConfirmed: true,
+                });
+              }}
+              className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
+            >
+              <option value="">-- Required input not available --</option>
+              {GSI_SURFACE_CONDITION_OPTIONS.map((o) => (
+                <option key={o.id} value={o.id}>
+                  [SCR={o.rating}] {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 3. Intact UCS & Hoek-Brown mi / D */}
+          <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-emerald-400 font-bold text-[11px]">
+                3. Intact UCS &amp; Hoek-Brown
+              </span>
+              <span className="text-white font-bold text-xs">
+                {gsiParams.intactUcsMPa !== null ? `${gsiParams.intactUcsMPa} MPa` : 'N/A'}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+              <label>
+                <span className="text-slate-400 block">UCS (MPa)</span>
+                <input
+                  type="number"
+                  value={gsiParams.intactUcsMPa ?? ''}
+                  onChange={(e) =>
+                    onUpdateGsiParams({
+                      ...gsiParams,
+                      intactUcsMPa: e.target.value === '' ? null : Number(e.target.value),
+                      paramStatus: {
+                        ...gsiParams.paramStatus,
+                        intactUcs: e.target.value === '' ? 'MISSING' : 'USER_ENTERED',
+                      },
+                    })
+                  }
+                  className="w-full px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+                />
+              </label>
+              <label>
+                <span className="text-slate-400 block">Constant mi</span>
+                <input
+                  type="number"
+                  value={gsiParams.miHoekBrownConstant ?? 17}
+                  onChange={(e) =>
+                    onUpdateGsiParams({
+                      ...gsiParams,
+                      miHoekBrownConstant: Number(e.target.value),
+                    })
+                  }
+                  className="w-full px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+                />
+              </label>
+              <label>
+                <span className="text-slate-400 block">Blast D (0–0.8)</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="0.8"
+                  value={gsiParams.blastDamageFactorD ?? 0}
+                  onChange={(e) =>
+                    onUpdateGsiParams({
+                      ...gsiParams,
+                      blastDamageFactorD: Number(e.target.value),
+                    })
+                  }
+                  className="w-full px-1.5 py-0.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:col-span-4 p-3 bg-slate-950 border border-emerald-500/40 rounded flex flex-col justify-between space-y-2">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+            <div>
+              <div className="text-[10px] text-emerald-400 font-bold">
+                GEOLOGICAL STRENGTH INDEX (GSI)
+              </div>
+              {gsiResult.isComplete && gsiResult.gsiValue !== null ? (
+                <div className="text-lg font-bold text-white flex items-center gap-2 mt-0.5">
+                  <span>GSI = {gsiResult.gsiValue}</span>
+                  <span
+                    className="text-xs px-2 py-0.5 rounded font-semibold text-white"
+                    style={{ backgroundColor: gsiResult.colorHex }}
+                  >
+                    {gsiResult.rockMassClassLabel}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-xs font-bold text-rose-300 bg-rose-950/70 border border-rose-500/40 rounded px-2 py-1 mt-1">
+                  Required input not available
+                </div>
+              )}
+            </div>
+            <div className="text-right text-[10px] text-slate-400">
+              <div>Range: {gsiResult.gsiRangeLabel}</div>
+              <div>Em: {gsiResult.deformationModulusGPa ?? '—'} GPa</div>
+            </div>
+          </div>
+
+          {gsiResult.isComplete && (
+            <div className="grid grid-cols-3 gap-1.5 text-center bg-slate-900/90 p-2 rounded border border-slate-800 text-[10px]">
+              <div>
+                <div className="text-slate-400">mb Constant</div>
+                <div className="text-emerald-300 font-bold">{gsiResult.mbReducedConstant}</div>
+              </div>
+              <div>
+                <div className="text-slate-400">s Constant</div>
+                <div className="text-emerald-300 font-bold">{gsiResult.sConstant}</div>
+              </div>
+              <div>
+                <div className="text-slate-400">a Constant</div>
+                <div className="text-emerald-300 font-bold">{gsiResult.aConstant}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="h-[375px] bg-[#0E131D] border-t border-slate-700/90 flex flex-col shrink-0 z-30 shadow-2xl">
+      {/* Top Drawer Header & Method Switcher */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-[#131A28] border-b border-slate-800 shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => onChangeTab('geology_tables')}
             className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold transition-colors ${
@@ -140,46 +1833,58 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             }`}
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
-            1. GEOLOGICAL &amp; DISCONTINUITY TABLES ({jointSets.length} Sets · {joints.length} Traces)
+            1. GEOLOGICAL &amp; DISCONTINUITY TABLES ({jointSets.length} Sets · {joints.length}{' '}
+            Traces)
           </button>
 
           <button
             onClick={() => onChangeTab('q_index')}
             className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold transition-colors ${
               activeTab === 'q_index'
-                ? 'bg-cyan-600 text-white'
+                ? 'bg-indigo-600 text-white'
                 : 'bg-slate-800/80 text-slate-300 hover:text-white'
             }`}
           >
             <Calculator className="w-3.5 h-3.5" />
-            2. BARTON Q-INDEX CALCULATOR (Q = {qResult.qValue.toFixed(2)} · {qResult.rockQualityCategory})
+            2. ROCK MASS CLASSIFICATION ({getMethodSummaryBadge()})
           </button>
+
+          {/* Method Selection Switcher (Always accessible, never deletes geological mapping) */}
+          <div className="flex items-center gap-1 bg-slate-950/90 border border-slate-700/80 rounded px-2 py-0.5 ml-1">
+            <span className="text-[10px] font-mono text-slate-400 uppercase font-bold mr-1">
+              Method:
+            </span>
+            {CLASSIFICATION_METHODS_REGISTRY.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => {
+                  onChangeSelectedMethod(m.id);
+                  onChangeTab('q_index');
+                }}
+                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-colors ${
+                  selectedMethod === m.id
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+                title={m.description}
+              >
+                {m.shortLabel}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => {
-              const autoParams = autoEstimateQIndexFromMappedJoints(
-                joints,
-                jointSets,
-                geometry,
-                settings,
-                qIndexParams
-              );
-              onUpdateQIndexParams(autoParams);
-              onChangeTab('q_index');
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs font-mono bg-amber-600/25 hover:bg-amber-600/40 text-amber-200 border border-amber-500/40 rounded transition-colors"
-            title="Compute RQD, Jn, Jr, Ja, Jw, SRF from mapped discontinuity traces"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            Auto-Calculate Q from Mapped Traces
-          </button>
+          <span className="hidden 2xl:inline-block text-[10px] font-mono text-slate-400 bg-slate-900/90 border border-slate-800 px-2 py-0.5 rounded">
+            Station: <strong className="text-slate-200">{settings.faceChainage}</strong> · Surface:{' '}
+            <strong className="text-cyan-300 uppercase">{activeSurface}</strong>
+          </span>
 
           <button
             onClick={handleDownloadCSV}
             className="flex items-center gap-1 px-2.5 py-1 text-xs font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded transition-colors"
-            title="Export Discontinuity Sets, Individual Traces, and Barton Q-Index to CSV"
+            title="Export Discontinuity Sets, Individual Traces, and Selected Rock Mass Classification to CSV"
           >
             <Download className="w-3.5 h-3.5" />
             Export CSV
@@ -210,7 +1915,8 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             <div className="xl:col-span-7 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-cyan-300">
-                  A. DISCONTINUITY-SET TABLE (ORIENTATION, SPACING, PERSISTENCE, ROUGHNESS, INFILLING, WATER)
+                  A. DISCONTINUITY-SET TABLE (ORIENTATION, SPACING, PERSISTENCE, ROUGHNESS,
+                  INFILLING, WATER)
                 </span>
                 <div className="flex items-center gap-1.5 text-[11px]">
                   <span className="text-slate-400">Merge:</span>
@@ -264,12 +1970,16 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
                     {jointSets.length === 0 ? (
                       <tr>
                         <td colSpan={8} className="py-6 text-center text-slate-500">
-                          No discontinuity sets mapped yet. Click &quot;AI Trace&quot; or &quot;Add Joint&quot; on the canvas.
+                          No discontinuity sets mapped yet. Click &quot;AI Trace&quot; or &quot;Add
+                          Joint&quot; on the canvas.
                         </td>
                       </tr>
                     ) : (
                       jointSets.map((js) => (
-                        <tr key={js.id} className="border-b border-slate-800/60 hover:bg-slate-900/50">
+                        <tr
+                          key={js.id}
+                          className="border-b border-slate-800/60 hover:bg-slate-900/50"
+                        >
                           <td className="py-1.5 px-2 font-bold">
                             <span
                               className="inline-block px-2 py-0.5 rounded text-white text-[10px]"
@@ -400,16 +2110,23 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
                   <select
                     value={rockMassSummary.strengthGrade}
                     onChange={(e) =>
-                      onUpdateRockMassSummary({ ...rockMassSummary, strengthGrade: e.target.value })
+                      onUpdateRockMassSummary({
+                        ...rockMassSummary,
+                        strengthGrade: e.target.value,
+                      })
                     }
                     className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100"
                   >
-                    <option value="R5 (Very Strong, 100–250 MPa)">R5 (Very Strong, 100–250 MPa)</option>
+                    <option value="R5 (Very Strong, 100–250 MPa)">
+                      R5 (Very Strong, 100–250 MPa)
+                    </option>
                     <option value="R4 (Strong, 50–100 MPa)">R4 (Strong, 50–100 MPa)</option>
                     <option value="R3–R4 (Medium Strong to Strong, UCS 50–100 MPa)">
                       R3–R4 (Medium Strong to Strong, 50–100 MPa)
                     </option>
-                    <option value="R3 (Medium Strong, 25–50 MPa)">R3 (Medium Strong, 25–50 MPa)</option>
+                    <option value="R3 (Medium Strong, 25–50 MPa)">
+                      R3 (Medium Strong, 25–50 MPa)
+                    </option>
                     <option value="R2 (Weak, 5–25 MPa)">R2 (Weak, 5–25 MPa)</option>
                     <option value="R1 (Very Weak, 1–5 MPa)">R1 (Very Weak, 1–5 MPa)</option>
                   </select>
@@ -481,10 +2198,12 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             <div className="xl:col-span-12 space-y-1.5 pt-1">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-cyan-300">
-                  C. INDIVIDUAL MAPPED STRUCTURAL TRACES LOG ({joints.length} Vectors Registered to Main Photos)
+                  C. INDIVIDUAL MAPPED STRUCTURAL TRACES LOG ({joints.length} Vectors Registered to
+                  Main Photos)
                 </span>
                 <span className="text-[10px] text-slate-400">
-                  Drive Azimuth: N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E · True / Apparent 3D Orientation
+                  Drive Azimuth: N {String(Math.round(settings.driveDirection)).padStart(3, '0')}°
+                  E · True / Apparent 3D Orientation
                 </span>
               </div>
 
@@ -514,7 +2233,10 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
                       </tr>
                     ) : (
                       joints.map((j, idx) => (
-                        <tr key={j.id} className="border-b border-slate-800/60 hover:bg-slate-900/50">
+                        <tr
+                          key={j.id}
+                          className="border-b border-slate-800/60 hover:bg-slate-900/50"
+                        >
                           <td className="py-1 px-2 text-slate-400">{idx + 1}</td>
                           <td className="py-1 px-2 uppercase text-cyan-300 font-semibold">
                             {j.surface}
@@ -533,9 +2255,7 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
                           <td className="py-1 px-2 text-slate-200">
                             {j.persistenceMeters.toFixed(2)} m
                           </td>
-                          <td className="py-1 px-2 text-slate-400">
-                            P1..P{j.geometry.length}
-                          </td>
+                          <td className="py-1 px-2 text-slate-400">P1..P{j.geometry.length}</td>
                           <td className="py-1 px-2">
                             <select
                               value={j.waterCondition || 'Dry'}
@@ -546,7 +2266,8 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
                                     item.id === j.id
                                       ? {
                                           ...item,
-                                          waterCondition: e.target.value as Joint['waterCondition'],
+                                          waterCondition: e.target
+                                            .value as Joint['waterCondition'],
                                         }
                                       : item
                                   )
@@ -574,282 +2295,36 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
           </div>
         ) : (
           /* ====================================================================
-             TAB 2: BARTON Q-INDEX CALCULATOR (Q = RQD/Jn * Jr/Ja * Jw/SRF)
+             TAB 2: METHOD-SPECIFIC ROCK MASS CLASSIFICATION WORKFLOW
+             Strictly displays ONLY the selected method's parameters (or both
+             side-by-side when BOTH_RMR_AND_Q is selected without mixing them).
              ==================================================================== */
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-            {/* LEFT 8 COLUMNS: 6 NGI Q-SYSTEM PARAMETERS */}
-            <div className="xl:col-span-8 grid grid-cols-1 md:grid-cols-3 gap-2.5">
-              {/* 1. RQD */}
-              <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-cyan-400 font-bold">1. RQD (%)</span>
-                  <span className="text-white font-bold text-sm">{qIndexParams.rqd}%</span>
-                </div>
-                <input
-                  type="range"
-                  min="10"
-                  max="100"
-                  step="1"
-                  value={qIndexParams.rqd}
-                  onChange={(e) =>
-                    onUpdateQIndexParams({ ...qIndexParams, rqd: Number(e.target.value) })
-                  }
-                  className="w-full accent-cyan-500"
-                />
-                <div className="flex items-center justify-between text-[10px] text-slate-400">
-                  <span>Rock Quality Designation</span>
-                  <span>Jv ≈ {qIndexParams.volumetricJointCountJv ?? 14} jts/m³</span>
-                </div>
-              </div>
-
-              {/* 2. Jn */}
-              <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-cyan-400 font-bold">2. Joint Set No. (Jn)</span>
-                  <span className="text-white font-bold text-sm">{qResult.effectiveJn}</span>
-                </div>
-                <select
-                  value={qIndexParams.jn}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    const found = JN_OPTIONS.find((o) => o.val === val);
-                    onUpdateQIndexParams({
-                      ...qIndexParams,
-                      jn: val,
-                      jnDescription: found ? found.label : `Jn = ${val}`,
-                    });
-                  }}
-                  className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
-                >
-                  {JN_OPTIONS.map((opt) => (
-                    <option key={opt.val} value={opt.val}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <div className="flex items-center gap-3 text-[10px] text-slate-300 pt-0.5">
-                  <label className="flex items-center gap-1 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(qIndexParams.isPortal)}
-                      onChange={(e) =>
-                        onUpdateQIndexParams({
-                          ...qIndexParams,
-                          isPortal: e.target.checked,
-                          isIntersection: e.target.checked ? false : qIndexParams.isIntersection,
-                        })
-                      }
-                      className="rounded border-slate-700 bg-slate-800 text-cyan-500"
-                    />
-                    Portal (2×Jn)
-                  </label>
-                  <label className="flex items-center gap-1 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(qIndexParams.isIntersection)}
-                      onChange={(e) =>
-                        onUpdateQIndexParams({
-                          ...qIndexParams,
-                          isIntersection: e.target.checked,
-                          isPortal: e.target.checked ? false : qIndexParams.isPortal,
-                        })
-                      }
-                      className="rounded border-slate-700 bg-slate-800 text-cyan-500"
-                    />
-                    Intersection (3×Jn)
-                  </label>
-                </div>
-              </div>
-
-              {/* 3. Jr */}
-              <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-cyan-400 font-bold">3. Joint Roughness (Jr)</span>
-                  <span className="text-white font-bold text-sm">{qIndexParams.jr}</span>
-                </div>
-                <select
-                  value={qIndexParams.jr}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    const found = JR_OPTIONS.find((o) => o.val === val);
-                    onUpdateQIndexParams({
-                      ...qIndexParams,
-                      jr: val,
-                      jrDescription: found ? found.label : `Jr = ${val}`,
-                    });
-                  }}
-                  className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
-                >
-                  {JR_OPTIONS.map((opt) => (
-                    <option key={opt.val} value={opt.val}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <div className="text-[10px] text-slate-400 truncate">
-                  {qIndexParams.jrDescription}
-                </div>
-              </div>
-
-              {/* 4. Ja */}
-              <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-cyan-400 font-bold">4. Joint Alteration (Ja)</span>
-                  <span className="text-white font-bold text-sm">{qIndexParams.ja}</span>
-                </div>
-                <select
-                  value={qIndexParams.ja}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    const found = JA_OPTIONS.find((o) => o.val === val);
-                    onUpdateQIndexParams({
-                      ...qIndexParams,
-                      ja: val,
-                      jaDescription: found ? found.label : `Ja = ${val}`,
-                    });
-                  }}
-                  className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
-                >
-                  {JA_OPTIONS.map((opt) => (
-                    <option key={opt.val} value={opt.val}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <div className="text-[10px] text-slate-400 truncate">
-                  {qIndexParams.jaDescription}
-                </div>
-              </div>
-
-              {/* 5. Jw */}
-              <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-cyan-400 font-bold">5. Joint Water (Jw)</span>
-                  <span className="text-white font-bold text-sm">{qIndexParams.jw}</span>
-                </div>
-                <select
-                  value={qIndexParams.jw}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    const found = JW_OPTIONS.find((o) => o.val === val);
-                    onUpdateQIndexParams({
-                      ...qIndexParams,
-                      jw: val,
-                      jwDescription: found ? found.label : `Jw = ${val}`,
-                    });
-                  }}
-                  className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
-                >
-                  {JW_OPTIONS.map((opt) => (
-                    <option key={opt.val} value={opt.val}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <div className="text-[10px] text-slate-400 truncate">
-                  {qIndexParams.jwDescription}
-                </div>
-              </div>
-
-              {/* 6. SRF */}
-              <div className="p-2.5 bg-slate-950/90 border border-slate-800 rounded space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-cyan-400 font-bold">6. Stress Factor (SRF)</span>
-                  <span className="text-white font-bold text-sm">{qIndexParams.srf}</span>
-                </div>
-                <select
-                  value={qIndexParams.srf}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    const found = SRF_OPTIONS.find((o) => o.val === val);
-                    onUpdateQIndexParams({
-                      ...qIndexParams,
-                      srf: val,
-                      srfDescription: found ? found.label : `SRF = ${val}`,
-                    });
-                  }}
-                  className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-100"
-                >
-                  {SRF_OPTIONS.map((opt) => (
-                    <option key={opt.val} value={opt.val}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <div className="text-[10px] text-slate-400 truncate">
-                  {qIndexParams.srfDescription}
-                </div>
-              </div>
-            </div>
-
-            {/* RIGHT 4 COLUMNS: COMPUTED Q-VALUE, QUOTIENTS & SUPPORT RECOMMENDATION */}
-            <div className="xl:col-span-4 p-3 bg-slate-950 border border-cyan-500/40 rounded flex flex-col justify-between space-y-2">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                <div>
-                  <div className="text-[10px] text-slate-400">
-                    BARTON NGI TUNNELLING QUALITY INDEX
-                  </div>
-                  <div className="text-lg font-bold text-white flex items-center gap-2">
-                    <span>Q = {qResult.qValue.toFixed(2)}</span>
-                    <span
-                      className="text-xs px-2 py-0.5 rounded font-semibold text-white"
-                      style={{ backgroundColor: qResult.colorHex }}
-                    >
-                      {qResult.rockMassClass}
-                    </span>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className="text-[10px] text-slate-400">Est. RMR89</div>
-                  <div className="text-sm font-bold text-cyan-300">{qResult.estimatedRmr} / 100</div>
-                </div>
-              </div>
-
-              {/* 3 Physical Quotients */}
-              <div className="grid grid-cols-3 gap-2 text-center bg-slate-900/90 p-2 rounded border border-slate-800">
-                <div>
-                  <div className="text-[10px] text-slate-400">Block Size (RQD/Jn)</div>
-                  <div className="text-xs font-bold text-slate-100">
-                    {qResult.effectiveRqd}/{qResult.effectiveJn} = {qResult.blockSizeQuotient}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-slate-400">Shear (Jr/Ja)</div>
-                  <div className="text-xs font-bold text-slate-100">
-                    {qIndexParams.jr}/{qIndexParams.ja} = {qResult.shearStrengthQuotient}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-slate-400">Stress (Jw/SRF)</div>
-                  <div className="text-xs font-bold text-slate-100">
-                    {qIndexParams.jw}/{qIndexParams.srf} = {qResult.activeStressQuotient}
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-1 text-[11px]">
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>
-                    Span = {geometry.width.toFixed(2)}m · ESR = {qIndexParams.esr} · De ={' '}
-                    <strong className="text-cyan-300">{qResult.equivalentDimensionDe}m</strong>
+          <div className="space-y-4">
+            {selectedMethod === 'RMR' && renderRmrSection(false)}
+            {selectedMethod === 'Q_SYSTEM' && renderQSystemSection(false)}
+            {selectedMethod === 'GSI' && renderGsiSection()}
+            {selectedMethod === 'BOTH_RMR_AND_Q' && (
+              <div className="space-y-4">
+                <div className="p-2 bg-slate-900/90 border border-indigo-500/40 rounded flex items-center justify-between text-[11px]">
+                  <span className="font-bold text-indigo-300">
+                    DUAL STATION CLASSIFICATION ({settings.faceChainage}) — RMR AND Q-SYSTEM STORED
+                    SEPARATELY WITHOUT MIXING PARAMETERS
                   </span>
-                  <button
-                    onClick={() =>
-                      onUpdateRockMassSummary({
-                        ...rockMassSummary,
-                        installedSupport: qResult.recommendedSupport,
-                      })
-                    }
-                    className="text-[10px] text-cyan-400 hover:underline"
-                  >
-                    Copy to Support Table
-                  </button>
+                  <span className="text-slate-400">
+                    RMR:{' '}
+                    <strong className="text-white">
+                      {rmrResult.finalRmr !== null ? rmrResult.finalRmr : 'Incomplete'}
+                    </strong>{' '}
+                    | Q:{' '}
+                    <strong className="text-cyan-300">
+                      {qResult.isComplete ? qResult.qValue.toFixed(2) : 'Incomplete'}
+                    </strong>
+                  </span>
                 </div>
-                <div className="p-2 bg-slate-900 border border-slate-800 rounded text-[10px] text-emerald-300">
-                  <strong>NGI Support Category:</strong> {qResult.recommendedSupport}
-                </div>
+                {renderRmrSection(true)}
+                <div className="border-t border-slate-800 pt-3">{renderQSystemSection(true)}</div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </div>

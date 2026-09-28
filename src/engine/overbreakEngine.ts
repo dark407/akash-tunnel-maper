@@ -76,13 +76,15 @@ export function sortControlPointsAroundPerimeter(
   points: SurveyControlPoint[],
   geometry: TunnelGeometry
 ): string[] {
-  const refCenterY = Math.max(1.0, geometry.wallHeight * 0.55);
+  const centroid = getPolygonCentroidPoint(geometry.crossSectionPoints);
+  const refCenterX = centroid.x;
+  const refCenterY = Math.max(0.5, centroid.y);
   const withAngle = points.map((cp) => {
     // Angle measured clockwise starting from bottom-left (-PI*0.75)
-    const dx = cp.point.x;
+    const dx = cp.point.x - refCenterX;
     const dy = cp.point.y - refCenterY;
     // Standard atan2 is counter-clockwise from +X; we convert to clockwise from bottom (-Y)
-    const angleFromBottomCW = Math.atan2(dx, -dy); // -PI (bottom) -> -PI/2 (left) -> 0 (top) -> +PI/2 (right) -> +PI (bottom)
+    const angleFromBottomCW = Math.atan2(dx, -dy);
     return { id: cp.id, angle: angleFromBottomCW };
   });
   withAngle.sort((a, b) => a.angle - b.angle);
@@ -170,8 +172,10 @@ export function generateRealisticSampleSurveyedProfile(
   surface: SurfaceType = 'face',
   pullMeters = 3.5
 ): { controlPoints: SurveyControlPoint[]; profile: ConnectedSurveyProfile } {
-  const refCenterY = Math.max(1.0, geometry.wallHeight * 0.52);
   const designPoly = geometry.crossSectionPoints;
+  const centroid = getPolygonCentroidPoint(designPoly);
+  const refCenterX = centroid.x;
+  const refCenterY = Math.max(0.5, centroid.y);
 
   // Sample 14 stations clockwise from left invert -> left wall -> crown -> right wall -> right invert
   // Radial offsets (m): positive = Overbreak (outside design), negative = Undercut (inside design)
@@ -199,11 +203,11 @@ export function generateRealisticSampleSurveyedProfile(
     const rad = (spec.angleFromTopCWDeg * Math.PI) / 180;
     const dx = Math.sin(rad);
     const dy = Math.cos(rad);
-    const hit = intersectRayWithPolygon(0, refCenterY, dx, dy, designPoly, true);
+    const hit = intersectRayWithPolygon(refCenterX, refCenterY, dx, dy, designPoly, true);
     const baseR = hit ? hit.r : geometry.width * 0.45;
     const surveyR = Math.max(0.4, baseR + spec.radialOffsetMeters);
-    const px = Number((dx * surveyR).toFixed(2));
-    const py = Number(Math.max(-0.25, refCenterY + dy * surveyR).toFixed(2));
+    const px = Number((refCenterX + dx * surveyR).toFixed(2));
+    const py = Number(Math.max((geometry.minY ?? 0) - 0.25, refCenterY + dy * surveyR).toFixed(2));
 
     cps.push({
       id: `cp-asbuilt-${ts}-${idx + 1}`,
@@ -405,9 +409,11 @@ export function analyzeOverbreakAndUndercut(
     };
   }
 
-  const refCenterY = Math.max(1.0, geometry.wallHeight * 0.52);
+  const centroid = getPolygonCentroidPoint(designPoly);
+  const refCenterX = centroid.x;
+  const refCenterY = Math.max(0.5, centroid.y);
 
-  // Sample radial stations around the tunnel profile center (0, refCenterY)
+  // Sample radial stations around the tunnel profile centroid (refCenterX, refCenterY)
   const numStations = 180;
   interface StationSample {
     idx: number;
@@ -427,11 +433,11 @@ export function analyzeOverbreakAndUndercut(
     const dx = Math.sin(theta);
     const dy = Math.cos(theta);
 
-    const desHit = intersectRayWithPolygon(0, refCenterY, dx, dy, designPoly, true);
+    const desHit = intersectRayWithPolygon(refCenterX, refCenterY, dx, dy, designPoly, true);
     if (!desHit) continue;
 
     const survHit = intersectRayWithPolygon(
-      0,
+      refCenterX,
       refCenterY,
       dx,
       dy,

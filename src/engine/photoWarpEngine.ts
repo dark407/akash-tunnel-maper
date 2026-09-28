@@ -97,9 +97,18 @@ export function createTunnelBoundaryCustomMask(
   const bounds = getSurfaceBoundsMeters(surface, geometry, settings);
 
   if (surface === 'face') {
+    if (geometry.customProfile && geometry.customProfile.controlPoints.length >= 4) {
+      const hasCurves = geometry.customProfile.segments.some((s) => s.type !== 'line');
+      if (!hasCurves && geometry.customProfile.controlPoints.length <= 28) {
+        return geometry.customProfile.controlPoints.map((cp) => ({
+          x: Number(cp.x.toFixed(3)),
+          y: Number(cp.y.toFixed(3)),
+        }));
+      }
+    }
     const raw = geometry.crossSectionPoints;
     const sampled: Point2D[] = [];
-    const targetCount = 13;
+    const targetCount = Math.min(Math.max(13, geometry.customProfile?.controlPoints.length || 13), 24);
     for (let i = 0; i < targetCount; i++) {
       const idx = Math.min(raw.length - 1, Math.round((i / (targetCount - 1)) * (raw.length - 1)));
       sampled.push({

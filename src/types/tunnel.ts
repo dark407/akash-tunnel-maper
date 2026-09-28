@@ -1,6 +1,16 @@
 export type SurfaceType = 'face' | 'leftWall' | 'rightWall' | 'crown';
 
-export type ProfileType = 'd_shaped' | 'horseshoe' | 'circular' | 'flat_arch' | 'custom_cad';
+export type ProfileType =
+  | 'd_shaped'
+  | 'horseshoe'
+  | 'circular'
+  | 'flat_arch'
+  | 'custom_cad'
+  | 'freeform_custom'
+  | 'powerhouse_cavern'
+  | 'transformer_hall'
+  | 'cavern_junction'
+  | 'asymmetric_cavern';
 
 export type TraceFitMode = 'smart_fit' | 'linear';
 
@@ -14,6 +24,113 @@ export type MasterSurfaceCategory =
 export interface Point2D {
   x: number; // In meters within the surface's real-world coordinate frame
   y: number; // In meters within the surface's real-world coordinate frame
+}
+
+export type CustomSegmentType = 'line' | 'arc' | 'bezier';
+
+export type ControlPointRole =
+  | 'corner'
+  | 'smooth_tangent'
+  | 'left_invert'
+  | 'left_wall_top'
+  | 'crown_apex'
+  | 'right_wall_top'
+  | 'right_invert'
+  | 'step_corner';
+
+export type BoundaryZoneRole = 'leftWall' | 'crown' | 'rightWall' | 'invert';
+
+export interface ProfileControlPoint {
+  id: string;
+  label: string;        // e.g., 'P1', 'P2', 'P3'...
+  x: number;            // Authoritative local/tunnel transverse coordinate in meters (0 = centerline or datum)
+  y: number;            // Authoritative local/tunnel vertical elevation coordinate in meters (0 = invert datum)
+  role?: ControlPointRole;
+  locked?: boolean;     // If locked, parametric resizing preserves this point's exact coordinate
+  surveyControlPointId?: string; // Optional link to SurveyControlPoint ID (CP1, CP2...) so moving CP updates geometry
+}
+
+export interface ProfileSegment {
+  id: string;
+  fromPointId: string;
+  toPointId: string;
+  type: CustomSegmentType; // 'line' | 'arc' | 'bezier'
+  zoneRole?: BoundaryZoneRole; // 'leftWall' | 'crown' | 'rightWall' | 'invert'
+  // For 'arc' segments:
+  // arcBulge = tan(theta/4); positive = curves outward/convex, negative = concave
+  arcBulge?: number;
+  arcRadiusMeters?: number;
+  arcConvexOutward?: boolean;
+  // For 'bezier' (cubic or quadratic smooth curve) segments:
+  // Control handles in authoritative local profile meters (x, y)
+  cp1?: Point2D;
+  cp2?: Point2D;
+  // Optional locked segment length constraint (m)
+  lockedLengthMeters?: number;
+}
+
+export interface ReferenceTracingImageConfig {
+  dataUrl: string;
+  fileName: string;
+  opacity: number;             // 0..100
+  visible: boolean;
+  // Scale calibration points in local canvas/image space or meters
+  scalePointA?: Point2D;
+  scalePointB?: Point2D;
+  knownDistanceMeters: number; // e.g., 9.486 m
+  originPoint?: Point2D;       // Position of (x=0, y=0) tunnel datum
+  widthMeters: number;         // Displayed width of reference image in profile meters
+  heightMeters: number;        // Displayed height of reference image in profile meters
+  offsetX: number;             // Center X offset in profile meters
+  offsetY: number;             // Center Y offset in profile meters
+  rotationDeg?: number;
+}
+
+export interface CustomTunnelProfileDefinition {
+  id: string;
+  name: string;
+  category:
+    | 'freeform'
+    | 'powerhouse_cavern'
+    | 'transformer_hall'
+    | 'cavern_junction'
+    | 'enlarged_chamber'
+    | 'asymmetric_section'
+    | 'stepped_wall'
+    | 'traced_drawing'
+    | 'dxf_import';
+  controlPoints: ProfileControlPoint[];
+  segments: ProfileSegment[];
+  isClosed: boolean;
+  version: string;
+  updatedAt: string;
+  referenceImage?: ReferenceTracingImageConfig | null;
+}
+
+export interface ChainageProfileSegmentRecord {
+  id: string;
+  profileId: string;
+  profileName: string;
+  tunnelName: string;
+  location: string;
+  rdStartMeters: number;
+  rdEndMeters: number;
+  sectionType:
+    | 'REGULAR_TUNNEL'
+    | 'TRANSITION'
+    | 'POWERHOUSE_CAVERN'
+    | 'TRANSFORMER_HALL'
+    | 'CAVERN_JUNCTION'
+    | 'ENLARGED_CHAMBER'
+    | 'REDUCED_SECTION'
+    | 'CUSTOM_IRREGULAR';
+  isTransition?: boolean;
+  transitionFromProfileId?: string;
+  transitionToProfileId?: string;
+  geometry: TunnelGeometry;
+  version: string;
+  date: string;
+  notes?: string;
 }
 
 export interface Point3D {
@@ -36,16 +153,34 @@ export interface Point3D {
 export interface TunnelGeometry {
   width: number;          // Real-world tunnel span/width (m)
   height: number;         // Real-world total tunnel height (m)
-  wallHeight: number;     // Vertical or side wall height up to springline (m)
+  wallHeight: number;     // Vertical or reference side wall height up to springline (m)
+  leftWallHeight?: number;     // Explicit Left Wall vertical height (m) for asymmetric profiles
+  rightWallHeight?: number;    // Explicit Right Wall vertical height (m) for asymmetric profiles
+  leftWallArcLength?: number;  // True developed curvilinear length of Left Wall (m)
+  rightWallArcLength?: number; // True developed curvilinear length of Right Wall (m)
+  invertLength?: number;       // True developed floor/invert length (m)
+  totalPerimeterMeters?: number; // True closed vector perimeter (m)
+  designAreaSqMeters?: number;   // True cross-sectional design area (m²)
+  minX?: number;          // Leftmost X coordinate in meters (supports asymmetric profiles)
+  maxX?: number;          // Rightmost X coordinate in meters
+  minY?: number;          // Lowest Y elevation in meters
+  maxY?: number;          // Highest Y elevation in meters
+  crownSlopeDeg?: number; // Crown slope angle (deg) for sloping crowns
   crownGeometry: ProfileType;
   crownRadius: number;    // Crown arch radius (m)
   units: 'm';
-  source: 'manual' | 'dxf' | 'dwg';
+  source: 'manual' | 'dxf' | 'dwg' | 'freeform' | 'traced_image' | 'template_cavern';
   cadFileName?: string;
-  // Normalized real-world cross-section boundary polygon in meters:
-  // x in [-width/2, +width/2], y in [0 (invert/floor), height (crown apex)]
+  profileId?: string;
+  profileName?: string;
+  profileVersion?: string;
+  rdStartMeters?: number;
+  rdEndMeters?: number;
+  isAuthoritativeCustom?: boolean;
+  customProfile?: CustomTunnelProfileDefinition;
+  // Real-world cross-section boundary polygon in meters:
   crossSectionPoints: Point2D[];
-  // Developed crown arc length (m) calculated deterministically from cross-section arch
+  // Developed crown arc length (m) calculated deterministically from cross-section arch/boundary
   crownArcLength: number;
   // Optional Plane-Surface Joint Mapping flag & configuration
   isPlaneSurface?: boolean;
@@ -520,6 +655,175 @@ export interface QIndexParameters {
   isIntersection?: boolean;     // 3.0 x Jn multiplier per Barton NGI rules
   isPortal?: boolean;           // 2.0 x Jn multiplier per Barton NGI rules
   volumetricJointCountJv?: number;
+  // Parameter availability & confirmation tracking (No Invented Values rule)
+  missingFields?: ('rqd' | 'jn' | 'jr' | 'ja' | 'jw' | 'srf')[];
+  suggestedFields?: ('rqd' | 'jn' | 'jr' | 'ja' | 'jw' | 'srf')[];
+  userConfirmed?: boolean;
+  confirmedAt?: string;
+}
+
+export type RockMassClassificationMethodId =
+  | 'RMR'
+  | 'Q_SYSTEM'
+  | 'BOTH_RMR_AND_Q'
+  | 'GSI';
+
+export type RmrMethodologyVersion = 'RMR89' | 'RMR76';
+
+export type ParameterInputStatus =
+  | 'USER_ENTERED'
+  | 'USER_CONFIRMED'
+  | 'AI_SUGGESTED_UNCONFIRMED'
+  | 'MISSING';
+
+export type RmrParamKey =
+  | 'intactStrength'
+  | 'rqd'
+  | 'spacing'
+  | 'condition'
+  | 'groundwater'
+  | 'orientationAdjustment';
+
+export type QSystemParamKey = 'rqd' | 'jn' | 'jr' | 'ja' | 'jw' | 'srf';
+
+export interface RmrDiscontinuityConditionSubRatings {
+  useDetailedSubRatings: boolean;
+  persistenceValue: string;     // e.g. "1–3 m (Medium)"
+  persistenceRating: number;    // 0 to 6
+  apertureValue: string;        // e.g. "0.1–1.0 mm"
+  apertureRating: number;       // 0 to 6
+  roughnessValue: string;       // e.g. "Slightly rough"
+  roughnessRating: number;      // 0 to 6
+  infillingValue: string;       // e.g. "Hard filling < 5 mm"
+  infillingRating: number;      // 0 to 6
+  weatheringValue: string;      // e.g. "Slightly weathered"
+  weatheringRating: number;     // 0 to 6
+}
+
+export interface RmrParameters {
+  version: RmrMethodologyVersion;
+  // 1. Strength of Intact Rock Material (UCS or Point Load Index)
+  strengthInputType: 'UCS_MPA' | 'POINT_LOAD_MPA';
+  intactStrengthValueMPa: number | null; // e.g. 110 MPa (null if missing)
+  intactStrengthDescription: string;
+  intactStrengthRating: number | null;   // 0 to 15
+  // 2. Rock Quality Designation (RQD %)
+  rqdPercent: number | null;             // 0 to 100% (null if missing)
+  rqdDescription: string;
+  rqdRating: number | null;              // 3 to 20
+  // 3. Spacing of Discontinuities
+  spacingMeters: number | null;          // e.g. 0.35 m (null if missing)
+  spacingDescription: string;            // e.g. "0.2 – 0.6 m (Moderate)"
+  spacingRating: number | null;          // 5 to 20
+  // 4. Condition of Discontinuities
+  conditionDescription: string;          // e.g. "Slightly rough surfaces, separation < 1 mm, slightly weathered walls"
+  conditionRating: number | null;        // 0 to 30
+  conditionSubRatings: RmrDiscontinuityConditionSubRatings;
+  // 5. Groundwater Conditions
+  groundwaterInflowLPerMin10m: number | null;
+  groundwaterDescription: string;        // e.g. "Damp (< 10 L/min per 10m)"
+  groundwaterRating: number | null;      // 0 to 15
+  // 6. Orientation Adjustment for Tunnel Drive
+  orientationFavourability:
+    | 'Very Favorable'
+    | 'Favorable'
+    | 'Fair'
+    | 'Unfavorable'
+    | 'Very Unfavorable'
+    | 'Not Assessed';
+  orientationAdjustmentRating: number | null; // 0, -2, -5, -10, -12
+  // Per-parameter status tracking (USER_ENTERED, USER_CONFIRMED, AI_SUGGESTED_UNCONFIRMED, MISSING)
+  paramStatus: Record<RmrParamKey, ParameterInputStatus>;
+  userConfirmed: boolean;
+  confirmedAt?: string;
+}
+
+export interface RmrCalculationResult {
+  version: RmrMethodologyVersion;
+  isComplete: boolean;
+  hasUnconfirmedSuggestions: boolean;
+  missingParamLabels: string[];
+  unconfirmedParamLabels: string[];
+  r1StrengthRating: number | null;
+  r2RqdRating: number | null;
+  r3SpacingRating: number | null;
+  r4ConditionRating: number | null;
+  r5GroundwaterRating: number | null;
+  basicRmr: number | null;               // R1 + R2 + R3 + R4 + R5 (0 to 100)
+  orientationAdjustment: number | null;  // -12 to 0
+  finalRmr: number | null;               // Clamped 0 to 100
+  rockMassClassNumber: 'I' | 'II' | 'III' | 'IV' | 'V' | 'INCOMPLETE';
+  rockMassClassLabel: string;            // e.g. "CLASS II — GOOD ROCK"
+  rockQualityDescription: string;        // e.g. "Good rock"
+  colorHex: string;
+  averageStandUpTime: string;            // e.g. "1 year for 10 m span"
+  cohesionKPa: string;                   // e.g. "300 – 400 kPa"
+  frictionAngleDeg: string;              // e.g. "35° – 45°"
+  deformationModulusGPa: number | null;  // Serafim & Pereira / Bieniawski Em (GPa)
+  recommendedSupportGuidelines: string;
+  calculationSummaryFormula: string;
+}
+
+export interface GsiParameters {
+  structureCategory:
+    | 'INTACT_OR_MASSIVE'
+    | 'BLOCKY'
+    | 'VERY_BLOCKY'
+    | 'BLOCKY_DISTURBED_SEAMY'
+    | 'DISINTEGRATED'
+    | 'LAMINATED_SHEARED'
+    | 'MISSING';
+  structureRating: number | null;        // 10 to 90
+  surfaceConditionCategory:
+    | 'VERY_GOOD'
+    | 'GOOD'
+    | 'FAIR'
+    | 'POOR'
+    | 'VERY_POOR'
+    | 'MISSING';
+  surfaceConditionRating: number | null; // 10 to 90
+  blastDamageFactorD: number | null;     // 0.0 (excellent/TBM) to 0.8 (poor blasting)
+  intactUcsMPa: number | null;           // sigma_ci (MPa)
+  miHoekBrownConstant: number | null;    // mi (e.g. 10 to 32)
+  paramStatus: {
+    structure: ParameterInputStatus;
+    surfaceCondition: ParameterInputStatus;
+    intactUcs: ParameterInputStatus;
+  };
+  userConfirmed: boolean;
+  confirmedAt?: string;
+}
+
+export interface GsiCalculationResult {
+  isComplete: boolean;
+  hasUnconfirmedSuggestions: boolean;
+  missingParamLabels: string[];
+  unconfirmedParamLabels: string[];
+  gsiValue: number | null;               // 5 to 95
+  gsiRangeLabel: string;                 // e.g. "60 – 65"
+  rockMassClassLabel: string;
+  colorHex: string;
+  mbReducedConstant: number | null;
+  sConstant: number | null;
+  aConstant: number | null;
+  deformationModulusGPa: number | null;
+  recommendedSupportGuidelines: string;
+  calculationSummaryFormula: string;
+}
+
+export interface StationClassificationStorageRecord {
+  project: string;
+  tunnel: string;
+  location: string;
+  chainageRd: string;
+  surfaceSection: string;
+  selectedMethod: RockMassClassificationMethodId;
+  qParamStatus: Record<QSystemParamKey, ParameterInputStatus>;
+  qUserConfirmed: boolean;
+  qConfirmedAt?: string;
+  rmrParams: RmrParameters;
+  gsiParams: GsiParameters;
+  dateVersion: string;
 }
 
 export interface RockMassSummaryTable {
@@ -726,6 +1030,11 @@ export interface SavedProjectRecord {
   joints: Joint[];
   customJointSetOverrides: Record<string, Partial<JointSet>>;
   qIndexParams: QIndexParameters;
+  selectedClassificationMethod?: RockMassClassificationMethodId;
+  rmrParams?: RmrParameters;
+  gsiParams?: GsiParameters;
+  qParamStatus?: Record<QSystemParamKey, ParameterInputStatus>;
+  stationClassificationRecord?: StationClassificationStorageRecord;
   rockMassSummary: RockMassSummaryTable;
   lithologyRegions: LithologyRegion[];
   controlPoints: SurveyControlPoint[];
