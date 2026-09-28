@@ -1,19 +1,19 @@
 @echo off
-title Akash Tunnel Joint Tracer - Offline Windows .EXE Builder
+title AKASH TUNNEL MAPPER - Offline Windows .EXE Builder
 color 0B
 echo ============================================================================
-echo   AKASH TUNNEL JOINT TRACER - STANDALONE WINDOWS .EXE BUILDER
+echo   AKASH TUNNEL MAPPER - STANDALONE WINDOWS .EXE BUILDER
 echo ============================================================================
 echo.
 echo [Step 1/3] Installing dependencies...
-call npm install
-call npm install --save-dev electron electron-builder
+call npm install --legacy-peer-deps
 echo.
-echo [Step 2/3] Compiling production frontend assets...
-call npm run build
+echo [Step 2/3] Generating 256x256 Windows Icon (.ico)...
+call npm run icon
 echo.
-echo [Step 3/3] Packaging Windows x64 Portable ^& Setup .EXE...
-npx electron-builder --win --x64 --config.appId=com.akash.tunnelmapper --config.productName="Akash Tunnel Joint Tracer" --config.directories.output=release --config.win.target=portable --config.extraMetadata.main=electron/main.cjs
+echo [Step 3/3] Compiling production frontend assets ^& packaging Windows .EXE...
+call npm run dist
 echo.
-echo Done! Your standalone Windows .EXE is ready in the .\release\ folder.
+echo Done! Your standalone Windows .EXE installer is ready in the .\release\ folder:
+echo .\release\AKASH-TUNNEL-MAPPER-Setup.exe
 pause

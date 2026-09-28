@@ -1,4 +1,5 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useContainerResizeObserver, useResponsiveLayout } from '../hooks/useResponsiveLayout';
 import {
   Joint,
   JointSet,
@@ -38,6 +39,7 @@ import {
 import {
   computeFinalSheetAutoLayout,
   SheetLayoutArrangement,
+  wrapSheetTextLines,
 } from '../engine/sheetLayoutEngine';
 import {
   AlertTriangle,
@@ -90,7 +92,24 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   const [outputMode, setOutputMode] = useState<OutputSheetMode>('FINAL_ENGINEERING_SHEET');
   const [arrangement, setArrangement] = useState<SheetLayoutArrangement>('AUTO_INTELLIGENT');
   const [showConfidenceLabels, setShowConfidenceLabels] = useState<boolean>(false);
+  const [sheetZoomMode, setSheetZoomMode] = useState<'auto_fit' | '100' | '125' | '150'>('auto_fit');
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const responsive = useResponsiveLayout();
+  const previewBounds = useContainerResizeObserver(previewContainerRef, 1280, 820, isOpen);
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    previewBounds.recalculate();
+  }, [
+    isOpen,
+    outputMode,
+    arrangement,
+    sheetZoomMode,
+    responsive.viewportWidth,
+    responsive.viewportHeight,
+    previewBounds.recalculate,
+  ]);
 
   const qIndex = useMemo(() => propQIndex || createDefaultQIndexParameters(), [propQIndex]);
   const qResult = useMemo(
@@ -112,6 +131,20 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     [geometry, settings, joints, uploadedSurfaceCount]
   );
 
+  const totalOverbreakZones = useMemo(
+    () =>
+      (overbreakAnalysis?.overbreakRegions?.length || 0) +
+      (overbreakAnalysis?.undercutRegions?.length || 0),
+    [overbreakAnalysis]
+  );
+
+  const combinedNotesLength = useMemo(() => {
+    const desc = lithologyRegions[0]?.description || `${rockMass.weatheringGrade} ${rockMass.strengthGrade}`;
+    const struct = lithologyRegions[0]?.structuralFeatures || `${rockMass.foliationBeddingSpacing} ${rockMass.groundwaterCondition}`;
+    const notes = lithologyRegions[0]?.notes || rockMass.geologistRemarks || '';
+    return desc.length + struct.length + notes.length;
+  }, [lithologyRegions, rockMass]);
+
   const layout = useMemo(
     () =>
       computeFinalSheetAutoLayout({
@@ -123,8 +156,27 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
         lithologyRegions,
         outputMode,
         arrangement,
+        overbreakZoneCount: totalOverbreakZones,
+        notesTextLength: combinedNotesLength,
+        placedSymbolCount: placedSymbols.length,
+        controlPointCount: controlPoints.length,
+        sectionVolumeRowCount: sectionVolumeRows.length,
       }),
-    [geometry, settings, photos, joints, jointSets, lithologyRegions, outputMode, arrangement]
+    [
+      geometry,
+      settings,
+      photos,
+      joints,
+      jointSets,
+      lithologyRegions,
+      outputMode,
+      arrangement,
+      totalOverbreakZones,
+      combinedNotesLength,
+      placedSymbols.length,
+      controlPoints.length,
+      sectionVolumeRows.length,
+    ]
   );
 
   const {
@@ -135,6 +187,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     showPerimeterPlan,
     headerBox,
     drawingArenaBox,
+    contentMetrics,
     facePxPerMeter,
     faceCenterX,
     faceTopY,
@@ -160,6 +213,34 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     getSurfaceSheetRect,
     getSheetPhotoSvgTransform,
   } = layout;
+
+  const renderedSheetDimensions = useMemo(() => {
+    if (sheetZoomMode !== 'auto_fit') {
+      const pct = Number(sheetZoomMode) / 100;
+      return {
+        width: Math.round(sheetW * pct),
+        height: Math.round(sheetH * pct),
+      };
+    }
+    const padX = responsive.isCompactScreen ? 12 : 20;
+    const padY = responsive.isCompactScreen ? 10 : 16;
+    const availW = Math.max(320, previewBounds.width - padX);
+    const availH = Math.max(240, previewBounds.height - padY);
+    const fitScale = Math.min(availW / sheetW, availH / sheetH);
+    return {
+      width: Math.floor(sheetW * fitScale),
+      height: Math.floor(sheetH * fitScale),
+    };
+  }, [
+    sheetZoomMode,
+    previewBounds.width,
+    previewBounds.height,
+    previewBounds.revision,
+    responsive.isCompactScreen,
+    responsive.layoutRevision,
+    sheetW,
+    sheetH,
+  ]);
 
   // Build SVG polygon path for the authoritative master tunnel Face cross-section
   const facePolygonPath = useMemo(
@@ -377,13 +458,22 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   );
 
   // Export SVG directly
-  const handleDownloadSVG = () => {
-    if (!svgRef.current) return;
+  const getExportReadySvgString = () => {
+    if (!svgRef.current) return '';
+    const clone = svgRef.current.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
+    clone.setAttribute('width', String(sheetW));
+    clone.setAttribute('height', String(sheetH));
+    clone.style.width = `${sheetW}px`;
+    clone.style.height = `${sheetH}px`;
     const serializer = new XMLSerializer();
-    let svgString = serializer.serializeToString(svgRef.current);
-    if (!svgString.match(/^<svg[^>]+xmlns="http\:\/\/www\.w3\.org\/2000\/svg"/)) {
-      svgString = svgString.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
-    }
+    return serializer.serializeToString(clone);
+  };
+
+  const handleDownloadSVG = () => {
+    const svgString = getExportReadySvgString();
+    if (!svgString) return;
     const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -397,9 +487,8 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
 
   // Export high-resolution PNG
   const handleDownloadPNG = () => {
-    if (!svgRef.current) return;
-    const serializer = new XMLSerializer();
-    const svgString = serializer.serializeToString(svgRef.current);
+    const svgString = getExportReadySvgString();
+    if (!svgString) return;
     const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(svgBlob);
 
@@ -475,11 +564,15 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-slate-950/95 backdrop-blur-sm overflow-hidden">
+    <div className="fixed inset-0 z-50 flex flex-col h-dvh w-full max-w-full max-h-dvh bg-slate-950/95 backdrop-blur-sm overflow-hidden">
       {/* Top Action & Mode Bar (hidden when printing to PDF) */}
-      <div className="no-print flex flex-wrap items-center justify-between gap-3 px-5 py-2.5 bg-[#0F141C] border-b border-slate-800">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="font-display font-bold text-sm tracking-wider text-slate-100">
+      <div
+        className={`no-print flex flex-wrap items-center justify-between gap-2 ${
+          responsive.toolbarCompact ? 'px-3 py-1.5' : 'px-5 py-2.5'
+        } bg-[#0F141C] border-b border-slate-800 shrink-0`}
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-display font-bold text-xs xl:text-sm tracking-wider text-slate-100">
             FINAL ENGINEERING TUNNEL MAPPING SHEET
           </span>
           <div className="flex items-center gap-1 bg-slate-900 p-1 rounded border border-slate-800">
@@ -543,6 +636,21 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             />
             Show Confidence
           </label>
+
+          {/* Screen Fit / Zoom Selector */}
+          <select
+            value={sheetZoomMode}
+            onChange={(e) =>
+              setSheetZoomMode(e.target.value as 'auto_fit' | '100' | '125' | '150')
+            }
+            className="bg-slate-900 text-cyan-300 font-mono text-xs px-2 py-1 rounded border border-slate-700"
+            title="Auto-fit sheet to screen without scrollbars or inspect at 100%–150%"
+          >
+            <option value="auto_fit">Fit to Screen (Auto)</option>
+            <option value="100">100% Actual Size</option>
+            <option value="125">125% Zoom</option>
+            <option value="150">150% Zoom</option>
+          </select>
         </div>
 
         <div className="flex items-center gap-2">
@@ -629,15 +737,27 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
         )}
       </div>
 
-      {/* Main Engineering Sheet Preview Stage */}
-      <div className="flex-1 overflow-auto p-4 flex items-start justify-center bg-[#0B0E14] print:p-0 print:bg-white">
-        <div className="bg-white shadow-2xl border border-slate-300 print:shadow-none print:border-none">
+      {/* Main Engineering Sheet Preview Stage (Space-aware & auto-fitted to viewport) */}
+      <div
+        ref={previewContainerRef}
+        className={`flex-1 flex items-center justify-center bg-[#0B0E14] print:p-0 print:bg-white ${
+          sheetZoomMode === 'auto_fit' ? 'overflow-hidden p-2' : 'overflow-auto p-4 items-start'
+        }`}
+      >
+        <div
+          className="bg-white shadow-2xl border border-slate-300 print:shadow-none print:border-none print:w-full print:h-auto"
+          style={{
+            width: `${renderedSheetDimensions.width}px`,
+            height: `${renderedSheetDimensions.height}px`,
+          }}
+        >
           <svg
             ref={svgRef}
             viewBox={`0 0 ${sheetW} ${sheetH}`}
             width={sheetW}
             height={sheetH}
-            className="block bg-white text-black select-none max-w-full h-auto"
+            preserveAspectRatio="xMidYMid meet"
+            className="block w-full h-full bg-white text-black select-none"
             style={{ fontFamily: "'IBM Plex Mono', monospace" }}
           >
             <defs>
@@ -766,15 +886,15 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   FACE RD: <tspan fontWeight="700" fill="#0F172A">{settings.faceChainage}</tspan> · PULL: <tspan fontWeight="700" fill="#0F172A">{settings.roundLength.toFixed(2)} m</tspan>
                 </text>
 
-                {/* Zone 3: Drive Direction & Master Dimensions */}
+                {/*Zone 3: Drive Direction & Master Dimensions */}
                 <text x="894" y={headerBox.y + 16} fontSize="9.5" fill="#475569">
                   TUNNEL DRIVE DIRECTION (AZIMUTH):
                 </text>
                 <text x="894" y={headerBox.y + 31} fontSize="12" fontWeight="700" fill="#0F172A">
                   N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E (Az {settings.driveDirection.toFixed(1)}°)
                 </text>
-                <text x="894" y={headerBox.y + 53} fontSize="10" fill="#475569">
-                  SPAN: <tspan fontWeight="700" fill="#0F172A">{geometry.width.toFixed(2)}m</tspan> · HT: <tspan fontWeight="700" fill="#0F172A">{geometry.height.toFixed(2)}m</tspan> · WALL: <tspan fontWeight="700" fill="#0F172A">{geometry.wallHeight.toFixed(2)}m</tspan>
+                <text x="894" y={headerBox.y + 53} fontSize="9.5" fill="#475569">
+                  W: <tspan fontWeight="700" fill="#0F172A">{geometry.width.toFixed(2)}m</tspan> · H: <tspan fontWeight="700" fill="#0F172A">{geometry.height.toFixed(2)}m</tspan> · WALL: <tspan fontWeight="700" fill="#0F172A">{geometry.wallHeight.toFixed(2)}m</tspan> · CROWN ARC: <tspan fontWeight="700" fill="#0F172A">{geometry.crownArcLength.toFixed(2)}m</tspan>
                 </text>
 
                 {/* Zone 4: Date, Geologist & Scale */}
@@ -891,16 +1011,16 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 />
                 <text
                   x={leftWallLeftX + wallW_px / 2}
-                  y={planTopY + roundH_px + 12}
+                  y={planTopY + roundH_px + 13}
                   textAnchor="middle"
                   fontSize="8.5"
                   fontWeight="700"
                   fill="#334155"
                 >
-                  LEFT WALL ({geometry.wallHeight.toFixed(2)}m)
+                  LEFT WALL = {geometry.wallHeight.toFixed(2)} m
                 </text>
 
-                {/* Crown Box */}
+                {/* Crown Box (Length strictly equals Tunnel Face Crown Arc Length = geometry.crownArcLength) */}
                 <rect
                   x={crownLeftX}
                   y={planTopY}
@@ -921,13 +1041,13 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 />
                 <text
                   x={planCenterX}
-                  y={planTopY + roundH_px + 12}
+                  y={planTopY + roundH_px + 13}
                   textAnchor="middle"
                   fontSize="8.5"
                   fontWeight="700"
                   fill="#0F172A"
                 >
-                  CROWN ARCH (SPAN {crownSpan.toFixed(2)}m · C.L.)
+                  CROWN ARC = {geometry.crownArcLength.toFixed(2)} m (FACE SPAN {geometry.width.toFixed(2)}m · C.L.)
                 </text>
 
                 {/* Right Wall Box */}
@@ -942,32 +1062,86 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 />
                 <text
                   x={rightWallLeftX + wallW_px / 2}
-                  y={planTopY + roundH_px + 12}
+                  y={planTopY + roundH_px + 13}
                   textAnchor="middle"
                   fontSize="8.5"
                   fontWeight="700"
                   fill="#334155"
                 >
-                  RIGHT WALL ({geometry.wallHeight.toFixed(2)}m)
+                  RIGHT WALL = {geometry.wallHeight.toFixed(2)} m
                 </text>
 
+                {/* Orthographic Projection Alignment Lines connecting Crown Edges & Centerline directly to Tunnel Face */}
+                <line
+                  x1={crownLeftX}
+                  y1={planTopY + roundH_px}
+                  x2={faceCenterX - faceWidthPx / 2}
+                  y2={faceBottomY - geometry.wallHeight * facePxPerMeter}
+                  stroke="#64748B"
+                  strokeWidth="0.85"
+                  strokeDasharray="4,4"
+                />
+                <line
+                  x1={rightWallLeftX}
+                  y1={planTopY + roundH_px}
+                  x2={faceCenterX + faceWidthPx / 2}
+                  y2={faceBottomY - geometry.wallHeight * facePxPerMeter}
+                  stroke="#64748B"
+                  strokeWidth="0.85"
+                  strokeDasharray="4,4"
+                />
+                <line
+                  x1={planCenterX}
+                  y1={planTopY + roundH_px + 16}
+                  x2={faceCenterX}
+                  y2={faceTopY}
+                  stroke="#94A3B8"
+                  strokeWidth="0.75"
+                  strokeDasharray="3,4"
+                />
+
+                {/* Top Dimension Line across Unfolded Perimeter (Left Wall + Crown + Right Wall) */}
+                <g transform={`translate(0, ${planTopY - 6})`}>
+                  <line x1={leftWallLeftX} y1="-4" x2={leftWallLeftX} y2="4" stroke="#0F172A" strokeWidth="1" />
+                  <line x1={crownLeftX} y1="-4" x2={crownLeftX} y2="4" stroke="#0F172A" strokeWidth="1" />
+                  <line x1={rightWallLeftX} y1="-4" x2={rightWallLeftX} y2="4" stroke="#0F172A" strokeWidth="1" />
+                  <line x1={rightWallLeftX + wallW_px} y1="-4" x2={rightWallLeftX + wallW_px} y2="4" stroke="#0F172A" strokeWidth="1" />
+                  <line x1={leftWallLeftX} y1="0" x2={rightWallLeftX + wallW_px} y2="0" stroke="#0F172A" strokeWidth="0.9" />
+                </g>
+
                 {/* Pull Dimension on Right Side of Perimeter Plan */}
+                <line
+                  x1={rightWallLeftX + wallW_px + 6}
+                  y1={planTopY}
+                  x2={rightWallLeftX + wallW_px + 16}
+                  y2={planTopY}
+                  stroke="#0F172A"
+                  strokeWidth="0.9"
+                />
+                <line
+                  x1={rightWallLeftX + wallW_px + 6}
+                  y1={planTopY + roundH_px}
+                  x2={rightWallLeftX + wallW_px + 16}
+                  y2={planTopY + roundH_px}
+                  stroke="#0F172A"
+                  strokeWidth="0.9"
+                />
                 <line
                   x1={rightWallLeftX + wallW_px + 12}
                   y1={planTopY}
                   x2={rightWallLeftX + wallW_px + 12}
                   y2={planTopY + roundH_px}
                   stroke="#0F172A"
-                  strokeWidth="0.9"
+                  strokeWidth="1.0"
                 />
                 <text
                   x={rightWallLeftX + wallW_px + 18}
                   y={planTopY + roundH_px / 2 + 3}
-                  fontSize="8"
-                  fontWeight="600"
-                  fill="#334155"
+                  fontSize="8.5"
+                  fontWeight="700"
+                  fill="#0F172A"
                 >
-                  {roundLen.toFixed(2)}m
+                  PULL = {roundLen.toFixed(2)}m
                 </text>
               </g>
             )}
@@ -1557,7 +1731,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 6. LAYER 7: TUNNEL FACE ENGINEERING DIMENSIONS (Priority 5)
                ============================================================== */}
             <g>
-              {/* Bottom Width Dimension Line */}
+               {/* Bottom Width & Crown Arc Length Dimension Line */}
               <g transform={`translate(0, ${faceBottomY + 20})`}>
                 <line
                   x1={faceCenterX - faceWidthPx / 2}
@@ -1584,9 +1758,9 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   strokeWidth="1.2"
                 />
                 <rect
-                  x={faceCenterX - 78}
+                  x={faceCenterX - 134}
                   y="-9"
-                  width="156"
+                  width="268"
                   height="17"
                   fill="#FFFFFF"
                 />
@@ -1594,11 +1768,11 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   x={faceCenterX}
                   y="3.5"
                   textAnchor="middle"
-                  fontSize="10"
+                  fontSize="9.8"
                   fontWeight="700"
                   fill="#0F172A"
                 >
-                  TUNNEL WIDTH = {geometry.width.toFixed(2)} m
+                  SPAN W = {geometry.width.toFixed(2)} m · CROWN ARC = {geometry.crownArcLength.toFixed(2)} m
                 </text>
               </g>
 
@@ -1698,80 +1872,104 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     stroke="#0F172A"
                     strokeWidth="1.2"
                   />
-                  <text x="12" y="18" fontSize="10.5" fontWeight="700" fill="#0F172A">
+                  <text
+                    x="12"
+                    y="17"
+                    fontSize={contentMetrics.blockTitleFontSize}
+                    fontWeight="700"
+                    fill="#0F172A"
+                  >
                     DRIVE DIRECTION &amp; STEREOGRAPHIC POLE SUMMARY
                   </text>
 
-                  {/* Stereonet Circle */}
-                  <g transform="translate(72, 80)">
-                    <circle cx="0" cy="0" r="46" fill="#FFFFFF" stroke="#0F172A" strokeWidth="1.3" />
-                    <circle cx="0" cy="0" r="31" fill="none" stroke="#94A3B8" strokeWidth="0.6" strokeDasharray="2,2" />
-                    <circle cx="0" cy="0" r="16" fill="none" stroke="#94A3B8" strokeWidth="0.6" strokeDasharray="2,2" />
-                    <line x1="-49" y1="0" x2="49" y2="0" stroke="#94A3B8" strokeWidth="0.7" />
-                    <line x1="0" y1="-49" x2="0" y2="49" stroke="#94A3B8" strokeWidth="0.7" />
-                    <text x="0" y="-51" textAnchor="middle" fontSize="8" fontWeight="700" fill="#0F172A">N</text>
-                    <text x="55" y="3" textAnchor="middle" fontSize="7.5" fill="#475569">E</text>
-                    <text x="0" y="58" textAnchor="middle" fontSize="7.5" fill="#475569">S</text>
-                    <text x="-55" y="3" textAnchor="middle" fontSize="7.5" fill="#475569">W</text>
+                  {/* Stereonet Circle & Pole Summary — Dynamically scaled to fill available orientationBlock space */}
+                  {(() => {
+                    const stereoR = Math.max(40, Math.min(70, (orientationBlock.height - 42) / 2));
+                    const stereoCx = Math.round(stereoR + 22);
+                    const stereoCy = Math.round(24 + (orientationBlock.height - 26) / 2);
+                    const textStartX = stereoCx + stereoR + 20;
+                    const availInfoH = Math.max(85, orientationBlock.height - 38);
+                    const lineSpacing = Math.max(14.5, Math.min(26, availInfoH / 4.3));
+                    const stereoScaleBoost = Math.max(1.0, Math.min(1.25, orientationBlock.height / 145));
+                    const infoTitleFs = Number((contentMetrics.legendFontSize + 0.9 * stereoScaleBoost).toFixed(2));
+                    const infoBodyFs = Number((contentMetrics.legendFontSize * Math.min(1.14, stereoScaleBoost)).toFixed(2));
+                    const poleRadius = Number(Math.max(2.9, Math.min(4.2, stereoR * 0.062)).toFixed(1));
+                    const cardinalFs = Number(Math.max(8.0, Math.min(10.2, stereoR * 0.16)).toFixed(1));
 
-                    {/* Drive Azimuth Vector */}
-                    {(() => {
-                      const rad = ((settings.driveDirection - 90) * Math.PI) / 180;
-                      const ax = Math.cos(rad) * 41;
-                      const ay = Math.sin(rad) * 41;
-                      return (
-                        <line
-                          x1="0"
-                          y1="0"
-                          x2={ax}
-                          y2={ay}
-                          stroke="#0F172A"
-                          strokeWidth="2.2"
-                        />
-                      );
-                    })()}
+                    return (
+                      <>
+                        <g transform={`translate(${stereoCx}, ${stereoCy})`}>
+                          <circle cx="0" cy="0" r={stereoR} fill="#FFFFFF" stroke="#0F172A" strokeWidth="1.4" />
+                          <circle cx="0" cy="0" r={stereoR * 0.67} fill="none" stroke="#94A3B8" strokeWidth="0.7" strokeDasharray="2.5,2.5" />
+                          <circle cx="0" cy="0" r={stereoR * 0.34} fill="none" stroke="#94A3B8" strokeWidth="0.7" strokeDasharray="2.5,2.5" />
+                          <line x1={-stereoR - 4} y1="0" x2={stereoR + 4} y2="0" stroke="#94A3B8" strokeWidth="0.8" />
+                          <line x1="0" y1={-stereoR - 4} x2="0" y2={stereoR + 4} stroke="#94A3B8" strokeWidth="0.8" />
+                          <text x="0" y={-stereoR - 5} textAnchor="middle" fontSize={cardinalFs} fontWeight="700" fill="#0F172A">N</text>
+                          <text x={stereoR + 9} y="3" textAnchor="middle" fontSize={cardinalFs - 0.5} fontWeight="600" fill="#475569">E</text>
+                          <text x="0" y={stereoR + 11} textAnchor="middle" fontSize={cardinalFs - 0.5} fontWeight="600" fill="#475569">S</text>
+                          <text x={-stereoR - 9} y="3" textAnchor="middle" fontSize={cardinalFs - 0.5} fontWeight="600" fill="#475569">W</text>
 
-                    {/* Plot Dip Direction poles for each joint */}
-                    {joints.map((j) => {
-                      const rad = ((j.dipDirection - 90) * Math.PI) / 180;
-                      const r = (j.dip / 90) * 42;
-                      const px = Math.cos(rad) * r;
-                      const py = Math.sin(rad) * r;
-                      const color = JOINT_SET_PALETTE[j.set]?.color || '#DC2626';
-                      return (
-                        <circle
-                          key={`pole-${j.id}`}
-                          cx={px}
-                          cy={py}
-                          r="3"
-                          fill={color}
-                          stroke="#FFFFFF"
-                          strokeWidth="0.6"
-                        />
-                      );
-                    })}
-                  </g>
+                          {/* Drive Azimuth Vector */}
+                          {(() => {
+                            const rad = ((settings.driveDirection - 90) * Math.PI) / 180;
+                            const ax = Math.cos(rad) * (stereoR - 4);
+                            const ay = Math.sin(rad) * (stereoR - 4);
+                            return (
+                              <line
+                                x1="0"
+                                y1="0"
+                                x2={ax}
+                                y2={ay}
+                                stroke="#0F172A"
+                                strokeWidth="2.3"
+                              />
+                            );
+                          })()}
 
-                  <g transform="translate(144, 34)">
-                    <text x="0" y="0" fontSize="9.5" fontWeight="700" fill="#0F172A">
-                      TUNNEL DRIVE AZIMUTH: N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E
-                    </text>
-                    <text x="0" y="16" fontSize="8.5" fill="#334155">
-                      · Left Wall Normal: N {String(Math.round((settings.driveDirection + 270) % 360)).padStart(3, '0')}° E · Right Wall: N {String(Math.round((settings.driveDirection + 90) % 360)).padStart(3, '0')}° E
-                    </text>
-                    <text x="0" y="32" fontSize="8.5" fill="#334155">
-                      · Convention: Dip Direction (000°–360°) / Dip Angle (00°–90°)
-                    </text>
-                    <text x="0" y="48" fontSize="8" fill="#475569">
-                      * / ? Marks uncertain or single-surface apparent orientations.
-                    </text>
-                    <text x="0" y="66" fontSize="8.5" fontWeight="700" fill="#0F172A">
-                      MAPPED TRACES: {joints.length} ({jointSets.length} Sets) · SYMBOLS: {placedSymbols.length} · CONTROL PTS: {controlPoints.length}
-                    </text>
-                  </g>
+                          {/* Plot Dip Direction poles for each joint */}
+                          {joints.map((j) => {
+                            const rad = ((j.dipDirection - 90) * Math.PI) / 180;
+                            const r = (j.dip / 90) * (stereoR - 4);
+                            const px = Math.cos(rad) * r;
+                            const py = Math.sin(rad) * r;
+                            const color = JOINT_SET_PALETTE[j.set]?.color || '#DC2626';
+                            return (
+                              <circle
+                                key={`pole-${j.id}`}
+                                cx={px}
+                                cy={py}
+                                r={poleRadius}
+                                fill={color}
+                                stroke="#FFFFFF"
+                                strokeWidth="0.75"
+                              />
+                            );
+                          })}
+                        </g>
+
+                        <g transform={`translate(${textStartX}, ${Math.round(33 + (availInfoH - lineSpacing * 4) * 0.22)})`}>
+                          <text x="0" y="0" fontSize={infoTitleFs} fontWeight="700" fill="#0F172A">
+                            TUNNEL DRIVE AZIMUTH: N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E
+                          </text>
+                          <text x="0" y={lineSpacing} fontSize={infoBodyFs} fill="#334155">
+                            · Left Wall Normal: N {String(Math.round((settings.driveDirection + 270) % 360)).padStart(3, '0')}° E · Right Wall: N {String(Math.round((settings.driveDirection + 90) % 360)).padStart(3, '0')}° E
+                          </text>
+                          <text x="0" y={lineSpacing * 2} fontSize={infoBodyFs} fill="#334155">
+                            · Convention: Dip Direction (000°–360°) / Dip Angle (00°–90°)
+                          </text>
+                          <text x="0" y={lineSpacing * 3} fontSize={infoBodyFs - 0.4} fill="#475569">
+                            · Perimeter Ratio: P = 2×{geometry.wallHeight.toFixed(2)}m + {geometry.crownArcLength.toFixed(2)}m = {(geometry.wallHeight * 2 + geometry.crownArcLength).toFixed(2)}m
+                          </text>
+                          <text x="0" y={lineSpacing * 4.05} fontSize={infoBodyFs} fontWeight="700" fill="#0F172A">
+                            MAPPED TRACES: {joints.length} ({jointSets.length} Sets) · SYMBOLS: {placedSymbols.length} · CONTROL PTS: {controlPoints.length}
+                          </text>
+                        </g>
+                      </>
+                    );
+                  })()}
                 </g>
 
-                {/* 7B. Professional Geological & Lithological Legend (Priority 4) */}
+                {/* 7B. Professional Geological & Lithological Legend (Priority 4 - Space-Aware & Content-Aware) */}
                 <g transform={`translate(${legendBlock.x}, ${legendBlock.y})`}>
                   <rect
                     x="0"
@@ -1782,88 +1980,118 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     stroke="#0F172A"
                     strokeWidth="1.2"
                   />
-                  <text x="12" y="18" fontSize="10.5" fontWeight="700" fill="#0F172A">
+                  <text
+                    x="12"
+                    y="17"
+                    fontSize={contentMetrics.blockTitleFontSize}
+                    fontWeight="700"
+                    fill="#0F172A"
+                  >
                     GEOLOGICAL &amp; LITHOLOGICAL MAPPING LEGEND
                   </text>
-                  <line x1="0" y1="25" x2={legendBlock.width} y2="25" stroke="#0F172A" strokeWidth="0.8" />
+                  <line x1="0" y1="24" x2={legendBlock.width} y2="24" stroke="#0F172A" strokeWidth="0.8" />
 
-                  {/* Column 1: Structural Symbols */}
-                  <g transform="translate(14, 40)">
-                    <line x1="0" y1="0" x2="32" y2="0" stroke="#DC2626" strokeWidth="2" />
-                    <line x1="16" y1="0" x2="16" y2="7" stroke="#DC2626" strokeWidth="1.6" />
-                    <text x="40" y="3" fontSize="8.5" fill="#0F172A">
-                      Joint Trace + Dip Dir / Dip
-                    </text>
+                  {/* Column 1: Structural Symbols (Auto-scaled to legendBlock.height) */}
+                  {(() => {
+                    const ls = contentMetrics.legendRowSpacing;
+                    const lf = contentMetrics.legendFontSize;
+                    const sw = Math.round(Math.max(30, Math.min(40, legendBlock.width * 0.068)));
+                    const midSw = sw / 2;
+                    const textX = sw + 10;
+                    const startY = Math.round(36 + Math.max(0, (legendBlock.height - 36 - ls * 4.5) * 0.3));
+                    return (
+                      <g transform={`translate(14, ${startY})`}>
+                        <line x1="0" y1="0" x2={sw} y2="0" stroke="#DC2626" strokeWidth="2.2" />
+                        <line x1={midSw} y1="0" x2={midSw} y2="7.5" stroke="#DC2626" strokeWidth="1.7" />
+                        <text x={textX} y="3.5" fontSize={lf} fontWeight="600" fill="#0F172A">
+                          Joint Trace + Dip Dir / Dip
+                        </text>
 
-                    <line x1="0" y1="22" x2="32" y2="22" stroke="#0284C7" strokeWidth="2" strokeDasharray="6,3" />
-                    <polygon points="12,22 20,22 16,29" fill="none" stroke="#0284C7" strokeWidth="1.3" />
-                    <text x="40" y="25" fontSize="8.5" fill="#0F172A">
-                      Bedding (S0) / Foliation (S1)
-                    </text>
+                        <line x1="0" y1={ls} x2={sw} y2={ls} stroke="#0284C7" strokeWidth="2.2" strokeDasharray="6,3" />
+                        <polygon points={`${midSw - 4.5},${ls} ${midSw + 4.5},${ls} ${midSw},${ls + 7.5}`} fill="none" stroke="#0284C7" strokeWidth="1.4" />
+                        <text x={textX} y={ls + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                          Bedding (S0) / Foliation (S1)
+                        </text>
 
-                    <line x1="0" y1="45" x2="32" y2="45" stroke="#E11D48" strokeWidth="5.5" strokeOpacity="0.22" />
-                    <line x1="0" y1="45" x2="32" y2="45" stroke="#E11D48" strokeWidth="2.2" strokeDasharray="8,2,2,2" />
-                    <polygon points="12,45 20,45 16,52" fill="#E11D48" />
-                    <text x="40" y="48" fontSize="8.5" fill="#0F172A">
-                      Fault / Shear Zone / Gouge
-                    </text>
+                        <line x1="0" y1={ls * 2} x2={sw} y2={ls * 2} stroke="#E11D48" strokeWidth="5.5" strokeOpacity="0.22" />
+                        <line x1="0" y1={ls * 2} x2={sw} y2={ls * 2} stroke="#E11D48" strokeWidth="2.2" strokeDasharray="8,2,2,2" />
+                        <polygon points={`${midSw - 4.5},${ls * 2} ${midSw + 4.5},${ls * 2} ${midSw},${ls * 2 + 7.5}`} fill="#E11D48" />
+                        <text x={textX} y={ls * 2 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                          Fault / Shear Zone / Gouge
+                        </text>
 
-                    <path d="M 2 68 Q 9 63 16 68 T 30 68" fill="none" stroke="#0284C7" strokeWidth="1.6" />
-                    <text x="40" y="71" fontSize="8.5" fill="#0F172A">
-                      Water Seepage / Flow / Vein
-                    </text>
+                        <path d={`M 2 ${ls * 3} Q ${midSw * 0.55} ${ls * 3 - 5} ${midSw} ${ls * 3} T ${sw - 2} ${ls * 3}`} fill="none" stroke="#0284C7" strokeWidth="1.8" />
+                        <text x={textX} y={ls * 3 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                          Water Seepage / Flow / Vein
+                        </text>
 
-                    <circle cx="16" cy="92" r="4.5" fill="#FFFFFF" stroke="#059669" strokeWidth="1.5" />
-                    <line x1="10" y1="92" x2="22" y2="92" stroke="#059669" strokeWidth="1.2" />
-                    <line x1="16" y1="86" x2="16" y2="98" stroke="#059669" strokeWidth="1.2" />
-                    <text x="40" y="95" fontSize="8.5" fill="#0F172A">
-                      Survey Control Point (CP)
-                    </text>
-                  </g>
-
-                  {/* Column 2: Active Lithology Units & Standard Rock Patterns */}
-                  <g transform="translate(262, 34)">
-                    {(lithologyRegions.length > 0
-                      ? Array.from(
-                          new Map(lithologyRegions.map((r) => [r.patternType, r])).values()
-                        ).slice(0, 5)
-                      : [
-                          { patternType: 'quartzite', lithologyName: 'Quartzite', colorHex: '#EAB308' },
-                          { patternType: 'phyllite', lithologyName: 'Phyllite / Schist', colorHex: '#38BDF8' },
-                          { patternType: 'granite', lithologyName: 'Granite / Gneiss', colorHex: '#FB7185' },
-                          { patternType: 'dolerite', lithologyName: 'Dolerite / Basalt', colorHex: '#475569' },
-                          { patternType: 'shear_zone', lithologyName: 'Shear / Breccia Zone', colorHex: '#EF4444' },
-                        ]
-                    ).map((unit, uIdx) => (
-                      <g key={`leg-lith-${uIdx}`} transform={`translate(0, ${uIdx * 23})`}>
-                        <rect
-                          x="0"
-                          y="0"
-                          width="32"
-                          height="14"
-                          fill={unit.colorHex}
-                          fillOpacity="0.2"
-                          stroke="#334155"
-                          strokeWidth="0.8"
-                        />
-                        <rect
-                          x="0"
-                          y="0"
-                          width="32"
-                          height="14"
-                          fill={`url(#sheet-lith-${unit.patternType})`}
-                          stroke="#334155"
-                          strokeWidth="0.8"
-                        />
-                        <text x="40" y="10.5" fontSize="8.5" fontWeight="600" fill="#0F172A">
-                          {unit.lithologyName.slice(0, 26)}
+                        <circle cx={midSw} cy={ls * 4} r="4.8" fill="#FFFFFF" stroke="#059669" strokeWidth="1.5" />
+                        <line x1={midSw - 6} y1={ls * 4} x2={midSw + 6} y2={ls * 4} stroke="#059669" strokeWidth="1.3" />
+                        <line x1={midSw} y1={ls * 4 - 6} x2={midSw} y2={ls * 4 + 6} stroke="#059669" strokeWidth="1.3" />
+                        <text x={textX} y={ls * 4 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                          Survey Control Point (CP)
                         </text>
                       </g>
-                    ))}
-                  </g>
+                    );
+                  })()}
+
+                  {/* Column 2: Active Lithology Units & Standard Rock Patterns (Auto-scaled swatches & text) */}
+                  {(() => {
+                    const ls = contentMetrics.legendRowSpacing;
+                    const swatchW = Math.round(Math.max(32, Math.min(42, legendBlock.width * 0.07)));
+                    const swatchH = Math.round(Math.max(14, Math.min(18, ls * 0.64)));
+                    const startY = Math.round(30 + Math.max(0, (legendBlock.height - 36 - ls * 4.5) * 0.25));
+                    return (
+                      <g transform={`translate(${Math.round(legendBlock.width * 0.51)}, ${startY})`}>
+                        {(lithologyRegions.length > 0
+                          ? Array.from(
+                              new Map(lithologyRegions.map((r) => [r.patternType, r])).values()
+                            ).slice(0, contentMetrics.maxLegendLithologyRows)
+                          : [
+                              { patternType: 'quartzite', lithologyName: 'Quartzite', colorHex: '#EAB308' },
+                              { patternType: 'phyllite', lithologyName: 'Phyllite / Schist', colorHex: '#38BDF8' },
+                              { patternType: 'granite', lithologyName: 'Granite / Gneiss', colorHex: '#FB7185' },
+                              { patternType: 'dolerite', lithologyName: 'Dolerite / Basalt', colorHex: '#475569' },
+                              { patternType: 'shear_zone', lithologyName: 'Shear / Breccia Zone', colorHex: '#EF4444' },
+                            ]
+                        ).map((unit, uIdx) => (
+                          <g key={`leg-lith-${uIdx}`} transform={`translate(0, ${uIdx * ls})`}>
+                            <rect
+                              x="0"
+                              y="0"
+                              width={swatchW}
+                              height={swatchH}
+                              fill={unit.colorHex}
+                              fillOpacity="0.22"
+                              stroke="#334155"
+                              strokeWidth="0.9"
+                            />
+                            <rect
+                              x="0"
+                              y="0"
+                              width={swatchW}
+                              height={swatchH}
+                              fill={`url(#sheet-lith-${unit.patternType})`}
+                              stroke="#334155"
+                              strokeWidth="0.9"
+                            />
+                            <text
+                              x={swatchW + 9}
+                              y={Math.round(swatchH * 0.74)}
+                              fontSize={contentMetrics.legendFontSize}
+                              fontWeight="700"
+                              fill="#0F172A"
+                            >
+                              {unit.lithologyName.slice(0, 27)}
+                            </text>
+                          </g>
+                        ))}
+                      </g>
+                    );
+                  })()}
                 </g>
 
-                {/* 7C. When ENGINEERING_QUANTITY_SHEET: Regional Overbreak & Undercut Breakdown Table; otherwise Discontinuity-Set Table */}
+                {/* 7C. Content-Aware Table: Regional Overbreak & Undercut Breakdown OR Discontinuity-Set Table */}
                 {outputMode === 'ENGINEERING_QUANTITY_SHEET' ? (
                   <>
                     <g transform={`translate(${jointTableBlock.x}, ${jointTableBlock.y})`}>
@@ -1876,17 +2104,49 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         stroke="#0F172A"
                         strokeWidth="1.4"
                       />
-                      <rect x="0" y="0" width={jointTableBlock.width} height="23" fill="#0F172A" />
-                      <text x="12" y="15.5" fontSize="9.5" fontWeight="700" fill="#FFFFFF">
+                      <rect x="0" y="0" width={jointTableBlock.width} height="22" fill="#0F172A" />
+                      <text
+                        x="12"
+                        y="15"
+                        fontSize={contentMetrics.blockTitleFontSize - 0.4}
+                        fontWeight="700"
+                        fill="#FFFFFF"
+                      >
                         OVERBREAK &amp; UNDERCUT REGIONAL BREAKDOWN (REASONS &amp; LINKED SETS)
                       </text>
-                      <g transform="translate(0, 23)">
-                        <rect x="0" y="0" width={jointTableBlock.width} height="20" fill="#F1F5F9" stroke="#0F172A" strokeWidth="0.8" />
-                        <text x="8" y="13.5" fontSize="7.8" fontWeight="700" fill="#0F172A">ZONE</text>
-                        <text x="58" y="13.5" fontSize="7.8" fontWeight="700" fill="#0F172A">SECTOR</text>
-                        <text x="150" y="13.5" fontSize="7.8" fontWeight="700" fill="#0F172A">AREA / %</text>
-                        <text x="228" y="13.5" fontSize="7.8" fontWeight="700" fill="#0F172A">MAX RAD.</text>
-                        <text x="290" y="13.5" fontSize="7.8" fontWeight="700" fill="#0F172A">REASON CATEGORY &amp; LINKED SETS</text>
+                      <g transform="translate(0, 22)">
+                        <rect
+                          x="0"
+                          y="0"
+                          width={jointTableBlock.width}
+                          height="19"
+                          fill="#F1F5F9"
+                          stroke="#0F172A"
+                          strokeWidth="0.8"
+                        />
+                        {contentMetrics.overbreakColumns.slice(1).map((col) => (
+                          <line
+                            key={`ob-div-${col.key}`}
+                            x1={col.x}
+                            y1="0"
+                            x2={col.x}
+                            y2={jointTableBlock.height - 22}
+                            stroke="#CBD5E1"
+                            strokeWidth="0.7"
+                          />
+                        ))}
+                        {contentMetrics.overbreakColumns.map((col) => (
+                          <text
+                            key={`ob-hdr-${col.key}`}
+                            x={col.x + 5}
+                            y="13"
+                            fontSize={contentMetrics.tableHeaderFontSize}
+                            fontWeight="700"
+                            fill="#0F172A"
+                          >
+                            {col.label}
+                          </text>
+                        ))}
                       </g>
                       {(() => {
                         const zones = [
@@ -1895,14 +2155,32 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         ];
                         if (zones.length === 0) {
                           return (
-                            <text x={jointTableBlock.width / 2} y="95" textAnchor="middle" fontSize="9" fill="#64748B">
+                            <text
+                              x={jointTableBlock.width / 2}
+                              y={Math.min(95, jointTableBlock.height / 2 + 12)}
+                              textAnchor="middle"
+                              fontSize="9"
+                              fill="#64748B"
+                            >
                               Connect Survey Control Points (CP1→CP2→...) to compute Overbreak &amp; Undercut zones.
                             </text>
                           );
                         }
-                        return zones.slice(0, 6).map((z, idx) => {
-                          const rowH = 36;
-                          const rowY = 43 + idx * rowH;
+                         const visibleZones = zones.slice(0, contentMetrics.maxVisibleOverbreakZones);
+                        const rowH = Math.min(
+                          52,
+                          Math.max(
+                            19,
+                            Math.floor((jointTableBlock.height - 42) / Math.max(1, visibleZones.length))
+                          )
+                        );
+                        const cols = contentMetrics.overbreakColumns;
+                        const cellFs = contentMetrics.tableCellFontSize;
+                        const subFs = contentMetrics.tableSubCellFontSize;
+                        const compactRow = rowH < 25;
+
+                        return visibleZones.map((z, idx) => {
+                          const rowY = 41 + idx * rowH;
                           const isOB = z.type === 'OVERBREAK';
                           return (
                             <g key={z.id} transform={`translate(0, ${rowY})`}>
@@ -1916,40 +2194,94 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                                 strokeWidth="0.6"
                               />
                               <rect
-                                x="6"
-                                y="6"
-                                width="44"
-                                height="16"
+                                x="5"
+                                y={Math.max(2, (rowH - 14) / 2)}
+                                width={cols[0].width - 10}
+                                height="14"
                                 rx="2"
                                 fill={isOB ? '#E11D48' : '#D97706'}
                               />
-                              <text x="28" y="17" textAnchor="middle" fontSize="8" fontWeight="700" fill="#FFFFFF">
+                              <text
+                                x={cols[0].width / 2}
+                                y={Math.max(2, (rowH - 14) / 2) + 10}
+                                textAnchor="middle"
+                                fontSize={subFs}
+                                fontWeight="700"
+                                fill="#FFFFFF"
+                              >
                                 {z.id}
                               </text>
-                              <text x="58" y="14" fontSize="8" fontWeight="700" fill="#0F172A">
-                                {z.locationLabel.slice(0, 16)}
+                              <text
+                                x={cols[1].x + 5}
+                                y={compactRow ? rowH * 0.62 : rowH * 0.42}
+                                fontSize={cellFs}
+                                fontWeight="700"
+                                fill="#0F172A"
+                              >
+                                {z.locationLabel.slice(0, cols[1].maxChars)}
                               </text>
-                              <text x="58" y="26" fontSize="7.2" fill="#475569">
-                                Perim: {z.affectedPerimeterMeters.toFixed(2)}m
+                              {!compactRow && (
+                                <text
+                                  x={cols[1].x + 5}
+                                  y={rowH * 0.78}
+                                  fontSize={subFs}
+                                  fill="#475569"
+                                >
+                                  Perim: {z.affectedPerimeterMeters.toFixed(2)}m
+                                </text>
+                              )}
+                              <text
+                                x={cols[2].x + 5}
+                                y={compactRow ? rowH * 0.62 : rowH * 0.42}
+                                fontSize={cellFs}
+                                fontWeight="700"
+                                fill={isOB ? '#BE123C' : '#B45309'}
+                              >
+                                {isOB ? '+' : '-'}
+                                {z.areaSqMeters.toFixed(2)} m²
                               </text>
-                              <text x="150" y="14" fontSize="8.5" fontWeight="700" fill={isOB ? '#BE123C' : '#B45309'}>
-                                {isOB ? '+' : '-'}{z.areaSqMeters.toFixed(2)} m²
+                              {!compactRow && (
+                                <text
+                                  x={cols[2].x + 5}
+                                  y={rowH * 0.78}
+                                  fontSize={subFs}
+                                  fill="#475569"
+                                >
+                                  ({z.percentageOfDesign.toFixed(1)}%)
+                                </text>
+                              )}
+                              <text
+                                x={cols[3].x + 5}
+                                y={rowH * 0.56}
+                                fontSize={cellFs}
+                                fontWeight="700"
+                                fill="#0F172A"
+                              >
+                                {isOB ? '+' : '-'}
+                                {z.maxRadialMeters.toFixed(2)} m
                               </text>
-                              <text x="150" y="26" fontSize="7.5" fill="#475569">
-                                ({z.percentageOfDesign.toFixed(1)}% of Design)
-                              </text>
-                              <text x="228" y="18" fontSize="8.5" fontWeight="700" fill="#0F172A">
-                                {isOB ? '+' : '-'}{z.maxRadialMeters.toFixed(2)} m
-                              </text>
-                              <text x="290" y="13" fontSize="7.8" fontWeight="700" fill="#0F172A">
-                                [{z.reasonCategory === 'GEOLOGICAL' ? 'GEOLOGICAL' : 'MECHANICAL'}]{' '}
+                              <text
+                                x={cols[4].x + 5}
+                                y={compactRow ? rowH * 0.62 : rowH * 0.42}
+                                fontSize={subFs + 0.3}
+                                fontWeight="700"
+                                fill="#0F172A"
+                              >
+                                [{z.reasonCategory === 'GEOLOGICAL' ? 'GEOL' : 'MECH'}]{' '}
                                 {z.linkedJointSets
                                   ? `(${Array.isArray(z.linkedJointSets) ? z.linkedJointSets.join(', ') : z.linkedJointSets})`
                                   : ''}
                               </text>
-                              <text x="290" y="25" fontSize="7.2" fill="#334155">
-                                {z.reasonDetail.slice(0, 36)}
-                              </text>
+                              {!compactRow && (
+                                <text
+                                  x={cols[4].x + 5}
+                                  y={rowH * 0.78}
+                                  fontSize={subFs}
+                                  fill="#334155"
+                                >
+                                  {z.reasonDetail.slice(0, cols[4].subMaxChars)}
+                                </text>
+                              )}
                             </g>
                           );
                         });
@@ -1967,48 +2299,78 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         stroke="#0F172A"
                         strokeWidth="1.4"
                       />
-                      <rect x="0" y="0" width={qIndexAndNotesBlock.width} height="23" fill="#0F172A" />
-                      <text x="12" y="15.5" fontSize="9.5" fontWeight="700" fill="#FFFFFF">
+                      <rect x="0" y="0" width={qIndexAndNotesBlock.width} height="22" fill="#0F172A" />
+                      <text
+                        x="12"
+                        y="15"
+                        fontSize={contentMetrics.blockTitleFontSize - 0.4}
+                        fontWeight="700"
+                        fill="#FFFFFF"
+                      >
                         EXCAVATION QUANTITY SUMMARY &amp; SECTION-TO-SECTION VOLUMES
                       </text>
 
                       <rect
                         x="8"
-                        y="29"
+                        y="27"
                         width={qIndexAndNotesBlock.width - 16}
-                        height="58"
+                        height="52"
                         fill="#FFFFFF"
                         stroke="#CBD5E1"
                         strokeWidth="0.9"
                       />
-                      <text x="14" y="43" fontSize="8.5" fontWeight="700" fill="#0F172A">
+                      <text x="14" y="40" fontSize={contentMetrics.notesFontSize} fontWeight="700" fill="#0F172A">
                         DESIGN AREA: {overbreakAnalysis ? overbreakAnalysis.designAreaSqMeters.toFixed(2) : '0.00'} m² · SURVEYED AREA: {overbreakAnalysis ? overbreakAnalysis.surveyedAreaSqMeters.toFixed(2) : '0.00'} m² · PULL: {settings.roundLength.toFixed(2)} m
                       </text>
-                      <text x="14" y="58" fontSize="8.5" fontWeight="700" fill="#BE123C">
+                      <text x="14" y="54" fontSize={contentMetrics.notesFontSize} fontWeight="700" fill="#BE123C">
                         OVERBREAK: +{overbreakAnalysis ? overbreakAnalysis.overbreakAreaSqMeters.toFixed(2) : '0.00'} m² ({overbreakAnalysis ? overbreakAnalysis.overbreakPercent.toFixed(2) : '0.00'}%) · Max +{overbreakAnalysis ? overbreakAnalysis.maxRadialOverbreakMeters.toFixed(2) : '0.00'}m · Vol: {overbreakAnalysis?.overbreakVolumeCubicMeters !== null && overbreakAnalysis?.overbreakVolumeCubicMeters !== undefined ? `+${overbreakAnalysis.overbreakVolumeCubicMeters.toFixed(2)} m³` : 'Requires Pull Interval'}
                       </text>
-                      <text x="14" y="73" fontSize="8.5" fontWeight="700" fill="#B45309">
+                      <text x="14" y="68" fontSize={contentMetrics.notesFontSize} fontWeight="700" fill="#B45309">
                         UNDERCUT: -{overbreakAnalysis ? overbreakAnalysis.undercutAreaSqMeters.toFixed(2) : '0.00'} m² ({overbreakAnalysis ? overbreakAnalysis.undercutPercent.toFixed(2) : '0.00'}%) · Max -{overbreakAnalysis ? overbreakAnalysis.maxRadialUndercutMeters.toFixed(2) : '0.00'}m · Vol: {overbreakAnalysis?.undercutVolumeCubicMeters !== null && overbreakAnalysis?.undercutVolumeCubicMeters !== undefined ? `-${overbreakAnalysis.undercutVolumeCubicMeters.toFixed(2)} m³` : 'Requires Pull Interval'}
                       </text>
 
-                      <text x="12" y="102" fontSize="8" fontWeight="700" fill="#0F172A">
-                        PRIMARY OVERBREAK REASON: [{overbreakAnalysis?.overallOverbreakCategory || 'GEOLOGICAL'}] {(overbreakAnalysis?.overallOverbreakReason || '').slice(0, 52)}
+                      <text x="12" y="94" fontSize={contentMetrics.notesFontSize - 0.2} fontWeight="700" fill="#0F172A">
+                        PRIMARY OVERBREAK REASON: [{overbreakAnalysis?.overallOverbreakCategory || 'GEOLOGICAL'}] {(overbreakAnalysis?.overallOverbreakReason || '').slice(0, contentMetrics.notesMaxCharsPerLine - 28)}
                       </text>
-                      <text x="12" y="116" fontSize="8" fontWeight="700" fill="#334155">
-                        PRIMARY UNDERCUT REASON: [{overbreakAnalysis?.overallUndercutCategory || 'MECHANICAL_EXCAVATION'}] {(overbreakAnalysis?.overallUndercutReason || '').slice(0, 50)}
+                      <text x="12" y={94 + contentMetrics.notesLineSpacing} fontSize={contentMetrics.notesFontSize - 0.2} fontWeight="700" fill="#334155">
+                        PRIMARY UNDERCUT REASON: [{overbreakAnalysis?.overallUndercutCategory || 'MECHANICAL_EXCAVATION'}] {(overbreakAnalysis?.overallUndercutReason || '').slice(0, contentMetrics.notesMaxCharsPerLine - 30)}
                       </text>
 
-                      <line x1="8" y1="123" x2={qIndexAndNotesBlock.width - 8} y2="123" stroke="#CBD5E1" strokeWidth="0.8" />
-                      <text x="12" y="136" fontSize="8" fontWeight="700" fill="#0F172A">
+                      <line
+                        x1="8"
+                        y1={94 + contentMetrics.notesLineSpacing + 7}
+                        x2={qIndexAndNotesBlock.width - 8}
+                        y2={94 + contentMetrics.notesLineSpacing + 7}
+                        stroke="#CBD5E1"
+                        strokeWidth="0.8"
+                      />
+                      <text
+                        x="12"
+                        y={94 + contentMetrics.notesLineSpacing * 2 + 4}
+                        fontSize={contentMetrics.notesFontSize - 0.2}
+                        fontWeight="700"
+                        fill="#0F172A"
+                      >
                         MULTI-SECTION VOLUME SUMMARY (AVERAGE END AREA &amp; PRISMOIDAL):
                       </text>
                       {sectionVolumeRows.length === 0 ? (
-                        <text x="12" y="152" fontSize="8" fill="#475569">
+                        <text
+                          x="12"
+                          y={94 + contentMetrics.notesLineSpacing * 3 + 4}
+                          fontSize={contentMetrics.notesFontSize - 0.3}
+                          fill="#475569"
+                        >
                           Single cross-section active ({settings.faceChainage}). Save 2+ sections in Project Memory for section-to-section volumes.
                         </text>
                       ) : (
-                        sectionVolumeRows.slice(0, 2).map((vr, vIdx) => (
-                          <text key={vr.id} x="12" y={150 + vIdx * 14} fontSize="7.8" fill="#0F172A">
+                        sectionVolumeRows.slice(0, 3).map((vr, vIdx) => (
+                          <text
+                            key={vr.id}
+                            x="12"
+                            y={94 + contentMetrics.notesLineSpacing * (3 + vIdx) + 2}
+                            fontSize={contentMetrics.notesFontSize - 0.4}
+                            fill="#0F172A"
+                          >
                             · {vr.fromChainageLabel} → {vr.toChainageLabel} (L={vr.intervalLengthMeters.toFixed(1)}m): Design={vr.designVolumeCubicMeters.toFixed(1)}m³ | Survey={vr.surveyedVolumeCubicMeters.toFixed(1)}m³ | OB=+{vr.overbreakVolumeAvgEndAreaCubicMeters.toFixed(2)}m³ | UC=-{vr.undercutVolumeAvgEndAreaCubicMeters.toFixed(2)}m³
                           </text>
                         ))
@@ -2016,250 +2378,426 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
 
                       <line
                         x1="8"
-                        y1={qIndexAndNotesBlock.height - 24}
+                        y1={qIndexAndNotesBlock.height - 22}
                         x2={qIndexAndNotesBlock.width - 8}
-                        y2={qIndexAndNotesBlock.height - 24}
+                        y2={qIndexAndNotesBlock.height - 22}
                         stroke="#CBD5E1"
                         strokeWidth="0.7"
                       />
-                      <text
+                       <text
                         x="12"
-                        y={qIndexAndNotesBlock.height - 10}
-                        fontSize="8"
+                        y={qIndexAndNotesBlock.height - 8}
+                        fontSize={contentMetrics.notesFontSize - 0.2}
                         fontWeight="700"
                         fill="#0F172A"
                       >
-                        CHIEF SURVEYOR SIGN: ____________________ · ENGINEERING GEOLOGIST SIGN: ____________________
+                        CONTRACTOR GEOLOGIST SIGN: ____________________ · CLIENT GEOLOGIST SIGN: ____________________
                       </text>
                     </g>
                   </>
                 ) : (
                   <>
-                {/* 7C. Non-Intersecting Discontinuity-Set & Structural Data Table (Section 16) */}
-                <g transform={`translate(${jointTableBlock.x}, ${jointTableBlock.y})`}>
-                  <rect
-                    x="0"
-                    y="0"
-                    width={jointTableBlock.width}
-                    height={jointTableBlock.height}
-                    fill="#FFFFFF"
-                    stroke="#0F172A"
-                    strokeWidth="1.4"
-                  />
-                  <rect
-                    x="0"
-                    y="0"
-                    width={jointTableBlock.width}
-                    height="23"
-                    fill="#0F172A"
-                  />
-                  <text x="12" y="15.5" fontSize="10" fontWeight="700" fill="#FFFFFF">
-                    DISCONTINUITY-SET &amp; STRUCTURAL PARAMETERS TABLE
-                  </text>
+                    {/* 7C. Content-Aware Discontinuity-Set & Structural Data Table (Zero Intersection!) */}
+                    <g transform={`translate(${jointTableBlock.x}, ${jointTableBlock.y})`}>
+                      <rect
+                        x="0"
+                        y="0"
+                        width={jointTableBlock.width}
+                        height={jointTableBlock.height}
+                        fill="#FFFFFF"
+                        stroke="#0F172A"
+                        strokeWidth="1.4"
+                      />
+                      <rect
+                        x="0"
+                        y="0"
+                        width={jointTableBlock.width}
+                        height="22"
+                        fill="#0F172A"
+                      />
+                      <text
+                        x="12"
+                        y="15"
+                        fontSize={contentMetrics.blockTitleFontSize}
+                        fontWeight="700"
+                        fill="#FFFFFF"
+                      >
+                        DISCONTINUITY-SET &amp; STRUCTURAL PARAMETERS TABLE
+                      </text>
 
-                  {/* Strictly Partitioned Table Columns with Vertical Dividers (Zero Intersection!) */}
-                  <g transform="translate(0, 23)">
-                    <rect x="0" y="0" width={jointTableBlock.width} height="20" fill="#F1F5F9" stroke="#0F172A" strokeWidth="0.8" />
-                    <line x1="44" y1="0" x2="44" y2={jointTableBlock.height - 23} stroke="#CBD5E1" strokeWidth="0.7" />
-                    <line x1="138" y1="0" x2="138" y2={jointTableBlock.height - 23} stroke="#CBD5E1" strokeWidth="0.7" />
-                    <line x1="214" y1="0" x2="214" y2={jointTableBlock.height - 23} stroke="#CBD5E1" strokeWidth="0.7" />
-                    <line x1="278" y1="0" x2="278" y2={jointTableBlock.height - 23} stroke="#CBD5E1" strokeWidth="0.7" />
-                    <line x1="348" y1="0" x2="348" y2={jointTableBlock.height - 23} stroke="#CBD5E1" strokeWidth="0.7" />
-
-                    <text x="8" y="13.5" fontSize="8" fontWeight="700" fill="#0F172A">SET</text>
-                    <text x="49" y="13.5" fontSize="8" fontWeight="700" fill="#0F172A">DIP DIR / DIP</text>
-                    <text x="143" y="13.5" fontSize="8" fontWeight="700" fill="#0F172A">SPACING</text>
-                    <text x="219" y="13.5" fontSize="8" fontWeight="700" fill="#0F172A">PERSIST.</text>
-                    <text x="283" y="13.5" fontSize="8" fontWeight="700" fill="#0F172A">APERTURE</text>
-                    <text x="353" y="13.5" fontSize="8" fontWeight="700" fill="#0F172A">ROUGHNESS / INFILL</text>
-                  </g>
-
-                  {jointSets.length === 0 ? (
-                    <text x={jointTableBlock.width / 2} y="95" textAnchor="middle" fontSize="9.5" fill="#64748B">
-                      No discontinuity sets plotted yet. Run AI Trace or Add Joint.
-                    </text>
-                  ) : (
-                    jointSets.slice(0, 7).map((js, idx) => {
-                      const availRowsH = jointTableBlock.height - 45;
-                      const rowH = Math.min(42, Math.max(32, Math.floor(availRowsH / Math.max(1, Math.min(7, jointSets.length)))));
-                      const rowY = 43 + idx * rowH;
-                      return (
-                        <g key={js.id} transform={`translate(0, ${rowY})`}>
-                          <rect
-                            x="0"
-                            y="0"
-                            width={jointTableBlock.width}
-                            height={rowH}
-                            fill={idx % 2 === 0 ? '#FFFFFF' : '#F8FAFC'}
+                      {/* Strictly Partitioned Table Columns with Dynamic Widths & Vertical Dividers */}
+                      <g transform="translate(0, 22)">
+                        <rect
+                          x="0"
+                          y="0"
+                          width={jointTableBlock.width}
+                          height="19"
+                          fill="#F1F5F9"
+                          stroke="#0F172A"
+                          strokeWidth="0.8"
+                        />
+                        {contentMetrics.discontinuityColumns.slice(1).map((col) => (
+                          <line
+                            key={`disc-div-${col.key}`}
+                            x1={col.x}
+                            y1="0"
+                            x2={col.x}
+                            y2={jointTableBlock.height - 22}
                             stroke="#CBD5E1"
-                            strokeWidth="0.6"
+                            strokeWidth="0.7"
                           />
-                          <rect x="6" y="6" width="32" height="16" rx="2" fill={js.color} />
+                        ))}
+                        {contentMetrics.discontinuityColumns.map((col) => (
                           <text
-                            x="22"
-                            y="17"
-                            textAnchor="middle"
-                            fontSize="8.5"
+                            key={`disc-hdr-${col.key}`}
+                            x={col.x + 5}
+                            y="13"
+                            fontSize={contentMetrics.tableHeaderFontSize}
                             fontWeight="700"
-                            fill="#FFFFFF"
+                            fill="#0F172A"
                           >
-                            {js.id}
+                            {col.label}
                           </text>
-                          <text x="49" y="14" fontSize="8.5" fontWeight="700" fill="#0F172A">
-                            {js.orientation.slice(0, 15)}
+                        ))}
+                      </g>
+
+                      {jointSets.length === 0 ? (
+                        <text
+                          x={jointTableBlock.width / 2}
+                          y={Math.min(95, jointTableBlock.height / 2 + 12)}
+                          textAnchor="middle"
+                          fontSize="9.5"
+                          fill="#64748B"
+                        >
+                          No discontinuity sets plotted yet. Run AI Trace or Add Joint.
+                        </text>
+                      ) : (
+                        (() => {
+                           const visibleSets = jointSets.slice(0, contentMetrics.maxVisibleJointSets);
+                          const availRowsH = jointTableBlock.height - 42;
+                          const rowH = Math.min(
+                            54,
+                            Math.max(19, Math.floor(availRowsH / Math.max(1, visibleSets.length)))
+                          );
+                          const cols = contentMetrics.discontinuityColumns;
+                          const cellFs = contentMetrics.tableCellFontSize;
+                          const subFs = contentMetrics.tableSubCellFontSize;
+                          const compactRow = rowH < 25;
+
+                          return visibleSets.map((js, idx) => {
+                            const rowY = 41 + idx * rowH;
+                            const badgeH = Math.min(20, Math.max(13, Math.round(rowH * 0.46)));
+                            const badgeY = Math.max(2, (rowH - badgeH) / 2);
+
+                            return (
+                              <g key={js.id} transform={`translate(0, ${rowY})`}>
+                                <rect
+                                  x="0"
+                                  y="0"
+                                  width={jointTableBlock.width}
+                                  height={rowH}
+                                  fill={idx % 2 === 0 ? '#FFFFFF' : '#F8FAFC'}
+                                  stroke="#CBD5E1"
+                                  strokeWidth="0.6"
+                                />
+                                <rect
+                                  x="5"
+                                  y={badgeY}
+                                  width={cols[0].width - 10}
+                                  height={badgeH}
+                                  rx="2"
+                                  fill={js.color}
+                                />
+                                <text
+                                  x={cols[0].width / 2}
+                                  y={badgeY + badgeH * 0.74}
+                                  textAnchor="middle"
+                                  fontSize={cellFs}
+                                  fontWeight="700"
+                                  fill="#FFFFFF"
+                                >
+                                  {js.id}
+                                </text>
+                                <text
+                                  x={cols[1].x + 5}
+                                  y={compactRow ? rowH * 0.64 : rowH * 0.42}
+                                  fontSize={cellFs}
+                                  fontWeight="700"
+                                  fill="#0F172A"
+                                >
+                                  {js.orientation.slice(0, cols[1].maxChars)}
+                                </text>
+                                {!compactRow && (
+                                  <text
+                                    x={cols[1].x + 5}
+                                    y={rowH * 0.78}
+                                    fontSize={subFs}
+                                    fill="#475569"
+                                  >
+                                    Str:{' '}
+                                    {js.avgStrike !== null
+                                      ? `${String(js.avgStrike).padStart(3, '0')}°`
+                                      : 'N/A'}{' '}
+                                    ({js.jointCount || 1}j)
+                                  </text>
+                                )}
+
+                                {/* Strictly fitted cell text using computed column char budgets */}
+                                <text
+                                  x={cols[2].x + 5}
+                                  y={rowH * 0.56}
+                                  fontSize={cellFs}
+                                  fill="#0F172A"
+                                >
+                                  {js.spacing.slice(0, cols[2].maxChars)}
+                                </text>
+                                <text
+                                  x={cols[3].x + 5}
+                                  y={rowH * 0.56}
+                                  fontSize={cellFs}
+                                  fill="#0F172A"
+                                >
+                                  {js.persistence.slice(0, cols[3].maxChars)}
+                                </text>
+                                <text
+                                  x={cols[4].x + 5}
+                                  y={rowH * 0.56}
+                                  fontSize={cellFs}
+                                  fill="#0F172A"
+                                >
+                                  {js.aperture.slice(0, cols[4].maxChars)}
+                                </text>
+                                <text
+                                  x={cols[5].x + 5}
+                                  y={compactRow ? rowH * 0.64 : rowH * 0.41}
+                                  fontSize={subFs + 0.3}
+                                  fontWeight="600"
+                                  fill="#0F172A"
+                                >
+                                  {js.roughness.slice(0, cols[5].maxChars)}
+                                </text>
+                                {!compactRow && (
+                                  <text
+                                    x={cols[5].x + 5}
+                                    y={rowH * 0.77}
+                                    fontSize={subFs}
+                                    fill="#334155"
+                                  >
+                                    Infill: {js.infilling.slice(0, Math.max(12, cols[5].subMaxChars - 12))} ·{' '}
+                                    {js.water}
+                                  </text>
+                                )}
+                              </g>
+                            );
+                          });
+                        })()
+                      )}
+                    </g>
+
+                    {/* 7D. BARTON Q-INDEX (Priority 7) & CONTENT-AWARE GEOLOGICAL DESCRIPTION / NOTES (Priority 8) */}
+                    <g transform={`translate(${qIndexAndNotesBlock.x}, ${qIndexAndNotesBlock.y})`}>
+                      <rect
+                        x="0"
+                        y="0"
+                        width={qIndexAndNotesBlock.width}
+                        height={qIndexAndNotesBlock.height}
+                        fill="#F8FAFC"
+                        stroke="#0F172A"
+                        strokeWidth="1.4"
+                      />
+                      <rect
+                        x="0"
+                        y="0"
+                        width={qIndexAndNotesBlock.width}
+                        height="22"
+                        fill="#0F172A"
+                      />
+                      <text
+                        x="12"
+                        y="15"
+                        fontSize={contentMetrics.blockTitleFontSize}
+                        fontWeight="700"
+                        fill="#FFFFFF"
+                      >
+                        BARTON Q-INDEX (NGI ROCK MASS RATING) &amp; GEOLOGY DESCRIPTION
+                      </text>
+
+                      {/* Formula & 6 Parameters Row */}
+                      <rect
+                        x="8"
+                        y="27"
+                        width={qIndexAndNotesBlock.width - 16}
+                        height="40"
+                        fill="#FFFFFF"
+                        stroke="#CBD5E1"
+                        strokeWidth="0.9"
+                      />
+                      <text
+                        x="14"
+                        y="41"
+                        fontSize={contentMetrics.notesFontSize + 0.3}
+                        fontWeight="700"
+                        fill="#0F172A"
+                      >
+                        Q = (RQD/Jn) × (Jr/Ja) × (Jw/SRF) = ({qIndex.rqd}%/{qResult.effectiveJn}) × ({qIndex.jr}/{qIndex.ja}) × ({qIndex.jw}/{qIndex.srf})
+                      </text>
+                      <text x="14" y="56" fontSize={contentMetrics.notesFontSize} fill="#334155">
+                        RQD: <tspan fontWeight="700" fill="#0F172A">{qIndex.rqd}%</tspan> · Jn: <tspan fontWeight="700" fill="#0F172A">{qResult.effectiveJn}</tspan> · Jr: <tspan fontWeight="700" fill="#0F172A">{qIndex.jr}</tspan> · Ja: <tspan fontWeight="700" fill="#0F172A">{qIndex.ja}</tspan> · Jw: <tspan fontWeight="700" fill="#0F172A">{qIndex.jw}</tspan> · SRF: <tspan fontWeight="700" fill="#0F172A">{qIndex.srf}</tspan>
+                      </text>
+
+                      {/* Highlighted Q-Value & Rock Class Box */}
+                      <rect
+                        x={qIndexAndNotesBlock.width - 134}
+                        y="30"
+                        width="120"
+                        height="34"
+                        rx="2"
+                        fill="#0F172A"
+                      />
+                      <text
+                        x={qIndexAndNotesBlock.width - 74}
+                        y="44"
+                        textAnchor="middle"
+                        fontSize="10"
+                        fontWeight="700"
+                        fill="#38BDF8"
+                      >
+                        Q = {qResult.qValue.toFixed(3)}
+                      </text>
+                      <text
+                        x={qIndexAndNotesBlock.width - 74}
+                        y="57"
+                        textAnchor="middle"
+                        fontSize="7.3"
+                        fontWeight="700"
+                        fill="#FFFFFF"
+                      >
+                        {qResult.rockMassClass.toUpperCase()}
+                      </text>
+
+                      <text
+                        x="12"
+                        y="81"
+                        fontSize={contentMetrics.notesFontSize + 0.2}
+                        fontWeight="700"
+                        fill="#0F172A"
+                      >
+                        EST. RMR89: {qResult.estimatedRmr} · ESR: {qIndex.esr} · De: {qResult.equivalentDimensionDe.toFixed(2)}m · SUPPORT:{' '}
+                        <tspan fontWeight="600">
+                          {qResult.recommendedSupport.slice(0, Math.max(34, contentMetrics.notesMaxCharsPerLine - 44))}
+                        </tspan>
+                      </text>
+
+                      <line
+                        x1="8"
+                        y1="88"
+                        x2={qIndexAndNotesBlock.width - 8}
+                        y2="88"
+                        stroke="#CBD5E1"
+                        strokeWidth="0.8"
+                      />
+
+                      {/* Dynamic Content-Aware Multi-Line Lithology & Geological Notes */}
+                      {(() => {
+                        const startY = 102;
+                        const footerY = qIndexAndNotesBlock.height - 23;
+                        const availTextH = Math.max(54, footerY - startY - 4);
+                        const rawLith =
+                          lithologyRegions.length > 0
+                            ? Array.from(new Set(lithologyRegions.map((r) => r.lithologyName))).join(' / ')
+                            : rockMass.rockType;
+                        const rawDesc =
+                          lithologyRegions[0]?.description ||
+                          `${rockMass.weatheringGrade} · ${rockMass.strengthGrade}`;
+                        const rawStruct =
+                          lithologyRegions[0]?.structuralFeatures ||
+                          `${rockMass.foliationBeddingSpacing} · ${rockMass.groundwaterCondition}`;
+                        const rawOB =
+                          overbreakAnalysis && overbreakAnalysis.hasValidSurveyProfile
+                            ? `OB: +${overbreakAnalysis.overbreakAreaSqMeters.toFixed(2)}m² (${overbreakAnalysis.overbreakPercent.toFixed(1)}%, Max +${overbreakAnalysis.maxRadialOverbreakMeters.toFixed(2)}m) · UC: -${overbreakAnalysis.undercutAreaSqMeters.toFixed(2)}m² (${overbreakAnalysis.undercutPercent.toFixed(1)}%) · Vol: ${
+                                overbreakAnalysis.overbreakVolumeCubicMeters !== null
+                                  ? `+${overbreakAnalysis.overbreakVolumeCubicMeters.toFixed(2)}m³`
+                                  : overbreakAnalysis.volumeStatusMessage
+                              }`
+                            : `${rockMass.overbreakCondition} · ${rockMass.installedSupport}`;
+                        const rawNotes =
+                          lithologyRegions[0]?.notes || rockMass.geologistRemarks || '';
+
+                        const maxChars = contentMetrics.notesMaxCharsPerLine;
+                        const descLines = wrapSheetTextLines(`DESCRIPTION: ${rawDesc}`, maxChars, 2);
+                        const structLines = wrapSheetTextLines(`STRUCTURAL: ${rawStruct}`, maxChars, 2);
+                        const notesLines = rawNotes
+                          ? wrapSheetTextLines(`NOTES: ${rawNotes}`, maxChars, 2)
+                          : [];
+
+                        const allEntries: { label: string; text: string; bold?: boolean }[] = [
+                          {
+                            label: 'LITHOLOGY',
+                            text: `LITHOLOGY: ${rawLith.slice(0, maxChars - 12)}`,
+                            bold: true,
+                          },
+                          ...descLines.map((t, i) => ({
+                            label: `DESC-${i}`,
+                            text: t,
+                          })),
+                          ...structLines.map((t, i) => ({
+                            label: `STRUCT-${i}`,
+                            text: t,
+                          })),
+                          {
+                            label: 'OB',
+                            text: `OVERBREAK / UNDERCUT: ${rawOB.slice(0, maxChars - 22)}`,
+                            bold: true,
+                          },
+                          ...notesLines.map((t, i) => ({
+                            label: `NOTES-${i}`,
+                            text: t,
+                          })),
+                        ];
+
+                        const maxFittingLines = Math.max(4, Math.floor(availTextH / 11));
+                        const visibleEntries = allEntries.slice(0, maxFittingLines);
+                        const dynamicStep = Math.min(
+                          14.5,
+                          Math.max(10.5, availTextH / Math.max(1, visibleEntries.length))
+                        );
+                        const dynamicFs = Math.min(
+                          contentMetrics.notesFontSize,
+                          Math.max(6.7, dynamicStep * 0.64)
+                        );
+
+                        return visibleEntries.map((entry, idx) => (
+                          <text
+                            key={entry.label}
+                            x="12"
+                            y={startY + idx * dynamicStep}
+                            fontSize={dynamicFs}
+                            fontWeight={entry.bold ? '700' : '600'}
+                            fill={entry.bold ? '#0F172A' : '#1E293B'}
+                          >
+                            {entry.text}
                           </text>
-                          <text x="49" y="26" fontSize="7.5" fill="#475569">
-                            Str: {js.avgStrike !== null ? `${String(js.avgStrike).padStart(3, '0')}°` : 'N/A'} ({js.jointCount || 1}j)
-                          </text>
+                        ));
+                      })()}
 
-                          {/* Strictly truncated cell text so columns never intersect */}
-                          <text x="143" y="18" fontSize="8" fill="#0F172A">
-                            {js.spacing.slice(0, 12)}
-                          </text>
-                          <text x="219" y="18" fontSize="8" fill="#0F172A">
-                            {js.persistence.slice(0, 10)}
-                          </text>
-                          <text x="283" y="18" fontSize="8" fill="#0F172A">
-                            {js.aperture.slice(0, 11)}
-                          </text>
-                          <text x="353" y="13" fontSize="7.5" fontWeight="600" fill="#0F172A">
-                            {js.roughness.slice(0, 25)}
-                          </text>
-                          <text x="353" y="23" fontSize="7.2" fill="#334155">
-                            Infill: {js.infilling.slice(0, 21)} · {js.water}
-                          </text>
-                        </g>
-                      );
-                    })
-                  )}
-                </g>
-
-                {/* 7D. BARTON Q-INDEX (Priority 7) & GEOLOGICAL DESCRIPTION / NOTES (Priority 8) */}
-                <g transform={`translate(${qIndexAndNotesBlock.x}, ${qIndexAndNotesBlock.y})`}>
-                  <rect
-                    x="0"
-                    y="0"
-                    width={qIndexAndNotesBlock.width}
-                    height={qIndexAndNotesBlock.height}
-                    fill="#F8FAFC"
-                    stroke="#0F172A"
-                    strokeWidth="1.4"
-                  />
-                  <rect
-                    x="0"
-                    y="0"
-                    width={qIndexAndNotesBlock.width}
-                    height="23"
-                    fill="#0F172A"
-                  />
-                  <text x="12" y="15.5" fontSize="10" fontWeight="700" fill="#FFFFFF">
-                    BARTON Q-INDEX (NGI ROCK MASS RATING) &amp; GEOLOGY DESCRIPTION
-                  </text>
-
-                  {/* Formula & 6 Parameters Row */}
-                  <rect
-                    x="8"
-                    y="29"
-                    width={qIndexAndNotesBlock.width - 16}
-                    height="42"
-                    fill="#FFFFFF"
-                    stroke="#CBD5E1"
-                    strokeWidth="0.9"
-                  />
-                  <text x="14" y="44" fontSize="8.5" fontWeight="700" fill="#0F172A">
-                    Q = (RQD/Jn) × (Jr/Ja) × (Jw/SRF) = ({qIndex.rqd}%/{qResult.effectiveJn}) × ({qIndex.jr}/{qIndex.ja}) × ({qIndex.jw}/{qIndex.srf})
-                  </text>
-                  <text x="14" y="60" fontSize="8" fill="#334155">
-                    RQD: <tspan fontWeight="700" fill="#0F172A">{qIndex.rqd}%</tspan> · Jn: <tspan fontWeight="700" fill="#0F172A">{qResult.effectiveJn}</tspan> · Jr: <tspan fontWeight="700" fill="#0F172A">{qIndex.jr}</tspan> · Ja: <tspan fontWeight="700" fill="#0F172A">{qIndex.ja}</tspan> · Jw: <tspan fontWeight="700" fill="#0F172A">{qIndex.jw}</tspan> · SRF: <tspan fontWeight="700" fill="#0F172A">{qIndex.srf}</tspan>
-                  </text>
-
-                  {/* Highlighted Q-Value & Rock Class Box */}
-                  <rect
-                    x={qIndexAndNotesBlock.width - 134}
-                    y="33"
-                    width="120"
-                    height="34"
-                    rx="2"
-                    fill="#0F172A"
-                  />
-                  <text
-                    x={qIndexAndNotesBlock.width - 74}
-                    y="47"
-                    textAnchor="middle"
-                    fontSize="10.5"
-                    fontWeight="700"
-                    fill="#38BDF8"
-                  >
-                    Q = {qResult.qValue.toFixed(3)}
-                  </text>
-                  <text
-                    x={qIndexAndNotesBlock.width - 74}
-                    y="60"
-                    textAnchor="middle"
-                    fontSize="7.5"
-                    fontWeight="700"
-                    fill="#FFFFFF"
-                  >
-                    {qResult.rockMassClass.toUpperCase()}
-                  </text>
-
-                  <text x="12" y="86" fontSize="8.5" fontWeight="700" fill="#0F172A">
-                    EST. RMR89: {qResult.estimatedRmr} · ESR: {qIndex.esr} · De: {qResult.equivalentDimensionDe.toFixed(2)}m · SUPPORT: <tspan fontWeight="600">{qResult.recommendedSupport.slice(0, 42)}</tspan>
-                  </text>
-
-                  <line
-                    x1="8"
-                    y1="94"
-                    x2={qIndexAndNotesBlock.width - 8}
-                    y2="94"
-                    stroke="#CBD5E1"
-                    strokeWidth="0.8"
-                  />
-
-                  {/* Lithology & Geological Description Summary */}
-                  <text x="12" y="109" fontSize="8.5" fontWeight="700" fill="#0F172A">
-                    LITHOLOGY: <tspan fontWeight="600" fill="#1E293B">{(lithologyRegions[0]?.lithologyName || rockMass.rockType).slice(0, 68)}</tspan>
-                  </text>
-                  <text x="12" y="124" fontSize="8" fill="#334155">
-                    DESCRIPTION: <tspan fontWeight="600" fill="#0F172A">{(lithologyRegions[0]?.description || `${rockMass.weatheringGrade} · ${rockMass.strengthGrade}`).slice(0, 74)}</tspan>
-                  </text>
-                  <text x="12" y="139" fontSize="8" fill="#334155">
-                    STRUCTURAL: <tspan fontWeight="600" fill="#0F172A">{(lithologyRegions[0]?.structuralFeatures || `${rockMass.foliationBeddingSpacing} · ${rockMass.groundwaterCondition}`).slice(0, 74)}</tspan>
-                  </text>
-                  <text x="12" y="154" fontSize="8" fill="#334155">
-                    OVERBREAK / UNDERCUT:{' '}
-                    <tspan fontWeight="700" fill="#0F172A">
-                      {overbreakAnalysis && overbreakAnalysis.hasValidSurveyProfile
-                        ? `OB: +${overbreakAnalysis.overbreakAreaSqMeters.toFixed(2)}m² (${overbreakAnalysis.overbreakPercent.toFixed(1)}%, Max +${overbreakAnalysis.maxRadialOverbreakMeters.toFixed(2)}m) · UC: -${overbreakAnalysis.undercutAreaSqMeters.toFixed(2)}m² (${overbreakAnalysis.undercutPercent.toFixed(1)}%) · Vol: ${
-                            overbreakAnalysis.overbreakVolumeCubicMeters !== null
-                              ? `+${overbreakAnalysis.overbreakVolumeCubicMeters.toFixed(2)}m³`
-                              : overbreakAnalysis.volumeStatusMessage
-                          }`.slice(0, 74)
-                        : `${rockMass.overbreakCondition} · ${rockMass.installedSupport}`.slice(0, 66)}
-                    </tspan>
-                  </text>
-                  <text x="12" y="169" fontSize="8" fill="#475569">
-                    NOTES: <tspan fontWeight="600" fill="#0F172A">{(lithologyRegions[0]?.notes || rockMass.geologistRemarks || '').slice(0, 78)}</tspan>
-                  </text>
-
-                  <line
-                    x1="8"
-                    y1={qIndexAndNotesBlock.height - 24}
-                    x2={qIndexAndNotesBlock.width - 8}
-                    y2={qIndexAndNotesBlock.height - 24}
-                    stroke="#CBD5E1"
-                    strokeWidth="0.7"
-                  />
-                  <text
-                    x="12"
-                    y={qIndexAndNotesBlock.height - 10}
-                    fontSize="8"
-                    fontWeight="700"
-                    fill="#0F172A"
-                  >
-                    ENGINEERING GEOLOGIST SIGN: ____________________ · RESIDENT ENGINEER SIGN: ____________________
-                  </text>
-                </g>
+                      <line
+                        x1="8"
+                        y1={qIndexAndNotesBlock.height - 22}
+                        x2={qIndexAndNotesBlock.width - 8}
+                        y2={qIndexAndNotesBlock.height - 22}
+                        stroke="#CBD5E1"
+                        strokeWidth="0.7"
+                      />
+                       <text
+                        x="12"
+                        y={qIndexAndNotesBlock.height - 8}
+                        fontSize={contentMetrics.notesFontSize - 0.2}
+                        fontWeight="700"
+                        fill="#0F172A"
+                      >
+                        CONTRACTOR GEOLOGIST SIGN: ____________________ · CLIENT GEOLOGIST SIGN: ____________________
+                      </text>
+                    </g>
                   </>
                 )}
               </g>

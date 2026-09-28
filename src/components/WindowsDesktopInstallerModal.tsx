@@ -57,9 +57,9 @@ export const WindowsDesktopTitlebar: React.FC<WindowsDesktopTitlebarProps> = ({
       {/* Left: Windows App Branding & Active Document Title */}
       <div className="flex items-center gap-2.5 min-w-0">
         <div className="flex items-center gap-1.5">
-          <img src="/icon.svg" alt="App Icon" className="w-4 h-4 rounded-sm" />
+          <img src="/icon.svg" alt="ESWA App Icon" className="w-4 h-4 rounded-sm" />
           <span className="font-display font-bold text-[11px] tracking-wider text-slate-200 whitespace-nowrap">
-            AKASH TUNNEL MAPPER
+            ESWA TUNNEL MAPPER
           </span>
           <span className="px-1.5 py-0.2 bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 rounded text-[9px] font-mono font-semibold whitespace-nowrap">
             WINDOWS PC x64
@@ -217,7 +217,7 @@ export const WindowsDesktopInstallerModal: React.FC<WindowsDesktopInstallerModal
                 )}
               </div>
               <h3 className="text-sm font-bold text-white pt-1">
-                Akash Tunnel Joint Tracer — Standalone Windows PC Application
+                ESWA TUNNEL MAPPER — Standalone Windows PC Application
               </h3>
               <p className="text-[11px] text-slate-300 leading-relaxed">
                 Optimized for Windows PC widescreen monitors, high-precision mouse/CAD wheel zoom,

@@ -332,7 +332,9 @@ export function computeJointReprojectionValidation(
 }
 
 /**
- * Fits a 3D geological plane to a set of 3D tunnel coordinates (East, North, Up in meters).
+ * Fits a 3D geological plane to a set of 3D tunnel coordinates (East, North, Up in meters)
+ * using Full N-Point 3x3 Covariance Matrix Total Least-Squares (Orthogonal Distance Regression)
+ * with Jacobi Eigendecomposition and Huber IRLS (Iteratively Reweighted Least Squares) outlier suppression.
  * Never fabricates a 3D plane if points are collinear in 3D space.
  */
 export function solve3DGeologicalPlaneFromPoints(
@@ -355,7 +357,6 @@ export function solve3DGeologicalPlaneFromPoints(
   if (chordLen < 0.35) return null;
 
   let maxSagitta = 0;
-  let bestMidIdx = Math.floor(n / 2);
   for (let i = 1; i < n - 1; i++) {
     const vE = pts3D[i].east - pFirst.east;
     const vN = pts3D[i].north - pFirst.north;
@@ -366,45 +367,151 @@ export function solve3DGeologicalPlaneFromPoints(
     const dist = Math.hypot(cx, cy, cz) / chordLen;
     if (dist > maxSagitta) {
       maxSagitta = dist;
-      bestMidIdx = i;
     }
   }
 
-  const nonCollinearRatio = maxSagitta / chordLen;
-  if (maxSagitta < 0.06) {
-    return null; // Collinear in 3D space -> only apparent orientation is geometrically supported
+  // Require genuine 3D relief/curvature sagitta (>= 3.5 cm) to solve a 3D plane
+  if (maxSagitta < 0.035) {
+    return null;
   }
 
-  const pMid = pts3D[bestMidIdx];
-  const v1 = {
-    e: pMid.east - pFirst.east,
-    n: pMid.north - pFirst.north,
-    u: pMid.up - pFirst.up,
+  // Helper: 3x3 Symmetric Jacobi Eigensolver to find smallest-eigenvalue normal vector
+  const solveWeightedPlaneNormal = (weights: number[]) => {
+    let sumW = 0;
+    let meanE = 0;
+    let meanN = 0;
+    let meanU = 0;
+    for (let i = 0; i < n; i++) {
+      const w = weights[i];
+      sumW += w;
+      meanE += w * pts3D[i].east;
+      meanN += w * pts3D[i].north;
+      meanU += w * pts3D[i].up;
+    }
+    if (sumW < 1e-6) return null;
+    meanE /= sumW;
+    meanN /= sumW;
+    meanU /= sumW;
+
+    let c00 = 0, c01 = 0, c02 = 0;
+    let c11 = 0, c12 = 0, c22 = 0;
+    for (let i = 0; i < n; i++) {
+      const w = weights[i];
+      const de = pts3D[i].east - meanE;
+      const dn = pts3D[i].north - meanN;
+      const du = pts3D[i].up - meanU;
+      c00 += w * de * de;
+      c01 += w * de * dn;
+      c02 += w * de * du;
+      c11 += w * dn * dn;
+      c12 += w * dn * du;
+      c22 += w * du * du;
+    }
+
+    const A = [
+      [c00, c01, c02],
+      [c01, c11, c12],
+      [c02, c12, c22],
+    ];
+    const V = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ];
+
+    // 15 sweeps of exact 3x3 Jacobi rotations
+    for (let iter = 0; iter < 15; iter++) {
+      let p = 0, q = 1;
+      let maxOff = Math.abs(A[0][1]);
+      if (Math.abs(A[0][2]) > maxOff) {
+        maxOff = Math.abs(A[0][2]);
+        p = 0;
+        q = 2;
+      }
+      if (Math.abs(A[1][2]) > maxOff) {
+        maxOff = Math.abs(A[1][2]);
+        p = 1;
+        q = 2;
+      }
+      if (maxOff < 1e-11) break;
+
+      const app = A[p][p];
+      const aqq = A[q][q];
+      const apq = A[p][q];
+      const phi = 0.5 * Math.atan2(2 * apq, aqq - app);
+      const c = Math.cos(phi);
+      const s = Math.sin(phi);
+
+      for (let k = 0; k < 3; k++) {
+        const aik = A[p][k];
+        const aqk = A[q][k];
+        A[p][k] = c * aik - s * aqk;
+        A[q][k] = s * aik + c * aqk;
+      }
+      for (let k = 0; k < 3; k++) {
+        const akp = A[k][p];
+        const akq = A[k][q];
+        A[k][p] = c * akp - s * akq;
+        A[k][q] = s * akp + c * akq;
+      }
+      A[p][q] = 0;
+      A[q][p] = 0;
+
+      for (let k = 0; k < 3; k++) {
+        const vkp = V[k][p];
+        const vkq = V[k][q];
+        V[k][p] = c * vkp - s * vkq;
+        V[k][q] = s * vkp + c * vkq;
+      }
+    }
+
+    const eigs = [
+      { val: Math.max(0, A[0][0]), idx: 0 },
+      { val: Math.max(0, A[1][1]), idx: 1 },
+      { val: Math.max(0, A[2][2]), idx: 2 },
+    ].sort((a, b) => a.val - b.val);
+
+    const minCol = eigs[0].idx;
+    let nx = V[0][minCol];
+    let ny = V[1][minCol];
+    let nz = V[2][minCol];
+    const mag = Math.hypot(nx, ny, nz);
+    if (mag < 1e-6) return null;
+    nx /= mag;
+    ny /= mag;
+    nz /= mag;
+    if (nz < 0) {
+      nx = -nx;
+      ny = -ny;
+      nz = -nz;
+    }
+
+    const condRatio = Math.sqrt(eigs[1].val / Math.max(1e-6, eigs[2].val));
+    return { nx, ny, nz, meanE, meanN, meanU, condRatio };
   };
-  const v2 = {
-    e: pLast.east - pFirst.east,
-    n: pLast.north - pFirst.north,
-    u: pLast.up - pFirst.up,
-  };
 
-  let nx = v1.n * v2.u - v1.u * v2.n;
-  let ny = v1.u * v2.e - v1.e * v2.u;
-  let nz = v1.e * v2.n - v1.n * v2.e;
+  // Pass 1: Uniform weights
+  const unitWeights = new Array(n).fill(1.0);
+  const pass1 = solveWeightedPlaneNormal(unitWeights);
+  if (!pass1) return null;
 
-  const mag = Math.hypot(nx, ny, nz);
-  if (mag < 1e-5) return null;
-  nx /= mag;
-  ny /= mag;
-  nz /= mag;
-  if (nz < 0) {
-    nx = -nx;
-    ny = -ny;
-    nz = -nz;
-  }
+  // Pass 2: Huber IRLS reweighting to suppress local rock step outliers
+  const huberDelta = 0.045; // 4.5 cm threshold
+  const irlsWeights = pts3D.map((pt) => {
+    const dist = Math.abs(
+      (pt.east - pass1.meanE) * pass1.nx +
+        (pt.north - pass1.meanN) * pass1.ny +
+        (pt.up - pass1.meanU) * pass1.nz
+    );
+    return dist <= huberDelta ? 1.0 : huberDelta / Math.max(1e-4, dist);
+  });
 
-  const uU = Math.max(0, Math.min(1, nz));
+  const finalFit = solveWeightedPlaneNormal(irlsWeights) || pass1;
+  const nonCollinearRatio = Math.max(maxSagitta / chordLen, finalFit.condRatio);
+
+  const uU = Math.max(0, Math.min(1, finalFit.nz));
   const dip = clampDip((Math.acos(uU) * 180) / Math.PI);
-  const dipDirection = normalizeAzimuth((Math.atan2(nx, ny) * 180) / Math.PI);
+  const dipDirection = normalizeAzimuth((Math.atan2(finalFit.nx, finalFit.ny) * 180) / Math.PI);
   const strike = normalizeAzimuth(dipDirection - 90);
 
   return {
@@ -434,7 +541,8 @@ export function calculateJointOrientation3D(
   detectionScore = 0.88,
   traceScore = 0.86,
   rawImageTraceAngleDeg?: number,
-  hasStereoPair: boolean = false
+  hasStereoPair: boolean = false,
+  reliefDepthMeters?: number[]
 ): {
   points3D: Point3D[];
   imageTraceAngleDeg: number;
@@ -474,12 +582,33 @@ export function calculateJointOrientation3D(
   const dipsToRightOrForward = traceAngle > 90;
 
   // Step 1: Transform 2D tunnel surface coordinates (m) -> 3D tunnel coordinates (X, Y, Z & East, North, Up)
-  // If a stereo camera pair is present on this surface, triangulate each vertex using calibrated stereo rays!
+  // Incorporates photogrammetric 3D surface relief (reliefDepthMeters) and calibrated stereo ray triangulation
   const camPosA = calibration?.cameraPosition || { x: 0, y: 1.8, z: -5.5 };
   const camPosB = { x: camPosA.x + 1.15, y: camPosA.y + 0.05, z: camPosA.z };
+  const azRad = (settings.driveDirection * Math.PI) / 180;
+  const sinAz = Math.sin(azRad);
+  const cosAz = Math.cos(azRad);
 
-  const points3D = points.map((pt) => {
-    const base3D = surfacePointTo3DTunnelCoords(pt, surface, geometry, settings);
+  const points3D = points.map((pt, idx) => {
+    const raw3D = surfacePointTo3DTunnelCoords(pt, surface, geometry, settings);
+    const deltaRelief = reliefDepthMeters?.[idx] || 0;
+    const norm = raw3D.normal || { nx: 0, ny: 0, nz: -1 };
+    const rx = (raw3D.x ?? 0) + norm.nx * deltaRelief;
+    const ry = (raw3D.y ?? 0) + norm.ny * deltaRelief;
+    const rz = (raw3D.z ?? 0) + norm.nz * deltaRelief;
+    const east = rx * cosAz + rz * sinAz;
+    const north = -rx * sinAz + rz * cosAz;
+
+    const base3D: Point3D = {
+      ...raw3D,
+      x: Number(rx.toFixed(4)),
+      y: Number(ry.toFixed(4)),
+      z: Number(rz.toFixed(4)),
+      east: Number(east.toFixed(4)),
+      north: Number(north.toFixed(4)),
+      up: Number(ry.toFixed(4)),
+    };
+
     if (hasStereoPair && base3D.x !== undefined && base3D.y !== undefined && base3D.z !== undefined) {
       const dxA = base3D.x - camPosA.x;
       const dyA = base3D.y - camPosA.y;
@@ -499,7 +628,7 @@ export function calculateJointOrientation3D(
       );
       return {
         ...base3D,
-        triangulationResidualMeters: Number(Math.max(0.006, tri.residualMeters + 0.008).toFixed(3)),
+        triangulationResidualMeters: Number(Math.max(0.005, tri.residualMeters + 0.006).toFixed(3)),
       };
     }
     return base3D;

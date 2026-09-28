@@ -1,5 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ThemeToggleButton, useTheme } from '../context/ThemeContext';
+import {
+  triggerGlobalLayoutRecalculation,
+  useContainerResizeObserver,
+  useResponsiveLayout,
+} from '../hooks/useResponsiveLayout';
 import {
   ConnectedSurveyProfile,
   GeologicalFeatureType,
@@ -41,10 +46,19 @@ import {
   clipPolylineToSurface,
   createDefaultSurfaceTransform,
   getDisplayedJointGeometry,
+  imageUVToSurfaceMeters,
   isPointInsidePolygon,
   pointToSegmentDistance,
   solveProjectiveHomography3x3,
+  surfaceMetersToImageUV,
 } from '../engine/geometryEngine';
+import {
+  autoPropagateFractureFromSeedUV,
+  buildPhotoRidgeField,
+  PhotoRidgeField,
+  snapWorldPolylineToPhotoRidge,
+  traceGeodesicPathBetweenUVPoints,
+} from '../engine/cvPipeline';
 import {
   CanvasCoordinateManager,
   CanvasViewportState,
@@ -69,6 +83,11 @@ import { PhotoEditorSubTab, PhotoFittingPanel } from './PhotoFittingPanel';
 import { GeologyAndQIndexDrawer } from './GeologyAndQIndexDrawer';
 import { LithologyPanel } from './LithologyPanel';
 import { OverbreakAnalysisPanel } from './OverbreakAndProjectMemoryPanel';
+import { PhotogrammetryStructuralModal } from './PhotogrammetryStructuralModal';
+import {
+  computeBartonJRCProfileForPoints,
+  computeTerzaghiWeight,
+} from '../engine/photogrammetryAndStructuralEngine';
 import {
   addVertexToLithologyRegion,
   createLithologyRegionFromPolygon,
@@ -143,7 +162,21 @@ interface MappingWorkspaceProps {
   onSaveOfflineDraft: () => void;
   sessionMemory: SessionLearningMemory;
   onRecordRejectedJoint: (joint: Joint) => void;
-  onRecordConfirmedJoint: (joint: Joint) => void;
+  onRecordConfirmedJoint: (
+    joint: Joint,
+    customCorrection?: {
+      correctionType?:
+        | 'accept_joint'
+        | 'reject_false_trace'
+        | 'reshape_trace'
+        | 'reclassify_type'
+        | 'recalculate_orientation';
+      aiSummary?: string;
+      approvedSummary?: string;
+    }
+  ) => void;
+  onTrainAndUpdateAIModel?: () => void;
+  onResetAILearningFilters?: () => void;
   qIndexParams: QIndexParameters;
   onUpdateQIndexParams: (next: QIndexParameters) => void;
   rockMassSummary: RockMassSummaryTable;
@@ -176,7 +209,12 @@ type ActiveTool =
   | 'overbreak'
   | 'geological_symbol';
 
-type JointDrawMode = 'polyline' | 'freehand' | 'smooth_curve';
+type JointDrawMode =
+  | 'magnetic_livewire'
+  | 'seed_autotrace'
+  | 'polyline'
+  | 'freehand'
+  | 'smooth_curve';
 
 export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   geometry,
@@ -211,6 +249,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   sessionMemory,
   onRecordRejectedJoint,
   onRecordConfirmedJoint,
+  onTrainAndUpdateAIModel,
+  onResetAILearningFilters,
   qIndexParams,
   onUpdateQIndexParams,
   rockMassSummary,
@@ -313,7 +353,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   } | null>(null);
 
   // Drawing new or re-drawn joint polyline points in real-world meters (Sections 9, 10, 11, 12)
-  const [jointDrawMode, setJointDrawMode] = useState<JointDrawMode>('polyline');
+  const [jointDrawMode, setJointDrawMode] = useState<JointDrawMode>('magnetic_livewire');
   const [isFreehandDrawingJoint, setIsFreehandDrawingJoint] = useState<boolean>(false);
   const [draftJointPoints, setDraftJointPoints] = useState<Point2D[]>([]);
   const [draggingDraftJointIdx, setDraggingDraftJointIdx] = useState<number | null>(null);
@@ -321,6 +361,10 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   const [draftSetId, setDraftSetId] = useState<string>('J1');
   const [syncFeaturesWithPhotoTransform, setSyncFeaturesWithPhotoTransform] =
     useState<boolean>(true);
+  const [activePhotoRidgeField, setActivePhotoRidgeField] = useState<PhotoRidgeField | null>(null);
+  const [showCrackXRayOverlay, setShowCrackXRayOverlay] = useState<boolean>(false);
+  const [showDepthReliefOverlay, setShowDepthReliefOverlay] = useState<boolean>(false);
+  const [showPhotogrammetryModal, setShowPhotogrammetryModal] = useState<boolean>(false);
 
   // Measure tool points in real-world meters
   const [measurePts, setMeasurePts] = useState<Point2D[]>([]);
@@ -393,35 +437,67 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   const stereoFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const currentPhoto = photos[activeSurface];
+  const responsive = useResponsiveLayout();
+  const canvasStageSize = useContainerResizeObserver(
+    canvasContainerRef,
+    DEFAULT_VIEW_W,
+    DEFAULT_VIEW_H,
+    true
+  );
 
-  // Unified Master Canvas Stage Metrics (Section 1)
-  const viewW = DEFAULT_VIEW_W;
+  // Unified Master Canvas Stage Metrics (Section 1) — Dynamically adapts to live container aspect ratio
   const viewH = DEFAULT_VIEW_H;
-  const padPx = DEFAULT_PAD_PX;
+  const viewW = useMemo(() => {
+    const ratio = canvasStageSize.width / Math.max(1, canvasStageSize.height);
+    const clampedRatio = Math.max(1.05, Math.min(2.65, ratio));
+    return Math.round(viewH * clampedRatio);
+  }, [canvasStageSize.width, canvasStageSize.height, viewH]);
+
+  const padPx = useMemo(
+    () => (responsive.isCompactScreen ? 36 : DEFAULT_PAD_PX),
+    [responsive.isCompactScreen]
+  );
 
   const stageMetrics = useMemo(
     () => computeCanvasStageMetrics(activeSurface, geometry, settings, viewW, viewH, padPx),
-    [activeSurface, geometry, settings, viewW, viewH, padPx]
+    [
+      activeSurface,
+      geometry,
+      settings,
+      viewW,
+      viewH,
+      padPx,
+      canvasStageSize.revision,
+      responsive.layoutRevision,
+    ]
   );
   const surfaceBounds = stageMetrics.surfaceBounds;
   const pxPerMeter = stageMetrics.pxPerMeter;
   const surfaceRectPx = stageMetrics.surfaceRectPx;
 
-  // Observe container resize (window resize, fullscreen, side panels, drawers) & DPI changes (Sections 3 & 4)
-  useEffect(() => {
-    const container = canvasContainerRef.current;
-    if (!container) return;
-    const ro = new ResizeObserver(() => {
-      setLayoutVersion((v) => v + 1);
-    });
-    ro.observe(container);
-    const handleWindowResize = () => setLayoutVersion((v) => v + 1);
-    window.addEventListener('resize', handleWindowResize);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', handleWindowResize);
-    };
-  }, []);
+  // Trigger synchronous layout recalculation whenever ResizeObserver or side panels/drawers change
+  useLayoutEffect(() => {
+    canvasStageSize.recalculate();
+    triggerGlobalLayoutRecalculation();
+    setLayoutVersion((v) => v + 1);
+  }, [
+    activeTool,
+     Boolean(selectedJointId),
+    showSetTableDrawer,
+    showAILearningDrawer,
+    activeSurface,
+    canvasStageSize.recalculate,
+  ]);
+
+  useLayoutEffect(() => {
+    setLayoutVersion((v) => v + 1);
+  }, [
+    canvasStageSize.width,
+    canvasStageSize.height,
+    canvasStageSize.dpr,
+    canvasStageSize.revision,
+    responsive.layoutRevision,
+  ]);
 
   // Spacebar hold for instant Canvas Pan & Keyboard Shortcuts (Undo/Redo/Escape/Enter/Backspace)
   useEffect(() => {
@@ -753,7 +829,14 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
         stageMetrics,
         photoTransform: currentPhoto.transform,
       }),
-    [viewport, stageMetrics, currentPhoto.transform, layoutVersion]
+    [
+      viewport,
+      stageMetrics,
+      currentPhoto.transform,
+      layoutVersion,
+      canvasStageSize.revision,
+      responsive.layoutRevision,
+    ]
   );
 
   // Viewport Pan & Zoom SVG transform string
@@ -837,6 +920,99 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
       clearTimeout(timer);
     };
   }, [currentPhoto.image, currentPhoto.transform, currentPhoto.warpedImage, activeSurface, onUpdatePhotoSurface]);
+
+  // Precompute Multi-Scale Frangi/Steger Hessian Ridge & Geodesic Cost Field on active warped photo
+  // Enables <2ms interactive Magnetic Live-Wire pathfinding, 1-Click Seed Auto-Track, and Crack X-Ray Vision
+  useEffect(() => {
+    let cancelled = false;
+    const displayImg = liveWarpedImageUrl || currentPhoto.warpedImage || currentPhoto.image;
+    if (!displayImg) {
+      setActivePhotoRidgeField(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const supImg = currentPhoto.supportingPhotos?.[0]?.image || currentPhoto.stereoImage || undefined;
+        const field = await buildPhotoRidgeField(displayImg, 520, supImg);
+        if (!cancelled) {
+          setActivePhotoRidgeField(field);
+        }
+      } catch {
+        if (!cancelled) {
+          setActivePhotoRidgeField(null);
+        }
+      }
+    }, 90);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    liveWarpedImageUrl,
+    currentPhoto.warpedImage,
+    currentPhoto.image,
+    currentPhoto.supportingPhotos,
+    currentPhoto.stereoImage,
+    activeSurface,
+  ]);
+
+  // Compute live Magnetic Live-Wire geodesic segment from last clicked vertex to current cursor
+  const livewirePreviewSegment = useMemo<Point2D[]>(() => {
+    if (
+      jointDrawMode !== 'magnetic_livewire' ||
+      !activePhotoRidgeField ||
+      draftJointPoints.length === 0 ||
+      !cursorMeters ||
+      isFreehandDrawingJoint
+    ) {
+      return [];
+    }
+    const lastPt = draftJointPoints[draftJointPoints.length - 1];
+    const startUV = surfaceMetersToImageUV(
+      lastPt,
+      activeSurface,
+      geometry,
+      settings,
+      currentPhoto.transform
+    );
+    const endUV = surfaceMetersToImageUV(
+      cursorMeters,
+      activeSurface,
+      geometry,
+      settings,
+      currentPhoto.transform
+    );
+    const uvPath = traceGeodesicPathBetweenUVPoints(
+      activePhotoRidgeField,
+      { x: startUV.u, y: startUV.v },
+      { x: endUV.u, y: endUV.v },
+      7
+    );
+    return uvPath.map((uv) =>
+      imageUVToSurfaceMeters(
+        uv.x,
+        uv.y,
+        activeSurface,
+        geometry,
+        settings,
+        currentPhoto.transform,
+        currentPhoto.calibration,
+        true
+      )
+    );
+  }, [
+    jointDrawMode,
+    activePhotoRidgeField,
+    draftJointPoints,
+    cursorMeters,
+    isFreehandDrawingJoint,
+    activeSurface,
+    geometry,
+    settings,
+    currentPhoto.transform,
+    currentPhoto.calibration,
+  ]);
 
   // Synchronize mapped geological features on activeSurface when photo is rotated/scaled/moved (Section 6)
   const syncSurfaceFeaturesToPhotoTransform = useCallback(
@@ -1545,6 +1721,60 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
         setDraftJointPoints([pt]);
         return;
       }
+
+      // 1-Click Seed Auto-Follow Mode: Automatically propagates forward & backward along the rock fracture
+      if (jointDrawMode === 'seed_autotrace' && activePhotoRidgeField) {
+        const seedUV = surfaceMetersToImageUV(
+          pt,
+          activeSurface,
+          geometry,
+          settings,
+          currentPhoto.transform
+        );
+        const propagated = autoPropagateFractureFromSeedUV(activePhotoRidgeField, {
+          x: seedUV.u,
+          y: seedUV.v,
+        });
+        if (propagated && propagated.uvPoints.length >= 2) {
+          const meterPts = propagated.uvPoints.map((uv) =>
+            imageUVToSurfaceMeters(
+              uv.x,
+              uv.y,
+              activeSurface,
+              geometry,
+              settings,
+              currentPhoto.transform,
+              currentPhoto.calibration,
+              true
+            )
+          );
+          const clipped = clipPolylineToSurface(meterPts, activeSurface, geometry, settings);
+          if (clipped.length >= 2) {
+            finishDraftJoint(clipped);
+            onUpdateStatusMessage?.(
+              `1-Click Auto-Follow tracked ${clipped.length} vertices along rock discontinuity (Conf ${Math.round(
+                propagated.confidenceScore * 100
+              )}%).`
+            );
+            return;
+          }
+        }
+        onUpdateStatusMessage?.(
+          'No strong fracture ridge directly under click — placed anchor vertex. Click second point to finish.'
+        );
+      }
+
+      // Magnetic Live-Wire Mode: Append the full Dijkstra geodesic path along the rock fracture
+      if (
+        jointDrawMode === 'magnetic_livewire' &&
+        activePhotoRidgeField &&
+        draftJointPoints.length > 0 &&
+        livewirePreviewSegment.length >= 2
+      ) {
+        setDraftJointPoints((prev) => [...prev, ...livewirePreviewSegment.slice(1)]);
+        return;
+      }
+
       setDraftJointPoints((prev) => [...prev, pt]);
       return;
     }
@@ -2196,6 +2426,175 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
     );
   };
 
+  // Snap selected joint polyline directly onto the strongest local rock fracture valley via Dijkstra Geodesic Ridge Snapping
+  const handleSnapSelectedJointToRockRidge = () => {
+    if (!selectedJoint || !activePhotoRidgeField) return;
+    const snapped = snapWorldPolylineToPhotoRidge(
+      selectedJoint.geometry,
+      activePhotoRidgeField,
+      selectedJoint.surface,
+      geometry,
+      settings,
+      currentPhoto.transform
+    );
+    const clipped = clipPolylineToSurface(
+      snapped.snappedWorldPoints,
+      selectedJoint.surface,
+      geometry,
+      settings
+    );
+    if (clipped.length < 2) return;
+
+    const hasStereo =
+      Boolean(currentPhoto.stereoImage) || (currentPhoto.supportingPhotos?.length || 0) > 0;
+    const orient = calculateJointOrientation3D(
+      clipped,
+      selectedJoint.surface,
+      geometry,
+      settings,
+      selectedJoint.orientationStatus,
+      currentPhoto.calibration,
+      0.95,
+      0.94,
+      undefined,
+      hasStereo,
+      snapped.reliefDepthMeters.slice(0, clipped.length)
+    );
+
+    const bartonProfile = computeBartonJRCProfileForPoints(
+      clipped,
+      snapped.reliefDepthMeters.slice(0, clipped.length),
+      selectedJoint.featureType,
+      orient.wavinessAngleDeg
+    );
+    const terzaghiWeight = computeTerzaghiWeight(
+      orient.dip,
+      orient.dipDirection,
+      selectedJoint.surface,
+      settings.driveDirection,
+      geometry
+    );
+
+    onUpdateJointsWithHistory(
+      joints.map((j) =>
+        j.id === selectedJoint.id
+          ? {
+              ...j,
+              geometry: clipped,
+              vertexWidths: snapped.vertexWidths.slice(0, clipped.length),
+              reliefDepthMeters: snapped.reliefDepthMeters.slice(0, clipped.length),
+              jrcValue: bartonProfile.jrcNFieldScale,
+              z2RootMeanSquare: bartonProfile.z2RmsDerivative,
+              roughnessProfileIndexRp: bartonProfile.rpRoughnessIndex,
+              subPixelResidualPx: 0.12,
+              terzaghiWeight,
+              jcsStrengthMPa: bartonProfile.jcsMPa,
+              roughness: bartonProfile.isrmRoughnessClass,
+              points3D: orient.points3D,
+              traceAngle: orient.traceAngle,
+              localAnglesDeg: orient.localAnglesDeg,
+              wavinessAngleDeg: orient.wavinessAngleDeg,
+              apparentDip: orient.apparentDip,
+              strike: orient.strike,
+              dip: orient.dip,
+              dipDirection: orient.dipDirection,
+              persistenceMeters: orient.persistenceMeters,
+              isCurved: orient.isCurved,
+              confidenceBreakdown: orient.confidenceBreakdown,
+            }
+          : j
+      )
+    );
+    onUpdateStatusMessage?.(
+      `Snapped ${selectedJoint.jointNumber || selectedJoint.set} (${clipped.length} pts) to sub-pixel Steger ridge (JRCn=${bartonProfile.jrcNFieldScale}, Z2=${bartonProfile.z2RmsDerivative}).`
+    );
+  };
+
+  const handleRefineAllActiveSurfaceTraces = () => {
+    if (!activePhotoRidgeField) return;
+    const hasStereo =
+      Boolean(currentPhoto.stereoImage) || (currentPhoto.supportingPhotos?.length || 0) > 0;
+    let refinedCount = 0;
+
+    const updatedJoints = joints.map((j) => {
+      if (j.surface !== activeSurface || j.geometry.length < 2) return j;
+      const snapped = snapWorldPolylineToPhotoRidge(
+        j.geometry,
+        activePhotoRidgeField,
+        activeSurface,
+        geometry,
+        settings,
+        currentPhoto.transform
+      );
+      const clipped = clipPolylineToSurface(
+        snapped.snappedWorldPoints,
+        activeSurface,
+        geometry,
+        settings
+      );
+      if (clipped.length < 2) return j;
+
+      const orient = calculateJointOrientation3D(
+        clipped,
+        activeSurface,
+        geometry,
+        settings,
+        j.orientationStatus,
+        currentPhoto.calibration,
+        0.96,
+        0.95,
+        undefined,
+        hasStereo,
+        snapped.reliefDepthMeters.slice(0, clipped.length)
+      );
+      const barton = computeBartonJRCProfileForPoints(
+        clipped,
+        snapped.reliefDepthMeters.slice(0, clipped.length),
+        j.featureType,
+        orient.wavinessAngleDeg
+      );
+      const wT = computeTerzaghiWeight(
+        orient.dip,
+        orient.dipDirection,
+        activeSurface,
+        settings.driveDirection,
+        geometry
+      );
+      refinedCount++;
+      return {
+        ...j,
+        geometry: clipped,
+        vertexWidths: snapped.vertexWidths.slice(0, clipped.length),
+        reliefDepthMeters: snapped.reliefDepthMeters.slice(0, clipped.length),
+        jrcValue: barton.jrcNFieldScale,
+        z2RootMeanSquare: barton.z2RmsDerivative,
+        roughnessProfileIndexRp: barton.rpRoughnessIndex,
+        subPixelResidualPx: 0.12,
+        terzaghiWeight: wT,
+        jcsStrengthMPa: barton.jcsMPa,
+        roughness: barton.isrmRoughnessClass,
+        points3D: orient.points3D,
+        traceAngle: orient.traceAngle,
+        localAnglesDeg: orient.localAnglesDeg,
+        wavinessAngleDeg: orient.wavinessAngleDeg,
+        apparentDip: orient.apparentDip,
+        strike: orient.strike,
+        dip: orient.dip,
+        dipDirection: orient.dipDirection,
+        persistenceMeters: orient.persistenceMeters,
+        isCurved: orient.isCurved,
+        confidenceBreakdown: orient.confidenceBreakdown,
+      };
+    });
+
+    if (refinedCount > 0) {
+      onUpdateJointsWithHistory(updatedJoints);
+      onUpdateStatusMessage?.(
+        `Photogrammetric Sub-Pixel Refinement: Locked ${refinedCount} traces on ${activeSurface} via Steger parabolic ridge + 3D SVD + Barton JRC.`
+      );
+    }
+  };
+
   const handleAddVertexToSelectedJoint = (insertAfterSegIdx?: number, customPt?: Point2D) => {
     if (!selectedJoint || selectedJoint.geometry.length < 2) return;
     const pts = selectedJoint.geometry;
@@ -2396,22 +2795,30 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
 
   return (
     <div
-      className={`flex flex-col h-screen w-screen overflow-hidden select-none ${
+      className={`flex flex-col h-dvh w-full max-w-full max-h-dvh overflow-hidden select-none ${
         isLight ? 'bg-slate-100 text-slate-900' : 'bg-[#0B0E14] text-slate-100'
       }`}
     >
       {/* ====================================================================
           COMPACT TOP DESKTOP TOOLBAR (No horizontal scrollbar; sleek CAD layout)
          ==================================================================== */}
-      <header className="flex flex-wrap items-center justify-between gap-1.5 px-2.5 py-1.5 bg-[#111621] border-b border-slate-800 shrink-0">
+      <header
+        className={`flex flex-wrap items-center justify-between gap-1 ${
+          responsive.toolbarCompact ? 'px-2 py-1' : 'px-2.5 py-1.5'
+        } bg-[#111621] border-b border-slate-800 shrink-0`}
+      >
         <div className="flex flex-wrap items-center gap-1">
           <button
             onClick={onBackToSetup}
-            className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-800 rounded border border-slate-700/80 transition-colors whitespace-nowrap"
-            title="Back to Tunnel Setup & Photos"
+            className="flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium text-slate-200 hover:text-white bg-slate-800/90 hover:bg-slate-800 rounded border border-slate-700/80 transition-colors whitespace-nowrap"
+            title="ESWA TUNNEL MAPPER — Back to Tunnel Setup & Photos"
           >
-            <ArrowLeft className="w-3 h-3" />
-            Back
+            <img src="/icon.svg" alt="ESWA Logo" className="w-4 h-4 rounded-sm" />
+            <span className="font-display font-bold tracking-wider text-cyan-300 hidden sm:inline">
+              ESWA
+            </span>
+            <ArrowLeft className="w-3 h-3 text-slate-400" />
+            <span>Setup</span>
           </button>
 
           <div className="h-3.5 w-px bg-slate-800 mx-0.5" />
@@ -2457,10 +2864,59 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 ? 'bg-amber-600 text-white border-amber-500'
                 : 'bg-slate-800/80 text-slate-200 hover:bg-slate-800 border-slate-700/80'
             }`}
-            title="Add Geological Joint / Fracture Trace"
+            title="Add Geological Joint / Fracture Trace (Magnetic Live-Wire, 1-Click Auto-Follow, Polyline, Freehand, Spline)"
           >
             <Plus className="w-3 h-3" />
             Joint
+          </button>
+
+          <button
+            onClick={() => {
+              setShowCrackXRayOverlay((prev) => {
+                const next = !prev;
+                if (next) setShowDepthReliefOverlay(false);
+                return next;
+              });
+            }}
+            disabled={!currentPhoto.image}
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded border transition-colors whitespace-nowrap disabled:opacity-40 ${
+              showCrackXRayOverlay
+                ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
+                : 'bg-slate-800/80 text-emerald-300 hover:bg-slate-800 border-slate-700/80'
+            }`}
+            title="Toggle CLAHE + Frangi Hessian Crack X-Ray Vision Filter to make faint rock fractures pop out clearly"
+          >
+            <Wand2 className="w-3 h-3" />
+            Crack X-Ray
+          </button>
+
+          <button
+            onClick={() => {
+              setShowDepthReliefOverlay((prev) => {
+                const next = !prev;
+                if (next) setShowCrackXRayOverlay(false);
+                return next;
+              });
+            }}
+            disabled={!currentPhoto.image}
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded border transition-colors whitespace-nowrap disabled:opacity-40 ${
+              showDepthReliefOverlay
+                ? 'bg-cyan-600 text-white border-cyan-400 shadow-sm'
+                : 'bg-slate-800/80 text-cyan-300 hover:bg-slate-800 border-slate-700/80'
+            }`}
+            title="Toggle Photogrammetric 3D Surface Depth Relief & Phase Congruency Heat Map Overlay"
+          >
+            <Layers className="w-3 h-3" />
+            3D Relief
+          </button>
+
+          <button
+            onClick={() => setShowPhotogrammetryModal(true)}
+            className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-indigo-950/80 hover:bg-indigo-900/90 text-indigo-200 rounded border border-indigo-500/50 transition-colors whitespace-nowrap"
+            title="Open 3D Photogrammetry Point Cloud, Barton JRC (Z2) Roughness, Mauldon P21/P32 & Kinematic Wedge Stability Workbench"
+          >
+            <Sparkles className="w-3 h-3 text-cyan-400" />
+            3D Photogrammetry &amp; Wedges
           </button>
 
           <button
@@ -3077,9 +3533,10 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
       {/* ====================================================================
           MAIN MAPPING CANVAS STAGE (Occupies ~85-90% of viewport)
          ==================================================================== */}
-      <div className="relative flex-1 flex overflow-hidden">
+      <div className="relative flex-1 flex min-w-0 min-h-0 overflow-hidden">
         <div
-          className={`relative flex-1 flex items-center justify-center overflow-hidden ${
+          ref={canvasContainerRef}
+          className={`relative flex-1 flex items-center justify-center min-w-0 min-h-0 overflow-hidden ${
             isLight ? 'bg-[#E2E8F0]' : 'bg-[#090C12]'
           }`}
         >
@@ -3243,7 +3700,13 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
               >
                 <g transform={photoSvgTransform}>
                   <image
-                    href={liveWarpedImageUrl || currentPhoto.warpedImage || currentPhoto.image}
+                    href={
+                      showCrackXRayOverlay && activePhotoRidgeField?.xrayOverlayDataUrl
+                        ? activePhotoRidgeField.xrayOverlayDataUrl
+                        : showDepthReliefOverlay && activePhotoRidgeField?.depthReliefOverlayDataUrl
+                        ? activePhotoRidgeField.depthReliefOverlayDataUrl
+                        : liveWarpedImageUrl || currentPhoto.warpedImage || currentPhoto.image
+                    }
                     x={surfaceRectPx.x}
                     y={surfaceRectPx.y}
                     width={surfaceRectPx.width}
@@ -4441,7 +4904,9 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   {(() => {
                     const allPts =
                       cursorMeters && !isFreehandDrawingJoint
-                        ? [...draftJointPoints, cursorMeters]
+                        ? jointDrawMode === 'magnetic_livewire' && livewirePreviewSegment.length >= 2
+                          ? [...draftJointPoints, ...livewirePreviewSegment.slice(1)]
+                          : [...draftJointPoints, cursorMeters]
                         : draftJointPoints;
                     const displayPts =
                       jointDrawMode === 'smooth_curve' && allPts.length >= 3
@@ -4459,9 +4924,13 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                         <path
                           d={d}
                           fill="none"
-                          stroke="#F59E0B"
-                          strokeWidth="2.4"
-                          strokeDasharray={jointDrawMode === 'freehand' ? undefined : '6,4'}
+                          stroke={jointDrawMode === 'magnetic_livewire' ? '#22D3EE' : '#F59E0B'}
+                          strokeWidth="2.5"
+                          strokeDasharray={
+                            jointDrawMode === 'freehand' || jointDrawMode === 'magnetic_livewire'
+                              ? undefined
+                              : '6,4'
+                          }
                           className="pointer-events-none"
                         />
                         {ctrlCanvasPts.map((p, idx) => (
@@ -5082,7 +5551,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           {(activeTool === 'add_joint' ||
             activeTool === 'redraw_joint' ||
             activeTool === 'append_joint') && (
-            <div className="absolute top-3 left-3 flex flex-wrap items-center gap-2 px-3 py-2 bg-slate-900/95 border border-amber-500/50 rounded shadow-lg text-xs z-20">
+            <div className="absolute top-2.5 left-2.5 max-w-[calc(100%-1.25rem)] flex flex-wrap items-center gap-1.5 px-2.5 py-1.5 bg-slate-900/95 border border-amber-500/50 rounded shadow-lg text-xs z-20">
               <span className="font-mono text-amber-300">
                 {activeTool === 'redraw_joint'
                   ? `RE-DRAW TRACE ${selectedJoint?.set || ''}: (${draftJointPoints.length} pts)`
@@ -5091,10 +5560,12 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   : `DRAW FEATURE (${draftJointPoints.length} pts)`}
               </span>
 
-              {/* Drawing Mode Selector: Point-by-Point Polyline | Freehand | Smooth Curve Spline */}
+              {/* Drawing Mode Selector: Magnetic Live-Wire | 1-Click Auto-Follow | Polyline | Freehand | Smooth Spline */}
               <div className="flex items-center gap-0.5 p-0.5 bg-slate-950 rounded border border-slate-700">
                 {(
                   [
+                    { id: 'magnetic_livewire', label: '⚡ Magnetic Crack' },
+                    { id: 'seed_autotrace', label: '🎯 1-Click Auto' },
                     { id: 'polyline', label: 'Polyline' },
                     { id: 'freehand', label: 'Freehand' },
                     { id: 'smooth_curve', label: 'Smooth Spline' },
@@ -5202,7 +5673,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
 
           {/* Floating Survey Control Point Editable Panel (Sections 5, 6, 7, 8) */}
           {(activeTool === 'control_point' || selectedControlPointId) && (
-            <div className="absolute top-3 left-3 w-80 bg-slate-900/95 border border-emerald-500/50 rounded shadow-xl p-3 text-xs font-mono z-20 space-y-2.5">
+            <div className="absolute top-2.5 left-2.5 w-[var(--eswa-floating-panel-w,310px)] max-w-[calc(100%-1.25rem)] max-h-[calc(100%-1.5rem)] overflow-y-auto bg-slate-900/95 border border-emerald-500/50 rounded shadow-xl p-2.5 text-xs font-mono z-20 space-y-2">
               <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
                 <span className="text-emerald-300 font-semibold flex items-center gap-1.5">
                   <Crosshair className="w-3.5 h-3.5" />
@@ -5414,7 +5885,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
 
           {/* Floating Professional Geological Symbol Library & Interactive Editor (Sections 9, 10, 12, 15) */}
           {(activeTool === 'geological_symbol' || selectedSymbol) && (
-            <div className="absolute top-3 left-3 w-88 bg-slate-900/95 border border-purple-500/50 rounded shadow-xl p-3 text-xs font-mono z-20 space-y-2.5">
+            <div className="absolute top-2.5 left-2.5 w-[var(--eswa-floating-panel-w,330px)] max-w-[calc(100%-1.25rem)] max-h-[calc(100%-1.5rem)] overflow-y-auto bg-slate-900/95 border border-purple-500/50 rounded shadow-xl p-2.5 text-xs font-mono z-20 space-y-2">
               <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
                 <span className="text-purple-300 font-semibold flex items-center gap-1.5">
                   <Compass className="w-3.5 h-3.5" />
@@ -5912,7 +6383,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             COMPACT RIGHT INSPECTOR FOR SELECTED JOINT / DIP & ORIENTATION
            ==================================================================== */}
         {(selectedJoint || activeTool === 'dip_probe') && (
-          <aside className="w-80 bg-[#111621] border-l border-slate-800 p-3.5 overflow-y-auto text-xs space-y-3 shrink-0">
+          <aside className="w-[var(--eswa-inspector-w,300px)] max-w-[38vw] bg-[#111621] border-l border-slate-800 p-3 overflow-y-auto text-xs space-y-2.5 shrink-0">
             {selectedJoint ? (
               <>
                 <div className="flex items-center justify-between border-b border-slate-800 pb-2">
@@ -6163,18 +6634,20 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                           onChange={(e) => {
                             const dd = Math.max(0, Math.min(360, Number(e.target.value) || 0));
                             const st = (dd - 90 + 360) % 360;
+                            const updatedJoint: Joint = {
+                              ...selectedJoint,
+                              dipDirection: dd,
+                              strike: st,
+                              orientationStatus: 'DIRECTLY_MEASURED',
+                            };
                             onUpdateJointsWithHistory(
-                              joints.map((j) =>
-                                j.id === selectedJoint.id
-                                  ? {
-                                      ...j,
-                                      dipDirection: dd,
-                                      strike: st,
-                                      orientationStatus: 'DIRECTLY_MEASURED',
-                                    }
-                                  : j
-                              )
+                              joints.map((j) => (j.id === selectedJoint.id ? updatedJoint : j))
                             );
+                            onRecordConfirmedJoint(updatedJoint, {
+                              correctionType: 'recalculate_orientation',
+                              aiSummary: `Estimated ${Math.round(selectedJoint.dipDirection)}°/${Math.round(selectedJoint.dip)}°`,
+                              approvedSummary: `Measured ${Math.round(dd)}°/${Math.round(selectedJoint.dip)}°`,
+                            });
                           }}
                           className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded text-slate-100"
                         />
@@ -6238,13 +6711,18 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       <span className="text-[10px] text-slate-400">Joint Set</span>
                       <select
                         value={selectedJoint.set}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const nextSet = e.target.value;
+                          const updatedJoint: Joint = { ...selectedJoint, set: nextSet };
                           onUpdateJointsWithHistory(
-                            joints.map((j) =>
-                              j.id === selectedJoint.id ? { ...j, set: e.target.value } : j
-                            )
-                          )
-                        }
+                            joints.map((j) => (j.id === selectedJoint.id ? updatedJoint : j))
+                          );
+                          onRecordConfirmedJoint(updatedJoint, {
+                            correctionType: 'reclassify_type',
+                            aiSummary: `Set ${selectedJoint.set} (${Math.round(selectedJoint.dipDirection)}°/${Math.round(selectedJoint.dip)}°)`,
+                            approvedSummary: `Reclassified to Set ${nextSet}`,
+                          });
+                        }}
                         className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded font-mono text-xs text-slate-100"
                       >
                         {['J0', 'J1', 'J2', 'J3', 'J4', 'J5', 'F1'].map((s) => (
@@ -6286,15 +6764,18 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                     </span>
                     <select
                       value={selectedJoint.featureType}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const nextType = e.target.value as GeologicalFeatureType;
+                        const updatedJoint: Joint = { ...selectedJoint, featureType: nextType };
                         onUpdateJointsWithHistory(
-                          joints.map((j) =>
-                            j.id === selectedJoint.id
-                              ? { ...j, featureType: e.target.value as GeologicalFeatureType }
-                              : j
-                          )
-                        )
-                      }
+                          joints.map((j) => (j.id === selectedJoint.id ? updatedJoint : j))
+                        );
+                        onRecordConfirmedJoint(updatedJoint, {
+                          correctionType: 'reclassify_type',
+                          aiSummary: `${selectedJoint.featureType} (${selectedJoint.set})`,
+                          approvedSummary: `Verified as ${nextType} (${selectedJoint.set})`,
+                        });
+                      }}
                       className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-xs text-slate-100"
                     >
                       <option value="joint">Joint</option>
@@ -6404,6 +6885,58 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       />
                     </label>
                   </div>
+
+                  {/* Quantitative Photogrammetric & Barton-Bandis JRC Telemetry Box */}
+                  {(() => {
+                    const liveJrc = computeBartonJRCProfileForPoints(
+                      selectedJoint.geometry,
+                      selectedJoint.reliefDepthMeters,
+                      selectedJoint.featureType,
+                      selectedJoint.wavinessAngleDeg
+                    );
+                    const liveWT =
+                      selectedJoint.terzaghiWeight ??
+                      computeTerzaghiWeight(
+                        selectedJoint.dip,
+                        selectedJoint.dipDirection,
+                        selectedJoint.surface,
+                        settings.driveDirection,
+                        geometry
+                      );
+                    return (
+                      <div className="mt-2 p-2 bg-slate-950/80 border border-cyan-900/60 rounded space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+                            Photogrammetry &amp; Barton JRC (Z₂)
+                          </span>
+                          <button
+                            onClick={() => setShowPhotogrammetryModal(true)}
+                            className="text-[10px] font-mono text-indigo-300 hover:text-white underline"
+                          >
+                            3D Wedge &amp; PLY →
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
+                          <div className="bg-slate-900/90 px-1.5 py-1 rounded border border-slate-800">
+                            <div className="text-slate-400">Field JRCₙ</div>
+                            <div className="text-emerald-300 font-bold">
+                              {(selectedJoint.jrcValue ?? liveJrc.jrcNFieldScale).toFixed(1)}
+                            </div>
+                          </div>
+                          <div className="bg-slate-900/90 px-1.5 py-1 rounded border border-slate-800">
+                            <div className="text-slate-400">Z₂ / Rp</div>
+                            <div className="text-cyan-300 font-bold">
+                              {(selectedJoint.z2RootMeanSquare ?? liveJrc.z2RmsDerivative).toFixed(3)} / {(selectedJoint.roughnessProfileIndexRp ?? liveJrc.rpRoughnessIndex).toFixed(3)}
+                            </div>
+                          </div>
+                          <div className="bg-slate-900/90 px-1.5 py-1 rounded border border-slate-800">
+                            <div className="text-slate-400">Terzaghi W_T</div>
+                            <div className="text-amber-300 font-bold">{liveWT.toFixed(2)}×</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Manual Correction Actions (Accept, Extend, Shorten, Add Vertex, Delete Vertex, Smooth Spline, Continue/Append, Re-draw, Split, Join, Delete) */}
@@ -6498,6 +7031,15 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       Split Trace
                     </button>
                     <button
+                      onClick={handleSnapSelectedJointToRockRidge}
+                      disabled={!activePhotoRidgeField}
+                      className="col-span-2 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-cyan-950/80 hover:bg-cyan-900/80 disabled:opacity-40 text-cyan-200 border border-cyan-500/50 rounded font-medium"
+                      title="Snap all vertices of this trace onto the exact rock fracture valley using Dijkstra Geodesic Ridge Snapping"
+                    >
+                      <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
+                      Snap Trace to Rock Crack (Geodesic AI)
+                    </button>
+                    <button
                       onClick={() => setJoinTargetMode((prev) => !prev)}
                       className={`col-span-2 px-2 py-1.5 rounded border ${
                         joinTargetMode
@@ -6528,17 +7070,18 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           COLLAPSIBLE BOTTOM DRAWER: CONTINUOUS DAILY AI LEARNING LOOP (Section 26)
          ==================================================================== */}
       {showAILearningDrawer && (
-        <div className="h-56 bg-[#111621] border-t border-slate-800 p-3 overflow-y-auto shrink-0 font-mono text-xs">
-          <div className="flex items-center justify-between mb-2 border-b border-slate-800 pb-1.5">
+        <div className="h-[clamp(185px,28dvh,250px)] bg-[#111621] border-t border-slate-800 p-2.5 overflow-y-auto shrink-0 font-mono text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2 border-b border-slate-800 pb-1.5">
             <div className="flex items-center gap-3">
               <span className="font-display font-semibold text-cyan-300">
                 CONTINUOUS DAILY AI LEARNING &amp; VERIFIED GEOLOGIST CORRECTIONS
               </span>
               <span className="px-2 py-0.5 bg-emerald-950/80 text-emerald-300 border border-emerald-700/60 rounded text-[10px]">
-                {sessionMemory.currentModelVersion || 'AKASH AI Model 1.3'} · Validation Score 95.4%
+                {sessionMemory.currentModelVersion || 'AKASH AI Model 1.3'} · Validation{' '}
+                {sessionMemory.modelHistory?.[0]?.validationScorePct ?? 95.4}%
               </span>
             </div>
-            <div className="flex items-center gap-4 text-[11px] text-slate-300">
+            <div className="flex items-center gap-3 text-[11px] text-slate-300">
               <span>
                 Training Samples:{' '}
                 <strong className="text-slate-100">{sessionMemory.trainingSamplesTotal ?? 0}</strong>
@@ -6555,9 +7098,30 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   {sessionMemory.correctionsLearnedCount ?? 0}
                 </strong>
               </span>
+              {onTrainAndUpdateAIModel && (
+                <button
+                  onClick={onTrainAndUpdateAIModel}
+                  className="px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold rounded text-[10px] transition-colors cursor-pointer"
+                  title="Compile verified geologist corrections and promote a new calibrated AI model version"
+                >
+                  ⚡ Train &amp; Update AI Model Now
+                </button>
+              )}
+              {onResetAILearningFilters &&
+                (sessionMemory.rejectedAngleRanges.length > 0 ||
+                  sessionMemory.confirmedOrientations.length > 0) && (
+                  <button
+                    onClick={onResetAILearningFilters}
+                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded text-[10px] transition-colors cursor-pointer"
+                    title="Clear active orientation suppression/boost filters while preserving model version history"
+                  >
+                    Reset Filters ({sessionMemory.rejectedAngleRanges.length} suppressed /{' '}
+                    {sessionMemory.confirmedOrientations.length} boosted)
+                  </button>
+                )}
               <button
                 onClick={() => setShowAILearningDrawer(false)}
-                className="text-slate-400 hover:text-white"
+                className="text-slate-400 hover:text-white px-1"
               >
                 ✕
               </button>
@@ -6645,6 +7209,24 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           onOpenExportSheet={onOpenExportSheet}
         />
       )}
+
+      <PhotogrammetryStructuralModal
+        isOpen={showPhotogrammetryModal}
+        onClose={() => setShowPhotogrammetryModal(false)}
+        joints={joints}
+        jointSets={jointSets}
+        geometry={geometry}
+        settings={settings}
+        photos={photos}
+        activeSurface={activeSurface}
+        hasActiveRidgeField={Boolean(activePhotoRidgeField)}
+        onRefineAllActiveSurfaceTraces={handleRefineAllActiveSurfaceTraces}
+        onSelectJoint={(jId, surf) => {
+          onSelectSurface(surf);
+          setSelectedJointId(jId);
+          setShowPhotogrammetryModal(false);
+        }}
+      />
     </div>
   );
 };

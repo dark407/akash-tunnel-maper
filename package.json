@@ -12,8 +12,13 @@
     "start": "node --import tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
+    "icon": "node scripts/generate-win-icon.mjs",
     "electron": "vite build && electron .",
-    "dist": "vite build && electron-builder --config electron-builder.json --win nsis",
+    "electron:dev": "electron .",
+    "pack": "node scripts/generate-win-icon.mjs && vite build && electron-builder --config electron-builder.json --dir",
+    "build:win": "node scripts/generate-win-icon.mjs && vite build && electron-builder --config electron-builder.json --win",
+    "build:electron": "node scripts/generate-win-icon.mjs && vite build && electron-builder --config electron-builder.json --win nsis",
+    "dist": "node scripts/generate-win-icon.mjs && vite build && electron-builder --config electron-builder.json --win nsis",
     "clean": "rm -rf dist release server.js",
     "lint": "tsc --noEmit"
   },
@@ -35,12 +40,79 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "electron": "^35.0.0",
-    "electron-builder": "^26.0.12",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
     "vite-plugin-pwa": "^1.3.0"
+  },
+  "build": {
+    "appId": "com.akash.tunnelmapper",
+    "productName": "AKASH TUNNEL MAPPER",
+    "copyright": "Copyright © 2026 AKASH TUNNEL MAPPER Engineering Suite",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.ico",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "akash",
+          "atmp",
+          "json"
+        ],
+        "name": "AKASH Tunnel Mapping Project",
+        "description": "AKASH TUNNEL MAPPER Geological Project File",
+        "role": "Editor",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": [
+          "dxf",
+          "dwg"
+        ],
+        "name": "CAD Tunnel Profile",
+        "description": "AutoCAD DXF/DWG Tunnel Excavation Profile",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "AKASH-TUNNEL-MAPPER-Setup.exe",
+      "executableName": "AKASH TUNNEL MAPPER"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AKASH TUNNEL MAPPER",
+      "uninstallDisplayName": "AKASH TUNNEL MAPPER",
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
+    }
   }
 }

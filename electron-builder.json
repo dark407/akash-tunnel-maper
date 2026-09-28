@@ -15,6 +15,29 @@
     "package.json",
     "!node_modules/**/*"
   ],
+  "fileAssociations": [
+    {
+      "ext": [
+        "akash",
+        "atmp",
+        "json"
+      ],
+      "name": "AKASH Tunnel Mapping Project",
+      "description": "AKASH TUNNEL MAPPER Geological Project File",
+      "role": "Editor",
+      "icon": "build/icon.ico"
+    },
+    {
+      "ext": [
+        "dxf",
+        "dwg"
+      ],
+      "name": "CAD Tunnel Profile",
+      "description": "AutoCAD DXF/DWG Tunnel Excavation Profile",
+      "role": "Viewer",
+      "icon": "build/icon.ico"
+    }
+  ],
   "win": {
     "target": [
       {

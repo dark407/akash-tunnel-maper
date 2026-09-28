@@ -20,6 +20,9 @@ export interface AkashDesktopAPI {
   initialPersistedStore: Record<string, string>;
   setStorageItem: (key: string, value: string) => Promise<boolean>;
   removeStorageItem: (key: string) => Promise<boolean>;
+  clearStorage?: () => Promise<boolean>;
+  syncStorageBatch?: (entries: Record<string, string>) => Promise<boolean>;
+  syncStorageBatchSync?: (entries: Record<string, string>) => boolean;
   loadProjectsFromDiskSync: () => SavedProjectRecord[];
   saveProjectToDisk: (record: SavedProjectRecord) => Promise<{ ok: boolean; filePath?: string; error?: string }>;
   deleteProjectFromDisk: (id: string) => Promise<boolean>;
@@ -34,16 +37,36 @@ export interface AkashDesktopAPI {
     appVersion: string;
     platform: string;
   }>;
+  readUserDataFile?: (
+    relativePath: string
+  ) => Promise<{ ok: boolean; filePath?: string; contentUtf8?: string; error?: string }>;
+  writeUserDataFile?: (
+    relativePath: string,
+    contentUtf8: string
+  ) => Promise<{ ok: boolean; filePath?: string; error?: string }>;
+  listUserDataFiles?: (
+    subDir?: string
+  ) => Promise<{
+    ok: boolean;
+    directory?: string;
+    files: Array<{ name: string; isDirectory: boolean }>;
+    error?: string;
+  }>;
+  deleteUserDataFile?: (relativePath: string) => Promise<{ ok: boolean; error?: string }>;
   openFileDialog: (options?: Record<string, unknown>) => Promise<Record<string, unknown>>;
   saveFileDialog: (options?: Record<string, unknown>) => Promise<Record<string, unknown>>;
   selectFolderDialog: (options?: Record<string, unknown>) => Promise<Record<string, unknown>>;
   parseCad: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   traceJoints: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  loadAILearningMemorySync?: () => Record<string, unknown> | null;
+  saveAILearningMemoryToDisk?: (memoryObj: unknown) => Promise<boolean>;
+  printToPdf?: (options?: Record<string, unknown>) => Promise<{ canceled: boolean; filePath?: string }>;
 }
 
 declare global {
   interface Window {
     akashDesktop?: AkashDesktopAPI;
+    eswaDesktop?: AkashDesktopAPI;
   }
 }
 
@@ -70,6 +93,7 @@ export function initializeDesktopRuntimeBridge(): void {
   try {
     const origSetItem = Storage.prototype.setItem;
     const origRemoveItem = Storage.prototype.removeItem;
+    const origClear = Storage.prototype.clear;
 
     Storage.prototype.setItem = function (key: string, value: string) {
       origSetItem.call(this, key, value);
@@ -84,6 +108,50 @@ export function initializeDesktopRuntimeBridge(): void {
         desktop.removeStorageItem(key).catch(() => {});
       }
     };
+
+    Storage.prototype.clear = function () {
+      origClear.call(this);
+      if (this === window.localStorage && desktop.clearStorage) {
+        desktop.clearStorage().catch(() => {});
+      }
+    };
+
+    const collectLocalStorageSnapshot = (): Record<string, string> => {
+      const snapshot: Record<string, string> = {};
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (key) {
+          const val = window.localStorage.getItem(key);
+          if (typeof val === 'string') {
+            snapshot[key] = val;
+          }
+        }
+      }
+      return snapshot;
+    };
+
+    window.addEventListener('beforeunload', () => {
+      try {
+        const snapshot = collectLocalStorageSnapshot();
+        if (desktop.syncStorageBatchSync) {
+          desktop.syncStorageBatchSync(snapshot);
+        } else if (desktop.syncStorageBatch) {
+          desktop.syncStorageBatch(snapshot).catch(() => {});
+        }
+      } catch {
+        // Ignore unload flush errors
+      }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' && desktop.syncStorageBatch) {
+        try {
+          desktop.syncStorageBatch(collectLocalStorageSnapshot()).catch(() => {});
+        } catch {
+          // Ignore visibility flush errors
+        }
+      }
+    });
   } catch {
     // Ignore prototype patch errors
   }

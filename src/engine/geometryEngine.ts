@@ -14,6 +14,145 @@ import {
 import { undistortNormalizedUV } from './cameraCalibration';
 
 /**
+ * Canonical fixed perimeter ratio (Sum of Side Wall Lengths + Crown Arc Length) / (Width + Height)
+ * Derived from standard D-shaped tunnel reference: W = 8.40m, H = 7.20m, Wall = 4.20m, Arch Rise = 3.00m
+ * -> R = 4.44m, Crown Arc = 11.02m, Total Perimeter = 2*4.20 + 11.02 = 19.42m, Ratio = 19.42 / 15.60 = 1.2449
+ */
+export const FIXED_TUNNEL_PERIMETER_RATIO = 1.2449;
+export const CANONICAL_WALL_TO_HEIGHT_RATIO = 7 / 12; // 4.20 / 7.20 = 0.583333
+
+/**
+ * Computes the exact analytical circular arch radius R and arc length L_crown
+ * for a tunnel of span W and arch rise h_arch = H - H_w.
+ */
+export function computeAnalyticalArchMetrics(
+  width: number,
+  archRise: number
+): { radius: number; arcLength: number } {
+  const halfW = Math.max(0.5, width / 2);
+  const clampedRise = Math.max(0.15, Math.min(halfW, archRise));
+  const radius = (halfW * halfW + clampedRise * clampedRise) / (2 * clampedRise);
+  const halfAngle = Math.asin(Math.min(1, halfW / radius));
+  const arcLength = 2 * radius * halfAngle;
+  return {
+    radius: Number(radius.toFixed(4)),
+    arcLength: Number(arcLength.toFixed(4)),
+  };
+}
+
+/**
+ * Enforces a strict geometric constraint on tunnel dimensions (Width, Height, Wall Height, Crown Radius)
+ * so that:
+ * 1. The arch rise (Height - WallHeight) never exceeds Width/2 (preventing bulb distortion) or flattens out.
+ * 2. The sum of the side wall lengths (2 * WallHeight) and Crown Arc Length (L_crown) maintains a strict,
+ *    distortion-free perimeter ratio relative to Width and Height when resizing tunnel dimensions.
+ */
+export function enforceStrictTunnelGeometryConstraints(
+  width: number,
+  height: number,
+  rawWallHeight?: number,
+  profileType: ProfileType = 'd_shaped',
+  _rawCrownRadius?: number
+): {
+  width: number;
+  height: number;
+  wallHeight: number;
+  crownRadius: number;
+  crownArcLength: number;
+  totalPerimeter: number;
+  perimeterRatio: number;
+} {
+  const safeWidth = Math.max(1.5, width);
+  const safeHeight = Math.max(1.5, height);
+  const halfW = safeWidth / 2;
+
+  if (profileType === 'circular') {
+    const wallHeight = Number((safeHeight * 0.5).toFixed(2));
+    const rX = halfW;
+    const rY = safeHeight / 2;
+    // Ramanujan ellipse semi-perimeter for upper crown arch
+    const hParam = Math.pow(rX - rY, 2) / Math.pow(rX + rY, 2);
+    const crownArcLength = Number(
+      ((Math.PI * (rX + rY) * (1 + (3 * hParam) / (10 + Math.sqrt(4 - 3 * hParam)))) / 2).toFixed(2)
+    );
+    const crownRadius = Number(((rX + rY) / 2).toFixed(2));
+    const totalPerimeter = Number((2 * wallHeight + crownArcLength).toFixed(2));
+    return {
+      width: Number(safeWidth.toFixed(2)),
+      height: Number(safeHeight.toFixed(2)),
+      wallHeight,
+      crownRadius,
+      crownArcLength,
+      totalPerimeter,
+      perimeterRatio: Number((totalPerimeter / (safeWidth + safeHeight)).toFixed(4)),
+    };
+  }
+
+  // Geometric arch-rise bounds to prevent any distortion when resizing Width or Height:
+  // Arch rise h_arch = H - H_w must not exceed halfW (semicircle limit) and must be >= 0.22 * min(W, H)
+  const maxArchRise = Math.min(halfW * 0.98, safeHeight * 0.55);
+  const minArchRise = Math.min(maxArchRise, Math.max(0.35, Math.min(safeWidth * 0.22, safeHeight * 0.25)));
+
+  // Target total perimeter P_target = FIXED_TUNNEL_PERIMETER_RATIO * (W + H)
+  const targetPerimeter = FIXED_TUNNEL_PERIMETER_RATIO * (safeWidth + safeHeight);
+
+  // Solve for archRise within [minArchRise, maxArchRise] that satisfies P(h_arch) = 2*(H - h_arch) + L_crown(W, h_arch) = targetPerimeter
+  // Note: dP/dh_arch = -2 + dL_crown/dh_arch < 0 because 2*wallHeight decreases faster than arc length increases.
+  let bestRise = Math.max(minArchRise, Math.min(maxArchRise, safeHeight * (1 - CANONICAL_WALL_TO_HEIGHT_RATIO)));
+  let low = minArchRise;
+  let high = maxArchRise;
+  for (let iter = 0; iter < 24; iter++) {
+    const mid = 0.5 * (low + high);
+    const { arcLength } = computeAnalyticalArchMetrics(safeWidth, mid);
+    const perim = 2 * (safeHeight - mid) + arcLength;
+    if (perim > targetPerimeter) {
+      low = mid; // Need larger archRise (smaller wallHeight) to reduce perimeter
+    } else {
+      high = mid;
+    }
+    bestRise = 0.5 * (low + high);
+  }
+
+  // If the caller supplied an explicit rawWallHeight that is already within the non-distorted structural envelope
+  // (within ±8% of the fixed-perimeter-ratio wall height and not violating arch rise limits), blend/clamp it safely
+  const constrainedWallHeightIdeal = safeHeight - bestRise;
+  let finalWallHeight = constrainedWallHeightIdeal;
+  if (typeof rawWallHeight === 'number' && Number.isFinite(rawWallHeight)) {
+    const userRise = safeHeight - rawWallHeight;
+    const minValidWallH = safeHeight - maxArchRise;
+    const maxValidWallH = safeHeight - minArchRise;
+    const deviationRatio = Math.abs(rawWallHeight - constrainedWallHeightIdeal) / Math.max(1, safeHeight);
+    if (userRise >= minArchRise && userRise <= maxArchRise && deviationRatio <= 0.08) {
+      finalWallHeight = Math.max(minValidWallH, Math.min(maxValidWallH, rawWallHeight));
+    } else {
+      finalWallHeight = constrainedWallHeightIdeal;
+    }
+  }
+
+  finalWallHeight = Number(finalWallHeight.toFixed(2));
+  const finalArchRise = Math.max(0.25, safeHeight - finalWallHeight);
+  const { radius: exactRadius, arcLength: baseArcLen } = computeAnalyticalArchMetrics(
+    safeWidth,
+    finalArchRise
+  );
+
+  const shapeArcFactor = profileType === 'flat_arch' ? 1.025 : 1.0;
+  const crownArcLength = Number((baseArcLen * shapeArcFactor).toFixed(2));
+  const crownRadius = Number(exactRadius.toFixed(2));
+  const totalPerimeter = Number((2 * finalWallHeight + crownArcLength).toFixed(2));
+
+  return {
+    width: Number(safeWidth.toFixed(2)),
+    height: Number(safeHeight.toFixed(2)),
+    wallHeight: finalWallHeight,
+    crownRadius,
+    crownArcLength,
+    totalPerimeter,
+    perimeterRatio: Number((totalPerimeter / (safeWidth + safeHeight)).toFixed(4)),
+  };
+}
+
+/**
  * Generates real-world cross-section boundary polygon in meters.
  * Coordinate convention for Face cross-section:
  * x = 0 is tunnel centerline, x in [-width/2, +width/2]
@@ -26,19 +165,32 @@ export function buildTunnelCrossSection(
   profileType: ProfileType,
   crownRadius?: number,
   customPoints?: Point2D[]
-): { crossSectionPoints: Point2D[]; crownArcLength: number; effectiveCrownRadius: number } {
-  const safeWidth = Math.max(1.5, width);
-  const safeHeight = Math.max(1.5, height);
-  const safeWallHeight = Math.min(Math.max(0.2, wallHeight), safeHeight - 0.3);
+): {
+  crossSectionPoints: Point2D[];
+  crownArcLength: number;
+  effectiveCrownRadius: number;
+  constrainedWallHeight: number;
+} {
+  const constrained = enforceStrictTunnelGeometryConstraints(
+    width,
+    height,
+    wallHeight,
+    profileType,
+    crownRadius
+  );
+  const safeWidth = constrained.width;
+  const safeHeight = constrained.height;
+  const safeWallHeight = constrained.wallHeight;
   const halfW = safeWidth / 2;
-  const archRise = Math.max(0.3, safeHeight - safeWallHeight);
+  const archRise = Math.max(0.25, safeHeight - safeWallHeight);
 
   if (profileType === 'custom_cad' && customPoints && customPoints.length >= 4) {
     const crownArcLength = computeCrownArcLength(customPoints, safeWallHeight);
     return {
       crossSectionPoints: customPoints,
-      crownArcLength,
-      effectiveCrownRadius: crownRadius || safeWidth / 2,
+      crownArcLength: Number(crownArcLength.toFixed(2)),
+      effectiveCrownRadius: constrained.crownRadius,
+      constrainedWallHeight: safeWallHeight,
     };
   }
 
@@ -56,16 +208,22 @@ export function buildTunnelCrossSection(
         y: Number((cY + rY * Math.sin(theta)).toFixed(4)),
       });
     }
-    const arcLen = Math.PI * ((rX + rY) / 2);
     return {
       crossSectionPoints: pts,
-      crownArcLength: Number(arcLen.toFixed(2)),
-      effectiveCrownRadius: Number(((rX + rY) / 2).toFixed(2)),
+      crownArcLength: constrained.crownArcLength,
+      effectiveCrownRadius: constrained.crownRadius,
+      constrainedWallHeight: safeWallHeight,
     };
   }
 
+  // Exact circular arch geometry above springline y = safeWallHeight
+  const R = (halfW * halfW + archRise * archRise) / (2 * archRise);
+  const centerY = safeHeight - R;
+  const startAngle = Math.atan2(safeWallHeight - centerY, -halfW);
+  const endAngle = Math.atan2(safeWallHeight - centerY, halfW);
+
   if (profileType === 'horseshoe') {
-    const invertHalfW = halfW * 0.86;
+    const invertHalfW = halfW * 0.88;
     pts.push({ x: -invertHalfW, y: 0 });
     const wallSteps = 14;
     for (let i = 1; i <= wallSteps; i++) {
@@ -76,9 +234,9 @@ export function buildTunnelCrossSection(
     }
     for (let i = 1; i < numArchSteps; i++) {
       const t = i / numArchSteps;
-      const angle = Math.PI * (1 - t);
-      const x = halfW * Math.cos(angle);
-      const y = safeWallHeight + archRise * Math.sin(angle);
+      const theta = startAngle + t * (endAngle - startAngle);
+      const x = R * Math.cos(theta);
+      const y = centerY + R * Math.sin(theta);
       pts.push({ x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) });
     }
     for (let i = 0; i <= wallSteps; i++) {
@@ -94,7 +252,7 @@ export function buildTunnelCrossSection(
       const t = i / numArchSteps;
       const angle = Math.PI * (1 - t);
       const x = halfW * Math.cos(angle);
-      const sinVal = Math.pow(Math.max(0, Math.sin(angle)), 0.75);
+      const sinVal = Math.pow(Math.max(0, Math.sin(angle)), 0.78);
       const y = safeWallHeight + archRise * sinVal;
       pts.push({ x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) });
     }
@@ -103,11 +261,6 @@ export function buildTunnelCrossSection(
   } else {
     pts.push({ x: -halfW, y: 0 });
     pts.push({ x: -halfW, y: safeWallHeight });
-
-    const R = (halfW * halfW + archRise * archRise) / (2 * archRise);
-    const centerY = safeHeight - R;
-    const startAngle = Math.atan2(safeWallHeight - centerY, -halfW);
-    const endAngle = Math.atan2(safeWallHeight - centerY, halfW);
 
     for (let i = 1; i < numArchSteps; i++) {
       const t = i / numArchSteps;
@@ -121,13 +274,15 @@ export function buildTunnelCrossSection(
     pts.push({ x: halfW, y: 0 });
   }
 
-  const R_calc = (halfW * halfW + archRise * archRise) / (2 * archRise);
-  const crownArcLength = computeCrownArcLength(pts, safeWallHeight);
+  const polyCrownArc = computeCrownArcLength(pts, safeWallHeight);
+  const exactCrownArc =
+    profileType === 'flat_arch' ? Number(polyCrownArc.toFixed(2)) : constrained.crownArcLength;
 
   return {
     crossSectionPoints: pts,
-    crownArcLength: Number(crownArcLength.toFixed(2)),
-    effectiveCrownRadius: Number((crownRadius || R_calc).toFixed(2)),
+    crownArcLength: exactCrownArc,
+    effectiveCrownRadius: Number(R.toFixed(2)),
+    constrainedWallHeight: safeWallHeight,
   };
 }
 
@@ -136,7 +291,7 @@ export function computeCrownArcLength(points: Point2D[], wallHeight: number): nu
   for (let i = 0; i < points.length - 1; i++) {
     const p1 = points[i];
     const p2 = points[i + 1];
-    if (p1.y >= wallHeight - 0.05 && p2.y >= wallHeight - 0.05) {
+    if (p1.y >= wallHeight - 0.02 && p2.y >= wallHeight - 0.02 && (p1.y > wallHeight + 0.001 || p2.y > wallHeight + 0.001)) {
       length += Math.hypot(p2.x - p1.x, p2.y - p1.y);
     }
   }
@@ -144,8 +299,8 @@ export function computeCrownArcLength(points: Point2D[], wallHeight: number): nu
     const xs = points.map((p) => p.x);
     const ys = points.map((p) => p.y);
     const w = Math.max(...xs) - Math.min(...xs);
-    const h = Math.max(...ys) - wallHeight;
-    return Number((Math.PI * Math.sqrt((w * w) / 4 + h * h)).toFixed(2));
+    const h = Math.max(0.3, Math.max(...ys) - wallHeight);
+    return computeAnalyticalArchMetrics(w, h).arcLength;
   }
   return length;
 }
@@ -160,7 +315,12 @@ export function createTunnelGeometry(
   cadFileName?: string,
   customPoints?: Point2D[]
 ): TunnelGeometry {
-  const { crossSectionPoints, crownArcLength, effectiveCrownRadius } = buildTunnelCrossSection(
+  const {
+    crossSectionPoints,
+    crownArcLength,
+    effectiveCrownRadius,
+    constrainedWallHeight,
+  } = buildTunnelCrossSection(
     width,
     height,
     wallHeight,
@@ -170,9 +330,9 @@ export function createTunnelGeometry(
   );
 
   return {
-    width: Number(width.toFixed(2)),
-    height: Number(height.toFixed(2)),
-    wallHeight: Number(wallHeight.toFixed(2)),
+    width: Number(Math.max(1.5, width).toFixed(2)),
+    height: Number(Math.max(1.5, height).toFixed(2)),
+    wallHeight: Number(constrainedWallHeight.toFixed(2)),
     crownGeometry,
     crownRadius: effectiveCrownRadius,
     units: 'm',
@@ -200,6 +360,7 @@ export function getSurfaceBoundsMeters(
         height: geometry.height,
       };
     case 'crown': {
+      // Unfolded Crown surface width strictly equals the Tunnel Face Crown Arc Length (geometry.crownArcLength)
       const span = Math.max(geometry.width, geometry.crownArcLength);
       return {
         minX: -span / 2,
@@ -489,6 +650,15 @@ export function applyProjectiveHomography3x3(u: number, v: number, H: number[]):
  * -> PROJECTIVE HOMOGRAPHY (H_3x3)
  * -> TUNNEL SURFACE COORDINATES (x, y in meters)
  */
+/**
+ * Pipeline Step (Section 11):
+ * IMAGE COORDINATES (u, v in [0..1] on the active displayed/warped photograph)
+ * -> TUNNEL SURFACE COORDINATES (x, y in meters)
+ *
+ * Guaranteed to match `photoUVToTunnelMeters` and the SVG `<g transform={photoSvgTransform}>`
+ * rendering transform so that any feature at (u, v) in the photograph lands at the exact
+ * same pixel on the mapping canvas.
+ */
 export function imageUVToSurfaceMeters(
   u: number,
   v: number,
@@ -496,63 +666,61 @@ export function imageUVToSurfaceMeters(
   geometry: TunnelGeometry,
   settings: TunnelSettings,
   transform: SurfaceTransform,
-  calibration?: CameraCalibration
+  _calibration?: CameraCalibration,
+  isAlreadyWarpedImage = true
 ): Point2D {
   const bounds = getSurfaceBoundsMeters(surface, geometry, settings);
 
-  // 1. Camera Lens & Attitude Undistortion
-  const undist = undistortNormalizedUV(u, v, calibration);
+  let warpedU = u;
+  let warpedV = v;
 
-  // Apply flip if set
-  const uFlip = transform.flipH ? 1 - undist.u : undist.u;
-  const vFlip = transform.flipV ? 1 - undist.v : undist.v;
+  if (!isAlreadyWarpedImage) {
+    // Apply flip if set
+    const uFlip = transform.flipH ? 1 - u : u;
+    const vFlip = transform.flipV ? 1 - v : v;
 
-  // 2. Exact 3x3 Projective Homography Transformation
-  const H =
-    transform.homographyMatrix && transform.homographyMatrix.length === 9
-      ? transform.homographyMatrix
-      : solveProjectiveHomography3x3(transform.perspectiveCorners);
+    // Exact 3x3 Projective Homography Transformation
+    const H =
+      transform.homographyMatrix && transform.homographyMatrix.length === 9
+        ? transform.homographyMatrix
+        : solveProjectiveHomography3x3(transform.perspectiveCorners);
 
-  let { u: warpedU, v: warpedV } = applyProjectiveHomography3x3(uFlip, vFlip, H);
+    const hom = applyProjectiveHomography3x3(uFlip, vFlip, H);
+    warpedU = hom.u;
+    warpedV = hom.v;
 
-  // Apply piecewise mesh control point displacement if present
-  if (transform.meshControlPoints && transform.meshControlPoints.length > 0) {
-    let sumW = 0;
-    let sumDu = 0;
-    let sumDv = 0;
-    for (const cp of transform.meshControlPoints) {
-      const d2 = (uFlip - cp.srcU) * (uFlip - cp.srcU) + (vFlip - cp.srcV) * (vFlip - cp.srcV);
-      if (d2 < 1e-7) {
-        sumW = 1;
-        sumDu = cp.dstU - cp.srcU;
-        sumDv = cp.dstV - cp.srcV;
-        break;
+    // Apply piecewise mesh control point displacement if present
+    if (transform.meshControlPoints && transform.meshControlPoints.length > 0) {
+      let sumW = 0;
+      let sumDu = 0;
+      let sumDv = 0;
+      for (const cp of transform.meshControlPoints) {
+        const d2 = (uFlip - cp.srcU) * (uFlip - cp.srcU) + (vFlip - cp.srcV) * (vFlip - cp.srcV);
+        if (d2 < 1e-7) {
+          sumW = 1;
+          sumDu = cp.dstU - cp.srcU;
+          sumDv = cp.dstV - cp.srcV;
+          break;
+        }
+        const w = 1 / Math.pow(d2 + 0.008, 1.35);
+        sumW += w;
+        sumDu += w * (cp.dstU - cp.srcU);
+        sumDv += w * (cp.dstV - cp.srcV);
       }
-      const w = 1 / Math.pow(d2 + 0.008, 1.35);
-      sumW += w;
-      sumDu += w * (cp.dstU - cp.srcU);
-      sumDv += w * (cp.dstV - cp.srcV);
+      if (sumW > 1e-9) {
+        warpedU += sumDu / sumW;
+        warpedV += sumDv / sumW;
+      }
     }
-    if (sumW > 1e-9) {
-      warpedU += sumDu / sumW;
-      warpedV += sumDv / sumW;
-    }
-  }
-
-  // 3. Surface-aware Camera Ray Intersection & Scale/Rotation about surface center (Sections 12, 13, 14)
-  // For CROWN: account for cylindrical/arch curvature unwrapping (camera ray -> curved crown arc length)
-  let effectiveNormU = warpedU - 0.5;
-  if (surface === 'crown') {
-    const clampedSin = Math.max(-0.92, Math.min(0.92, effectiveNormU * 1.65));
-    const arcFactor = Math.asin(clampedSin) / (Math.asin(0.825) * 2);
-    effectiveNormU = effectiveNormU * 0.65 + arcFactor * 0.35;
   }
 
   const zoom = transform.zoom ?? 1;
-  let dx = effectiveNormU * bounds.width * transform.scaleX * zoom;
-  let dy = (0.5 - warpedV) * bounds.height * transform.scaleY * zoom;
+  let dx = (warpedU - 0.5) * bounds.width * (transform.scaleX || 1) * zoom;
+  let dy = (0.5 - warpedV) * bounds.height * (transform.scaleY || 1) * zoom;
 
   if (Math.abs(transform.rotation) > 0.01) {
+    // Note: in SVG Y-down space, clockwise rotation by +theta corresponds to
+    // rotating (dx, dy) in Y-up meters by -theta
     const rad = (-transform.rotation * Math.PI) / 180;
     const cos = Math.cos(rad);
     const sin = Math.sin(rad);
@@ -566,15 +734,16 @@ export function imageUVToSurfaceMeters(
   const centerY = (bounds.minY + bounds.maxY) / 2;
 
   return {
-    x: Number((centerX + dx + transform.offsetX).toFixed(4)),
-    y: Number((centerY + dy + transform.offsetY).toFixed(4)),
+    x: Number((centerX + dx + (transform.offsetX || 0)).toFixed(4)),
+    y: Number((centerY + dy + (transform.offsetY || 0)).toFixed(4)),
   };
 }
 
 /**
- * Inverse mapping: converts real-world surface coordinates (x, y in meters)
- * back to normalized image UV [0, 1] so Computer Vision active contour refinement
- * can sample pixel gradients along a trace.
+ * Exact inverse of `imageUVToSurfaceMeters`:
+ * Converts real-world surface coordinates (x, y in meters) back to normalized image UV [0, 1]
+ * on the active displayed photograph so Computer Vision geodesic ridge snapping & seed tracking
+ * sample the exact pixel under the user's cursor.
  */
 export function surfaceMetersToImageUV(
   pt: Point2D,
@@ -587,8 +756,8 @@ export function surfaceMetersToImageUV(
   const centerX = (bounds.minX + bounds.maxX) / 2;
   const centerY = (bounds.minY + bounds.maxY) / 2;
 
-  let dx = pt.x - centerX - transform.offsetX;
-  let dy = pt.y - centerY - transform.offsetY;
+  let dx = pt.x - centerX - (transform.offsetX || 0);
+  let dy = pt.y - centerY - (transform.offsetY || 0);
 
   if (Math.abs(transform.rotation) > 0.01) {
     const rad = (transform.rotation * Math.PI) / 180;
@@ -601,15 +770,12 @@ export function surfaceMetersToImageUV(
   }
 
   const zoom = transform.zoom ?? 1;
-  let u = 0.5 + dx / Math.max(0.1, bounds.width * transform.scaleX * zoom);
-  let v = 0.5 - dy / Math.max(0.1, bounds.height * transform.scaleY * zoom);
-
-  if (transform.flipH) u = 1 - u;
-  if (transform.flipV) v = 1 - v;
+  const u = 0.5 + dx / Math.max(0.05, bounds.width * (transform.scaleX || 1) * zoom);
+  const v = 0.5 - dy / Math.max(0.05, bounds.height * (transform.scaleY || 1) * zoom);
 
   return {
-    u: Math.max(0.01, Math.min(0.99, u)),
-    v: Math.max(0.01, Math.min(0.99, v)),
+    u: Math.max(0.005, Math.min(0.995, u)),
+    v: Math.max(0.005, Math.min(0.995, v)),
   };
 }
 

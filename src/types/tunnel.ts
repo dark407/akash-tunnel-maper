@@ -393,6 +393,15 @@ export interface Joint {
   jointNumber?: string;        // Editable joint number (e.g., "J-1", "J-2")
   customLabel?: string;        // Editable custom label override
   symbolScale?: number;        // Dip/orientation symbol scale factor (default 1.0)
+  // Advanced Photogrammetry & Quantitative Structural Geology Fields (Additive / Non-Destructive)
+  reliefDepthMeters?: number[]; // Photogrammetric 3D depth relief delta-Z (m) along each vertex
+  jrcValue?: number;           // Barton's Joint Roughness Coefficient (0.5 - 20.0) calculated via Z2 profile derivative
+  z2RootMeanSquare?: number;   // Tse & Cruden (1979) Z2 RMS first derivative of joint trace profile
+  roughnessProfileIndexRp?: number; // El-Soudani Rp ratio (true arc length / chord length)
+  subPixelResidualPx?: number; // Steger parabolic Taylor sub-pixel centerline precision (px)
+  phaseCongruencyScore?: number; // Multi-orientation Log-Gabor illumination-invariant phase congruency [0..1]
+  terzaghiWeight?: number;     // Terzaghi (1965) angular blind-zone bias correction weight (1.0 - 5.0)
+  jcsStrengthMPa?: number;     // Estimated Joint Wall Compressive Strength JCS (MPa)
 }
 
 export interface JointSet {
@@ -760,6 +769,73 @@ export interface SectionToSectionVolumeRow {
   undercutVolumePrismoidalCubicMeters: number;
   primaryOverbreakReason: string;
 }
+
+export interface BartonJRCProfileResult {
+  jointId: string;
+  set: string;
+  surface: SurfaceType;
+  z2RmsDerivative: number;
+  rpRoughnessIndex: number;
+  jrc0LabScale: number;        // Lab-scale JRC0 (100mm reference)
+  jrcNFieldScale: number;      // Barton-Bandis field-scale corrected JRCn
+  jcsMPa: number;              // Joint wall compressive strength (MPa)
+  peakFrictionAngleDeg: number;// Barton-Bandis peak shear friction angle at 0.5 MPa normal stress
+  isrmRoughnessClass: string;  // e.g., "Class III: Rough / Undulating (JRC 12–14)"
+}
+
+export interface KinematicWedgeCandidate {
+  id: string;
+  pairLabel: string;           // e.g., "J1 × J2" or "J1 × F1" or "J0 (Planar)"
+  failureMode: 'CROWN_GRAVITY_WEDGE' | 'SIDEWALL_SLIDING_WEDGE' | 'PLANAR_SLIDING' | 'FLEXURAL_TOPPLING';
+  affectedSurface: 'Crown Arch' | 'Left Wall' | 'Right Wall' | 'Tunnel Face';
+  intersectionPlungeDeg: number;
+  intersectionTrendDeg: number;
+  wedgeApexHeightMeters: number;
+  estimatedVolumeM3: number;
+  estimatedMassTonnes: number;
+  factorOfSafetyDry: number;
+  factorOfSafetyWater: number;
+  riskLevel: 'CRITICAL' | 'MODERATE' | 'STABLE';
+  recommendedBoltLengthM: number;
+  recommendedBoltSpacingM: number;
+  mobilizedShearStrengthKPa: number;
+}
+
+export interface PhotogrammetricPoint3D {
+  x: number;
+  y: number;
+  z: number;
+  east: number;
+  north: number;
+  up: number;
+  nx: number;
+  ny: number;
+  nz: number;
+  r: number;
+  g: number;
+  b: number;
+  surface: SurfaceType;
+  jointId?: string;
+  setId?: string;
+}
+
+export interface PhotogrammetricStructuralSummary {
+  totalTracesAnalyzed: number;
+  meanSubPixelResidualPx: number;
+  meanPhaseCongruency: number;
+  meanReprojectionErrorPx: number;
+  meanTriangulationResidualM: number;
+  arealFractureIntensityP21: number;       // m / m^2
+  volumetricFractureIntensityP32: number;  // m^2 / m^3
+  mauldonTrueMeanLengthMeters: number;     // Mauldon (1998) censored window corrected trace length (m)
+  estimatedBlockVolumeM3: number;          // Palmstrom Vb (m^3)
+  terzaghiCorrectedRqdPct: number;         // Bias-corrected RQD (%)
+  meanBartonJrc: number;
+  jrcProfiles: BartonJRCProfileResult[];
+  kinematicWedges: KinematicWedgeCandidate[];
+  pointCloudCount: number;
+}
+
 
 
 

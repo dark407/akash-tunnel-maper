@@ -101,6 +101,17 @@ function createAkashTunnelMapperIcoBuffer() {
         b = 129;
       }
 
+      // ESWA Geometric 'E' Monogram inside the tunnel portal
+      const inEVertical = nx >= 24 && nx <= 27.2 && ny >= 21 && ny <= 43;
+      const inETopBar = nx >= 24 && nx <= 40 && ny >= 21 && ny <= 24;
+      const inEMidBar = nx >= 24 && nx <= 37 && ny >= 30.5 && ny <= 33.5;
+      const inEBotBar = nx >= 24 && nx <= 40 && ny >= 40 && ny <= 43;
+      if (inEVertical || inETopBar || inEMidBar || inEBotBar) {
+        r = 248;
+        g = 250;
+        b = 252;
+      }
+
       icoBuffer[idx + 0] = b;
       icoBuffer[idx + 1] = g;
       icoBuffer[idx + 2] = r;

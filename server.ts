@@ -42,6 +42,9 @@ async function startServer() {
         tunnelHeight = 7.0,
         driveDirection = 70,
         cvCandidates = [],
+        rejectedOrientations = [],
+        confirmedOrientations = [],
+        currentModelVersion = 'AKASH AI Model 1.3',
       } = req.body || {};
 
       if (!imageBase64 || typeof imageBase64 !== 'string') {
@@ -60,8 +63,15 @@ async function startServer() {
 
       if (ai) {
         try {
+          const learningPrompt =
+            Array.isArray(rejectedOrientations) && rejectedOrientations.length > 0
+              ? `\nCONTINUOUS GEOLOGIST LEARNING CALIBRATION (${currentModelVersion}):
+- Confirmed/Prioritized Fracture Orientations (DipDir/Dip): ${JSON.stringify(confirmedOrientations)}
+- Rejected False-Positive Orientations to Suppress: ${JSON.stringify(rejectedOrientations)}`
+              : '';
+
           const promptText = `You are an expert underground engineering geologist mapping a rock tunnel ${surface} photograph.
-Master Tunnel Geometry: Width = ${tunnelWidth}m, Height = ${tunnelHeight}m, Tunnel Drive Direction = N ${driveDirection}° E.
+Master Tunnel Geometry: Width = ${tunnelWidth}m, Height = ${tunnelHeight}m, Tunnel Drive Direction = N ${driveDirection}° E.${learningPrompt}
 IMAGE 1 is the MAIN PHOTO (PRIMARY MAPPING IMAGE).
 ${
   cleanSupporting.length > 0
