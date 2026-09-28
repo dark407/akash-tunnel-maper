@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Chakra Petch', sans-serif;
+    --font-sans: 'Plus Jakarta Sans', sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+    --app-bg: #0B0E14;
+    --app-panel: #111621;
+    --app-subpanel: #0D121B;
+    --app-border: #1E293B;
+    --app-text: #F1F5F9;
+    --app-text-muted: #94A3B8;
+  }
+
+  html[data-theme="light"] {
+    --app-bg: #F1F5F9;
+    --app-panel: #FFFFFF;
+    --app-subpanel: #F8FAFC;
+    --app-border: #CBD5E1;
+    --app-text: #0F172A;
+    --app-text-muted: #475569;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--app-bg);
+    color: var(--app-text);
+    transition: background-color 0.18s ease, color 0.18s ease;
+  }
+
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Light Mode Adaptive Theme Overrides for Engineering UI Chrome */
+html[data-theme="light"] .bg-\[\#0B0E14\],
+html[data-theme="light"] .bg-\[\#090C12\],
+html[data-theme="light"] .bg-\[\#0A0D13\] {
+  background-color: #F1F5F9 !important;
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .bg-\[\#111621\],
+html[data-theme="light"] .bg-\[\#0E131D\],
+html[data-theme="light"] .bg-\[\#141C2B\],
+html[data-theme="light"] .bg-\[\#131924\] {
+  background-color: #FFFFFF !important;
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .bg-\[\#0D121B\] {
+  background-color: #E2E8F0 !important;
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .bg-slate-950,
+html[data-theme="light"] .bg-slate-950\/95,
+html[data-theme="light"] .bg-slate-950\/90 {
+  background-color: #F8FAFC !important;
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .bg-slate-900,
+html[data-theme="light"] .bg-slate-900\/95,
+html[data-theme="light"] .bg-slate-900\/90,
+html[data-theme="light"] .bg-slate-900\/80,
+html[data-theme="light"] .bg-slate-900\/50 {
+  background-color: #F1F5F9 !important;
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .bg-slate-800,
+html[data-theme="light"] .bg-slate-800\/90,
+html[data-theme="light"] .bg-slate-800\/80 {
+  background-color: #E2E8F0 !important;
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .hover\:bg-slate-800:hover,
+html[data-theme="light"] .hover\:bg-slate-700:hover,
+html[data-theme="light"] .hover\:bg-\[\#1A2232\]:hover {
+  background-color: #CBD5E1 !important;
+}
+
+html[data-theme="light"] .text-slate-100,
+html[data-theme="light"] .text-slate-200 {
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .text-slate-300 {
+  color: #1E293B !important;
+}
+
+html[data-theme="light"] .text-slate-400 {
+  color: #475569 !important;
+}
+
+html[data-theme="light"] .text-cyan-300,
+html[data-theme="light"] .text-cyan-400 {
+  color: #0369A1 !important;
+}
+
+html[data-theme="light"] .text-cyan-200 {
+  color: #075985 !important;
+}
+
+html[data-theme="light"] .bg-cyan-950\/60,
+html[data-theme="light"] .bg-cyan-950 {
+  background-color: #E0F2FE !important;
+}
+
+html[data-theme="light"] .border-slate-800,
+html[data-theme="light"] .border-slate-800\/90,
+html[data-theme="light"] .border-slate-800\/80,
+html[data-theme="light"] .border-slate-700,
+html[data-theme="light"] .border-slate-700\/80,
+html[data-theme="light"] .border-slate-700\/90 {
+  border-color: #CBD5E1 !important;
+}
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B0E14" />
+      <stop offset="100%" stop-color="#131B2E" />
+    </linearGradient>
+    <linearGradient id="arch" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#22D3EE" />
+      <stop offset="100%" stop-color="#0284C7" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="84" fill="url(#bg)" />
+  <rect x="24" y="24" width="464" height="464" rx="64" fill="none" stroke="#1E293B" stroke-width="6" />
+  <!-- Tunnel D-Shaped Arch -->
+  <path d="M 116 404 L 116 244 A 140 140 0 0 1 396 244 L 396 404 Z" fill="#0F172A" stroke="url(#arch)" stroke-width="18" stroke-linejoin="round" />
+  <!-- Overbreak Profile -->
+  <path d="M 96 404 L 92 238 L 138 140 L 256 82 L 378 136 L 418 242 L 412 404" fill="none" stroke="#F43F5E" stroke-width="8" stroke-dasharray="16 10" stroke-linecap="round" />
+  <!-- Geological Joint Traces -->
+  <path d="M 136 290 L 210 245 L 285 215 L 380 185" fill="none" stroke="#F59E0B" stroke-width="10" stroke-linecap="round" />
+  <path d="M 155 180 L 240 245 L 315 310 L 375 375" fill="none" stroke="#38BDF8" stroke-width="9" stroke-linecap="round" />
+  <path d="M 126 360 L 235 330 L 330 295" fill="none" stroke="#10B981" stroke-width="8" stroke-linecap="round" />
+  <!-- Survey Control Points -->
+  <circle cx="116" cy="244" r="11" fill="#10B981" stroke="#FFFFFF" stroke-width="4" />
+  <circle cx="256" cy="104" r="11" fill="#10B981" stroke="#FFFFFF" stroke-width="4" />
+  <circle cx="396" cy="244" r="11" fill="#10B981" stroke="#FFFFFF" stroke-width="4" />
+</svg>

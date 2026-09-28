@@ -1,0 +1,776 @@
+import {
+  CameraCalibration,
+  Joint,
+  MasterSurfaceCategory,
+  Point2D,
+  Point3D,
+  ProfileType,
+  SurfaceTransform,
+  SurfaceType,
+  TraceFitMode,
+  TunnelGeometry,
+  TunnelSettings,
+} from '../types/tunnel';
+import { undistortNormalizedUV } from './cameraCalibration';
+
+/**
+ * Generates real-world cross-section boundary polygon in meters.
+ * Coordinate convention for Face cross-section:
+ * x = 0 is tunnel centerline, x in [-width/2, +width/2]
+ * y = 0 is tunnel floor/invert, y = height is crown apex.
+ */
+export function buildTunnelCrossSection(
+  width: number,
+  height: number,
+  wallHeight: number,
+  profileType: ProfileType,
+  crownRadius?: number,
+  customPoints?: Point2D[]
+): { crossSectionPoints: Point2D[]; crownArcLength: number; effectiveCrownRadius: number } {
+  const safeWidth = Math.max(1.5, width);
+  const safeHeight = Math.max(1.5, height);
+  const safeWallHeight = Math.min(Math.max(0.2, wallHeight), safeHeight - 0.3);
+  const halfW = safeWidth / 2;
+  const archRise = Math.max(0.3, safeHeight - safeWallHeight);
+
+  if (profileType === 'custom_cad' && customPoints && customPoints.length >= 4) {
+    const crownArcLength = computeCrownArcLength(customPoints, safeWallHeight);
+    return {
+      crossSectionPoints: customPoints,
+      crownArcLength,
+      effectiveCrownRadius: crownRadius || safeWidth / 2,
+    };
+  }
+
+  const pts: Point2D[] = [];
+  const numArchSteps = 48;
+
+  if (profileType === 'circular') {
+    const rX = halfW;
+    const rY = safeHeight / 2;
+    const cY = safeHeight / 2;
+    for (let i = 0; i <= 64; i++) {
+      const theta = -Math.PI / 2 + (i / 64) * 2 * Math.PI;
+      pts.push({
+        x: Number((rX * Math.cos(theta)).toFixed(4)),
+        y: Number((cY + rY * Math.sin(theta)).toFixed(4)),
+      });
+    }
+    const arcLen = Math.PI * ((rX + rY) / 2);
+    return {
+      crossSectionPoints: pts,
+      crownArcLength: Number(arcLen.toFixed(2)),
+      effectiveCrownRadius: Number(((rX + rY) / 2).toFixed(2)),
+    };
+  }
+
+  if (profileType === 'horseshoe') {
+    const invertHalfW = halfW * 0.86;
+    pts.push({ x: -invertHalfW, y: 0 });
+    const wallSteps = 14;
+    for (let i = 1; i <= wallSteps; i++) {
+      const t = i / wallSteps;
+      const x = -invertHalfW - (halfW - invertHalfW) * Math.sin((t * Math.PI) / 2);
+      const y = t * safeWallHeight;
+      pts.push({ x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) });
+    }
+    for (let i = 1; i < numArchSteps; i++) {
+      const t = i / numArchSteps;
+      const angle = Math.PI * (1 - t);
+      const x = halfW * Math.cos(angle);
+      const y = safeWallHeight + archRise * Math.sin(angle);
+      pts.push({ x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) });
+    }
+    for (let i = 0; i <= wallSteps; i++) {
+      const t = 1 - i / wallSteps;
+      const x = invertHalfW + (halfW - invertHalfW) * Math.sin((t * Math.PI) / 2);
+      const y = t * safeWallHeight;
+      pts.push({ x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) });
+    }
+  } else if (profileType === 'flat_arch') {
+    pts.push({ x: -halfW, y: 0 });
+    pts.push({ x: -halfW, y: safeWallHeight });
+    for (let i = 1; i < numArchSteps; i++) {
+      const t = i / numArchSteps;
+      const angle = Math.PI * (1 - t);
+      const x = halfW * Math.cos(angle);
+      const sinVal = Math.pow(Math.max(0, Math.sin(angle)), 0.75);
+      const y = safeWallHeight + archRise * sinVal;
+      pts.push({ x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) });
+    }
+    pts.push({ x: halfW, y: safeWallHeight });
+    pts.push({ x: halfW, y: 0 });
+  } else {
+    pts.push({ x: -halfW, y: 0 });
+    pts.push({ x: -halfW, y: safeWallHeight });
+
+    const R = (halfW * halfW + archRise * archRise) / (2 * archRise);
+    const centerY = safeHeight - R;
+    const startAngle = Math.atan2(safeWallHeight - centerY, -halfW);
+    const endAngle = Math.atan2(safeWallHeight - centerY, halfW);
+
+    for (let i = 1; i < numArchSteps; i++) {
+      const t = i / numArchSteps;
+      const theta = startAngle + t * (endAngle - startAngle);
+      const x = R * Math.cos(theta);
+      const y = centerY + R * Math.sin(theta);
+      pts.push({ x: Number(x.toFixed(4)), y: Number(y.toFixed(4)) });
+    }
+
+    pts.push({ x: halfW, y: safeWallHeight });
+    pts.push({ x: halfW, y: 0 });
+  }
+
+  const R_calc = (halfW * halfW + archRise * archRise) / (2 * archRise);
+  const crownArcLength = computeCrownArcLength(pts, safeWallHeight);
+
+  return {
+    crossSectionPoints: pts,
+    crownArcLength: Number(crownArcLength.toFixed(2)),
+    effectiveCrownRadius: Number((crownRadius || R_calc).toFixed(2)),
+  };
+}
+
+export function computeCrownArcLength(points: Point2D[], wallHeight: number): number {
+  let length = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    if (p1.y >= wallHeight - 0.05 && p2.y >= wallHeight - 0.05) {
+      length += Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    }
+  }
+  if (length < 1) {
+    const xs = points.map((p) => p.x);
+    const ys = points.map((p) => p.y);
+    const w = Math.max(...xs) - Math.min(...xs);
+    const h = Math.max(...ys) - wallHeight;
+    return Number((Math.PI * Math.sqrt((w * w) / 4 + h * h)).toFixed(2));
+  }
+  return length;
+}
+
+export function createTunnelGeometry(
+  width: number,
+  height: number,
+  wallHeight: number,
+  crownGeometry: ProfileType,
+  crownRadius?: number,
+  source: 'manual' | 'dxf' | 'dwg' = 'manual',
+  cadFileName?: string,
+  customPoints?: Point2D[]
+): TunnelGeometry {
+  const { crossSectionPoints, crownArcLength, effectiveCrownRadius } = buildTunnelCrossSection(
+    width,
+    height,
+    wallHeight,
+    crownGeometry,
+    crownRadius,
+    customPoints
+  );
+
+  return {
+    width: Number(width.toFixed(2)),
+    height: Number(height.toFixed(2)),
+    wallHeight: Number(wallHeight.toFixed(2)),
+    crownGeometry,
+    crownRadius: effectiveCrownRadius,
+    units: 'm',
+    source,
+    cadFileName,
+    crossSectionPoints,
+    crownArcLength,
+  };
+}
+
+export function getSurfaceBoundsMeters(
+  surface: SurfaceType,
+  geometry: TunnelGeometry,
+  settings: TunnelSettings
+): { minX: number; maxX: number; minY: number; maxY: number; width: number; height: number } {
+  const roundLen = Math.max(1.0, settings.roundLength || 3.5);
+  switch (surface) {
+    case 'face':
+      return {
+        minX: -geometry.width / 2,
+        maxX: geometry.width / 2,
+        minY: 0,
+        maxY: geometry.height,
+        width: geometry.width,
+        height: geometry.height,
+      };
+    case 'crown': {
+      const span = Math.max(geometry.width, geometry.crownArcLength);
+      return {
+        minX: -span / 2,
+        maxX: span / 2,
+        minY: 0,
+        maxY: roundLen,
+        width: span,
+        height: roundLen,
+      };
+    }
+    case 'leftWall':
+    case 'rightWall':
+      return {
+        minX: 0,
+        maxX: roundLen,
+        minY: 0,
+        maxY: Math.max(1.0, geometry.wallHeight),
+        width: roundLen,
+        height: Math.max(1.0, geometry.wallHeight),
+      };
+  }
+}
+
+export function isPointInsidePolygon(pt: Point2D, polygon: Point2D[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x,
+      yi = polygon[i].y;
+    const xj = polygon[j].x,
+      yj = polygon[j].y;
+
+    const intersect =
+      yi > pt.y !== yj > pt.y && pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi + 1e-12) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+export function isPointInsideSurface(
+  pt: Point2D,
+  surface: SurfaceType,
+  geometry: TunnelGeometry,
+  settings: TunnelSettings,
+  marginMeters = 0.08
+): boolean {
+  const bounds = getSurfaceBoundsMeters(surface, geometry, settings);
+  if (surface === 'face') {
+    if (
+      pt.x < bounds.minX - marginMeters ||
+      pt.x > bounds.maxX + marginMeters ||
+      pt.y < bounds.minY - marginMeters ||
+      pt.y > bounds.maxY + marginMeters
+    ) {
+      return false;
+    }
+    if (isPointInsidePolygon(pt, geometry.crossSectionPoints)) return true;
+    return distanceToPolygonBoundary(pt, geometry.crossSectionPoints) <= marginMeters;
+  }
+
+  return (
+    pt.x >= bounds.minX - marginMeters &&
+    pt.x <= bounds.maxX + marginMeters &&
+    pt.y >= bounds.minY - marginMeters &&
+    pt.y <= bounds.maxY + marginMeters
+  );
+}
+
+export function distanceToPolygonBoundary(pt: Point2D, polygon: Point2D[]): number {
+  let minDist = Infinity;
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    const d = pointToSegmentDistance(pt, p1, p2);
+    if (d < minDist) minDist = d;
+  }
+  return minDist;
+}
+
+export function pointToSegmentDistance(p: Point2D, v: Point2D, w: Point2D): number {
+  const l2 = (w.x - v.x) ** 2 + (w.y - v.y) ** 2;
+  if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+  let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
+}
+
+export function clipPolylineToSurface(
+  points: Point2D[],
+  surface: SurfaceType,
+  geometry: TunnelGeometry,
+  settings: TunnelSettings
+): Point2D[] {
+  if (points.length < 2) return points;
+  const bounds = getSurfaceBoundsMeters(surface, geometry, settings);
+
+  // Filter vertices to those inside or on the master surface boundary WITHOUT stretching
+  // internal rock terminations to the walls, and WITHOUT straightening intermediate vertices.
+  const clipped: Point2D[] = [];
+
+  for (let i = 0; i < points.length; i++) {
+    const pt = points[i];
+    const isInside =
+      surface === 'face'
+        ? isPointInsidePolygon(pt, geometry.crossSectionPoints) ||
+          distanceToPolygonBoundary(pt, geometry.crossSectionPoints) <= 0.06
+        : pt.x >= bounds.minX - 0.04 &&
+          pt.x <= bounds.maxX + 0.04 &&
+          pt.y >= bounds.minY - 0.04 &&
+          pt.y <= bounds.maxY + 0.04;
+
+    if (isInside) {
+      clipped.push({
+        x: Number(Math.max(bounds.minX, Math.min(bounds.maxX, pt.x)).toFixed(4)),
+        y: Number(Math.max(bounds.minY, Math.min(bounds.maxY, pt.y)).toFixed(4)),
+      });
+    } else if (i > 0 && clipped.length > 0) {
+      // Find boundary intersection along segment from previous point to current point
+      const prev = points[i - 1];
+      for (let s = 1; s <= 16; s++) {
+        const t = s / 16;
+        const cand = {
+          x: prev.x + t * (pt.x - prev.x),
+          y: prev.y + t * (pt.y - prev.y),
+        };
+        const candIn =
+          surface === 'face'
+            ? isPointInsidePolygon(cand, geometry.crossSectionPoints)
+            : cand.x >= bounds.minX &&
+              cand.x <= bounds.maxX &&
+              cand.y >= bounds.minY &&
+              cand.y <= bounds.maxY;
+        if (!candIn) {
+          const lastIn = {
+            x: prev.x + ((s - 1) / 16) * (pt.x - prev.x),
+            y: prev.y + ((s - 1) / 16) * (pt.y - prev.y),
+          };
+          if (Math.hypot(lastIn.x - clipped[clipped.length - 1].x, lastIn.y - clipped[clipped.length - 1].y) > 0.02) {
+            clipped.push({
+              x: Number(lastIn.x.toFixed(4)),
+              y: Number(lastIn.y.toFixed(4)),
+            });
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  if (clipped.length < 2) return [];
+  return preserveGeologicalPolyline(clipped);
+}
+
+/**
+ * CRITICAL GEOLOGICAL REALISM RULE (Sections 1, 2, 3):
+ * Never straighten a real rock discontinuity into a 2-point CAD line.
+ * Preserves multi-vertex polylines (P1 -> P2 -> P3 -> P4 -> P5 -> P6 -> P7...)
+ * including slight/strong curvature, stepped geometry, local bends, and undulations,
+ * while removing only duplicate coincident pixel noise.
+ */
+export function preserveGeologicalPolyline(points: Point2D[], maxVertices = 18): Point2D[] {
+  if (points.length <= 2) return points;
+
+  // 1. Remove zero-length duplicate adjacent vertices
+  const deduped: Point2D[] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const prev = deduped[deduped.length - 1];
+    if (Math.hypot(points[i].x - prev.x, points[i].y - prev.y) >= 0.004) {
+      deduped.push(points[i]);
+    }
+  }
+  if (deduped.length <= 2) return deduped;
+
+  // 2. Apply very gentle 3-point Chaikin/moving-window de-pixelation (0.15 weight on neighbors)
+  // so 1-pixel raster stair-stepping is smoothed while every real geological bend, step, and undulation is kept.
+  const smoothed: Point2D[] = [deduped[0]];
+  for (let i = 1; i < deduped.length - 1; i++) {
+    const pPrev = deduped[i - 1];
+    const pCurr = deduped[i];
+    const pNext = deduped[i + 1];
+    smoothed.push({
+      x: Number((0.14 * pPrev.x + 0.72 * pCurr.x + 0.14 * pNext.x).toFixed(4)),
+      y: Number((0.14 * pPrev.y + 0.72 * pCurr.y + 0.14 * pNext.y).toFixed(4)),
+    });
+  }
+  smoothed.push(deduped[deduped.length - 1]);
+
+  if (smoothed.length <= maxVertices) {
+    return smoothed;
+  }
+
+  // 3. Downsample along arc-length while always preserving local high-curvature bends/steps
+  const result: Point2D[] = [smoothed[0]];
+  const step = (smoothed.length - 1) / (maxVertices - 1);
+  for (let k = 1; k < maxVertices - 1; k++) {
+    const idx = Math.round(k * step);
+    result.push(smoothed[idx]);
+  }
+  result.push(smoothed[smoothed.length - 1]);
+  return result;
+}
+
+export function simplifyPolyline(points: Point2D[], _epsilon = 0.002): Point2D[] {
+  return preserveGeologicalPolyline(points, 16);
+}
+
+/**
+ * Solves a 3x3 Projective Homography Matrix H (row-major 9 numbers, H[8] = 1)
+ * mapping unit square [(0,0), (1,0), (1,1), (0,1)] to target perspective quadrilateral
+ * defined by 4 corner offsets [cTL, cTR, cBR, cBL].
+ */
+export function solveProjectiveHomography3x3(
+  corners: [Point2D, Point2D, Point2D, Point2D]
+): number[] {
+  const src: [number, number][] = [
+    [0, 0],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+  ];
+  const dst: [number, number][] = [
+    [0 + corners[0].x, 0 + corners[0].y],
+    [1 + corners[1].x, 0 + corners[1].y],
+    [1 + corners[2].x, 1 + corners[2].y],
+    [0 + corners[3].x, 1 + corners[3].y],
+  ];
+
+  // Build 8x8 linear system A * h = b for H = [h0, h1, h2; h3, h4, h5; h6, h7, 1]
+  const A: number[][] = [];
+  const b: number[] = [];
+
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i];
+    const [X, Y] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -x * X, -y * X]);
+    b.push(X);
+    A.push([0, 0, 0, x, y, 1, -x * Y, -y * Y]);
+    b.push(Y);
+  }
+
+  // Gaussian elimination with partial pivoting
+  const n = 8;
+  for (let col = 0; col < n; col++) {
+    let maxRow = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(A[row][col]) > Math.abs(A[maxRow][col])) {
+        maxRow = row;
+      }
+    }
+    [A[col], A[maxRow]] = [A[maxRow], A[col]];
+    [b[col], b[maxRow]] = [b[maxRow], b[col]];
+
+    const pivot = A[col][col];
+    if (Math.abs(pivot) < 1e-10) {
+      return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    }
+
+    for (let j = col; j < n; j++) A[col][j] /= pivot;
+    b[col] /= pivot;
+
+    for (let row = 0; row < n; row++) {
+      if (row !== col) {
+        const factor = A[row][col];
+        for (let j = col; j < n; j++) {
+          A[row][j] -= factor * A[col][j];
+        }
+        b[row] -= factor * b[col];
+      }
+    }
+  }
+
+  return [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], 1];
+}
+
+export function applyProjectiveHomography3x3(u: number, v: number, H: number[]): { u: number; v: number } {
+  const denom = H[6] * u + H[7] * v + H[8];
+  if (Math.abs(denom) < 1e-8) return { u, v };
+  return {
+    u: (H[0] * u + H[1] * v + H[2]) / denom,
+    v: (H[3] * u + H[4] * v + H[5]) / denom,
+  };
+}
+
+/**
+ * Pipeline Step (Section 11):
+ * IMAGE COORDINATES (u, v)
+ * -> LENS UNDISTORTION
+ * -> PROJECTIVE HOMOGRAPHY (H_3x3)
+ * -> TUNNEL SURFACE COORDINATES (x, y in meters)
+ */
+export function imageUVToSurfaceMeters(
+  u: number,
+  v: number,
+  surface: SurfaceType,
+  geometry: TunnelGeometry,
+  settings: TunnelSettings,
+  transform: SurfaceTransform,
+  calibration?: CameraCalibration
+): Point2D {
+  const bounds = getSurfaceBoundsMeters(surface, geometry, settings);
+
+  // 1. Camera Lens & Attitude Undistortion
+  const undist = undistortNormalizedUV(u, v, calibration);
+
+  // Apply flip if set
+  const uFlip = transform.flipH ? 1 - undist.u : undist.u;
+  const vFlip = transform.flipV ? 1 - undist.v : undist.v;
+
+  // 2. Exact 3x3 Projective Homography Transformation
+  const H =
+    transform.homographyMatrix && transform.homographyMatrix.length === 9
+      ? transform.homographyMatrix
+      : solveProjectiveHomography3x3(transform.perspectiveCorners);
+
+  let { u: warpedU, v: warpedV } = applyProjectiveHomography3x3(uFlip, vFlip, H);
+
+  // Apply piecewise mesh control point displacement if present
+  if (transform.meshControlPoints && transform.meshControlPoints.length > 0) {
+    let sumW = 0;
+    let sumDu = 0;
+    let sumDv = 0;
+    for (const cp of transform.meshControlPoints) {
+      const d2 = (uFlip - cp.srcU) * (uFlip - cp.srcU) + (vFlip - cp.srcV) * (vFlip - cp.srcV);
+      if (d2 < 1e-7) {
+        sumW = 1;
+        sumDu = cp.dstU - cp.srcU;
+        sumDv = cp.dstV - cp.srcV;
+        break;
+      }
+      const w = 1 / Math.pow(d2 + 0.008, 1.35);
+      sumW += w;
+      sumDu += w * (cp.dstU - cp.srcU);
+      sumDv += w * (cp.dstV - cp.srcV);
+    }
+    if (sumW > 1e-9) {
+      warpedU += sumDu / sumW;
+      warpedV += sumDv / sumW;
+    }
+  }
+
+  // 3. Surface-aware Camera Ray Intersection & Scale/Rotation about surface center (Sections 12, 13, 14)
+  // For CROWN: account for cylindrical/arch curvature unwrapping (camera ray -> curved crown arc length)
+  let effectiveNormU = warpedU - 0.5;
+  if (surface === 'crown') {
+    const clampedSin = Math.max(-0.92, Math.min(0.92, effectiveNormU * 1.65));
+    const arcFactor = Math.asin(clampedSin) / (Math.asin(0.825) * 2);
+    effectiveNormU = effectiveNormU * 0.65 + arcFactor * 0.35;
+  }
+
+  const zoom = transform.zoom ?? 1;
+  let dx = effectiveNormU * bounds.width * transform.scaleX * zoom;
+  let dy = (0.5 - warpedV) * bounds.height * transform.scaleY * zoom;
+
+  if (Math.abs(transform.rotation) > 0.01) {
+    const rad = (-transform.rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const rx = dx * cos - dy * sin;
+    const ry = dx * sin + dy * cos;
+    dx = rx;
+    dy = ry;
+  }
+
+  const centerX = (bounds.minX + bounds.maxX) / 2;
+  const centerY = (bounds.minY + bounds.maxY) / 2;
+
+  return {
+    x: Number((centerX + dx + transform.offsetX).toFixed(4)),
+    y: Number((centerY + dy + transform.offsetY).toFixed(4)),
+  };
+}
+
+/**
+ * Inverse mapping: converts real-world surface coordinates (x, y in meters)
+ * back to normalized image UV [0, 1] so Computer Vision active contour refinement
+ * can sample pixel gradients along a trace.
+ */
+export function surfaceMetersToImageUV(
+  pt: Point2D,
+  surface: SurfaceType,
+  geometry: TunnelGeometry,
+  settings: TunnelSettings,
+  transform: SurfaceTransform
+): { u: number; v: number } {
+  const bounds = getSurfaceBoundsMeters(surface, geometry, settings);
+  const centerX = (bounds.minX + bounds.maxX) / 2;
+  const centerY = (bounds.minY + bounds.maxY) / 2;
+
+  let dx = pt.x - centerX - transform.offsetX;
+  let dy = pt.y - centerY - transform.offsetY;
+
+  if (Math.abs(transform.rotation) > 0.01) {
+    const rad = (transform.rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const rx = dx * cos - dy * sin;
+    const ry = dx * sin + dy * cos;
+    dx = rx;
+    dy = ry;
+  }
+
+  const zoom = transform.zoom ?? 1;
+  let u = 0.5 + dx / Math.max(0.1, bounds.width * transform.scaleX * zoom);
+  let v = 0.5 - dy / Math.max(0.1, bounds.height * transform.scaleY * zoom);
+
+  if (transform.flipH) u = 1 - u;
+  if (transform.flipV) v = 1 - v;
+
+  return {
+    u: Math.max(0.01, Math.min(0.99, u)),
+    v: Math.max(0.01, Math.min(0.99, v)),
+  };
+}
+
+/**
+ * Pipeline Step (Section 11):
+ * TUNNEL SURFACE COORDINATES (x_s, y_s in meters)
+ * -> TUNNEL 3D COORDINATES (East, North, Up in meters)
+ *
+ * Uses the master TunnelGeometry cross-section and Tunnel Drive Direction (Azimuth)
+ * to project every 2D surface point onto the true 3D underground excavation shell:
+ * - Local tunnel axes:
+ *   X_local = Transverse Right [-width/2, +width/2]
+ *   Y_local = Distance along Drive Direction (0 at current face, negative behind face along roundLength)
+ *   Z_local = Elevation above invert [0, height]
+ * - Then rotated by Tunnel Drive Azimuth alpha_d into geographic 3D (East, North, Up).
+ */
+export function surfacePointTo3DTunnelCoords(
+  pt: Point2D,
+  surface: SurfaceType,
+  geometry: TunnelGeometry,
+  settings: TunnelSettings
+): Point3D {
+  const halfW = geometry.width / 2;
+  const wallH = geometry.wallHeight;
+  const totalH = geometry.height;
+  const archRise = Math.max(0.3, totalH - wallH);
+  const R = Math.max(halfW, geometry.crownRadius || (halfW * halfW + archRise * archRise) / (2 * archRise));
+
+  let localRight = 0; // Master X: Tunnel Transverse direction (m)
+  let localUp = 0;    // Master Y: Tunnel Vertical direction (m)
+  let localDrive = 0; // Master Z: Tunnel Drive / Chainage direction (m)
+  let normal = { nx: 0, ny: 0, nz: -1 };
+  let surfaceCategory: MasterSurfaceCategory = 'FACE';
+
+  if (surface === 'face') {
+    localRight = pt.x;
+    localUp = pt.y;
+    // Slight 3D concavity/arch relief near crown perimeter of blasted face
+    const radialNorm = Math.min(1, Math.hypot(pt.x / halfW, Math.max(0, pt.y - wallH) / archRise));
+    localDrive = -0.12 * (1 - radialNorm * radialNorm);
+    normal = { nx: 0, ny: 0, nz: -1 };
+    surfaceCategory =
+      geometry.crownGeometry === 'custom_cad' ? 'OTHER_CUSTOM_SURFACE' : 'FACE';
+  } else if (surface === 'crown') {
+    // Section 14: Crown is NOT a flat rectangle in 3D — intersect with curved crown profile
+    const phi = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pt.x / R));
+    localRight = R * Math.sin(phi);
+    localDrive = -pt.y; // behind face along Z axis
+    const centerY = totalH - R;
+    localUp = Math.max(wallH, centerY + R * Math.cos(phi));
+    // Inward unit normal to curved crown arch
+    normal = {
+      nx: Number((-Math.sin(phi)).toFixed(4)),
+      ny: Number((-Math.cos(phi)).toFixed(4)),
+      nz: 0,
+    };
+    surfaceCategory = 'CROWN';
+  } else if (surface === 'leftWall') {
+    // Section 13: Left wall surface in Master Tunnel Coordinate System
+    localRight = -halfW;
+    localDrive = -pt.x;
+    localUp = pt.y;
+    normal = { nx: 1, ny: 0, nz: 0 };
+    surfaceCategory = 'LEFT_WALL';
+  } else {
+    // Section 13: Right wall surface in Master Tunnel Coordinate System
+    localRight = halfW;
+    localDrive = -pt.x;
+    localUp = pt.y;
+    normal = { nx: -1, ny: 0, nz: 0 };
+    surfaceCategory = 'RIGHT_WALL';
+  }
+
+  // Rotate (localRight, localDrive) by Tunnel Drive Azimuth (clockwise from North)
+  const azRad = (settings.driveDirection * Math.PI) / 180;
+  const sinAz = Math.sin(azRad);
+  const cosAz = Math.cos(azRad);
+
+  const east = localRight * cosAz + localDrive * sinAz;
+  const north = -localRight * sinAz + localDrive * cosAz;
+
+  return {
+    x: Number(localRight.toFixed(4)),
+    y: Number(localUp.toFixed(4)),
+    z: Number(localDrive.toFixed(4)),
+    east: Number(east.toFixed(4)),
+    north: Number(north.toFixed(4)),
+    up: Number(localUp.toFixed(4)),
+    normal,
+    surfaceCategory,
+  };
+}
+
+/**
+ * Returns the joint geometry points according to the active toolbar TraceFitMode:
+ * - 'smart_fit': preserves all detected natural irregularities, curvature, local bends, and undulations (P1..Pn).
+ * - 'linear': returns a geometrically simplified straight segment [P1, Pn] between the trace endpoints without mutating the underlying natural trace.
+ */
+export function getDisplayedJointGeometry(
+  joint: Pick<Joint, 'geometry'>,
+  fitMode: TraceFitMode = 'smart_fit'
+): Point2D[] {
+  if (!joint.geometry || joint.geometry.length < 2) return joint.geometry || [];
+  if (fitMode === 'linear') {
+    return [joint.geometry[0], joint.geometry[joint.geometry.length - 1]];
+  }
+  return joint.geometry;
+}
+
+export function createDefaultSurfaceTransform(): SurfaceTransform {
+  const defaultCorners: [Point2D, Point2D, Point2D, Point2D] = [
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+  ];
+  const defaultEdges: [Point2D, Point2D, Point2D, Point2D] = [
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+  ];
+  const meshPts = [];
+  let idx = 1;
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const u = Number((c / 2).toFixed(4));
+      const v = Number((r / 2).toFixed(4));
+      meshPts.push({
+        id: `cp-${r}-${c}`,
+        label: `C${idx++}`,
+        srcU: u,
+        srcV: v,
+        dstU: u,
+        dstV: v,
+      });
+    }
+  }
+  return {
+    offsetX: 0,
+    offsetY: 0,
+    scaleX: 1,
+    scaleY: 1,
+    zoom: 1,
+    rotation: 0,
+    flipH: false,
+    flipV: false,
+    cropTop: 0,
+    cropBottom: 0,
+    cropLeft: 0,
+    cropRight: 0,
+    skewX: 0,
+    skewY: 0,
+    perspH: 0,
+    perspV: 0,
+    perspectiveCorners: defaultCorners,
+    edgeOffsets: defaultEdges,
+    meshControlPoints: meshPts,
+    useCustomMask: false,
+    customMaskPoints: [],
+    homographyMatrix: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    cropToGeometry: true,
+  };
+}
