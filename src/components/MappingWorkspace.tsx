@@ -2859,7 +2859,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             title="Inspect AI Continuous Daily Learning Loop & Verified Geologist Corrections"
           >
             <Sparkles className="w-3 h-3 text-amber-400" />
-            AI ({sessionMemory.correctionsLearnedCount ?? 19})
+            AI ({sessionMemory.correctionsLearnedCount ?? 0})
           </button>
 
           <button
@@ -3016,20 +3016,6 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
               <AlertTriangle className="w-3 h-3 text-amber-400" />
               {currentPhoto.stereoBaselineWarning}
             </span>
-          )}
-
-          {!currentPhoto.image && (
-            <button
-              onClick={() => onLoadSamplePhoto(activeSurface)}
-              className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded border whitespace-nowrap ${
-                isLight
-                  ? 'text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 border-sky-300'
-                  : 'text-cyan-300 hover:text-cyan-200 bg-cyan-950/50 hover:bg-cyan-900/50 border-cyan-800/60'
-              }`}
-            >
-              <Wand2 className="w-3 h-3" />
-              Load Sample Photo
-            </button>
           )}
 
           {Object.values(photos).filter((p) => Boolean(p.image)).length > 1 && (
@@ -5061,6 +5047,34 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             )}
 
             {/* Legacy Layer 8 placeholder removed: rendered in unified obstacle-aware pass above */}
+            {cursorCanvasPx && (
+              <g className="pointer-events-none" opacity="0.88">
+                <line
+                  x1={cursorCanvasPx.cx - 10 / viewport.zoom}
+                  y1={cursorCanvasPx.cy}
+                  x2={cursorCanvasPx.cx + 10 / viewport.zoom}
+                  y2={cursorCanvasPx.cy}
+                  stroke={isLight ? '#000000' : '#FFFFFF'}
+                  strokeWidth={1.4 / viewport.zoom}
+                />
+                <line
+                  x1={cursorCanvasPx.cx}
+                  y1={cursorCanvasPx.cy - 10 / viewport.zoom}
+                  x2={cursorCanvasPx.cx}
+                  y2={cursorCanvasPx.cy + 10 / viewport.zoom}
+                  stroke={isLight ? '#000000' : '#FFFFFF'}
+                  strokeWidth={1.4 / viewport.zoom}
+                />
+                <circle
+                  cx={cursorCanvasPx.cx}
+                  cy={cursorCanvasPx.cy}
+                  r={2.5 / viewport.zoom}
+                  fill="none"
+                  stroke={isLight ? '#000000' : '#FFFFFF'}
+                  strokeWidth={1.2 / viewport.zoom}
+                />
+              </g>
+            )}
             </g>
           </svg>
 
@@ -6527,18 +6541,18 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             <div className="flex items-center gap-4 text-[11px] text-slate-300">
               <span>
                 Training Samples:{' '}
-                <strong className="text-white">{sessionMemory.trainingSamplesTotal ?? 148}</strong>
+                <strong className="text-slate-100">{sessionMemory.trainingSamplesTotal ?? 0}</strong>
               </span>
               <span>
                 Verified Traces:{' '}
                 <strong className="text-emerald-400">
-                  {sessionMemory.verifiedExamplesCount ?? 42}
+                  {sessionMemory.verifiedExamplesCount ?? 0}
                 </strong>
               </span>
               <span>
                 Corrections Learned:{' '}
                 <strong className="text-amber-300">
-                  {sessionMemory.correctionsLearnedCount ?? 19}
+                  {sessionMemory.correctionsLearnedCount ?? 0}
                 </strong>
               </span>
               <button

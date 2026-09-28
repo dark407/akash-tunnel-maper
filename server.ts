@@ -1,6 +1,7 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -297,6 +298,129 @@ CRITICAL GEOLOGICAL REALISM & MAIN PHOTO RULES:
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'CAD conversion error';
       res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/offline-pc-installer
+   * Packages the compiled dist/ bundle (HTML + CSS + JS) into a 100% self-contained
+   * local Windows PC application installer that runs from %LOCALAPPDATA% without
+   * opening any website URL or requiring an internet connection.
+   */
+  app.get('/api/offline-pc-installer', (req, res) => {
+    try {
+      const format = String(req.query.format || 'bat');
+      const distDir = path.join(process.cwd(), 'dist');
+      const assetsDir = path.join(distDir, 'assets');
+
+      let cssContent = '';
+      let jsContent = '';
+
+      if (fs.existsSync(assetsDir)) {
+        const files = fs.readdirSync(assetsDir);
+        for (const file of files) {
+          const fullPath = path.join(assetsDir, file);
+          if (file.endsWith('.css')) {
+            cssContent += fs.readFileSync(fullPath, 'utf8') + '\n';
+          } else if (file.endsWith('.js')) {
+            jsContent += fs.readFileSync(fullPath, 'utf8') + '\n';
+          }
+        }
+      }
+
+      // Escape closing script tags inside JS bundle if any exist
+      const safeJsContent = jsContent.replace(/<\/script>/gi, '<\\/script>');
+
+      const standaloneHtml = `<!doctype html>
+<html lang="en" data-theme="dark" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Akash Tunnel Joint Tracer — Desktop Engineering Suite</title>
+    <style>${cssContent}</style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+${safeJsContent}
+    </script>
+  </body>
+</html>`;
+
+      if (format === 'html') {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          'attachment; filename="Akash_Tunnel_Tracer_Offline_PC.html"'
+        );
+        res.send(standaloneHtml);
+        return;
+      }
+
+      const b64Payload = Buffer.from(standaloneHtml, 'utf8').toString('base64');
+      const b64Lines: string[] = [];
+      for (let i = 0; i < b64Payload.length; i += 76) {
+        b64Lines.push(b64Payload.slice(i, i + 76));
+      }
+
+      const batLines = [
+        '@echo off',
+        'setlocal',
+        'title Akash Tunnel Joint Tracer - Offline PC Software Installer',
+        'echo ============================================================================',
+        'echo   AKASH TUNNEL JOINT TRACER - STANDALONE OFFLINE PC SOFTWARE INSTALLER',
+        'echo ============================================================================',
+        'echo.',
+        'set "INSTALL_DIR=%LOCALAPPDATA%\\AkashTunnelTracer"',
+        'if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"',
+        'set "B64_FILE=%INSTALL_DIR%\\app_bundle.b64"',
+        'set "APP_HTML=%INSTALL_DIR%\\AkashTunnelApp.html"',
+        'set "LAUNCHER_CMD=%INSTALL_DIR%\\Launch_Akash_Tunnel_Tracer.vbs"',
+        'echo [1/3] Extracting standalone offline software files to %INSTALL_DIR%...',
+        'powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-Content -LiteralPath \'%~f0\'; $idx = [Array]::IndexOf($c, \'::===PAYLOAD_START===\'); $b64 = $c[($idx+1)..($c.Length-1)] -join \'\'; [IO.File]::WriteAllBytes(\'%APP_HTML%\', [Convert]::FromBase64String($b64))"',
+        'echo [2/3] Creating silent Windows desktop window launcher (no website / 100%% offline)...',
+        '(',
+        '  echo Set sh = CreateObject("WScript.Shell"^)',
+        '  echo Set fso = CreateObject("Scripting.FileSystemObject"^)',
+        '  echo appFile = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%\\AkashTunnelTracer\\AkashTunnelApp.html"^)',
+        '  echo fileUrl = "file:///" ^& Replace(appFile, "\\", "/"^)',
+        '  echo edge1 = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"',
+        '  echo edge2 = "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"',
+        '  echo chrome1 = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"',
+        '  echo If fso.FileExists(edge1^) Then',
+        '  echo   sh.Run """" ^& edge1 ^& """ --app=""" ^& fileUrl ^& """ --start-maximized", 1, False',
+        '  echo ElseIf fso.FileExists(edge2^) Then',
+        '  echo   sh.Run """" ^& edge2 ^& """ --app=""" ^& fileUrl ^& """ --start-maximized", 1, False',
+        '  echo ElseIf fso.FileExists(chrome1^) Then',
+        '  echo   sh.Run """" ^& chrome1 ^& """ --app=""" ^& fileUrl ^& """ --start-maximized", 1, False',
+        '  echo Else',
+        '  echo   sh.Run """" ^& appFile ^& """", 1, False',
+        '  echo End If',
+        ') > "%LAUNCHER_CMD%"',
+        'echo [3/3] Creating Desktop and Start Menu shortcuts...',
+        'powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $dt = [Environment]::GetFolderPath(\'Desktop\'); $sm = [Environment]::GetFolderPath(\'Programs\'); foreach ($dir in @($dt, $sm)) { $s = $ws.CreateShortcut((Join-Path $dir \'Akash Tunnel Joint Tracer.lnk\')); $s.TargetPath = \'wscript.exe\'; $s.Arguments = \'\"%LOCALAPPDATA%\\AkashTunnelTracer\\Launch_Akash_Tunnel_Tracer.vbs\"\'; $s.WorkingDirectory = \'%LOCALAPPDATA%\\AkashTunnelTracer\'; $s.IconLocation = \'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe,0\'; $s.Description = \'Akash Tunnel Joint Tracer - Standalone Offline PC Software\'; $s.Save() }"',
+        'echo.',
+        'echo ============================================================================',
+        'echo   INSTALLATION COMPLETE! (100%% Local Offline PC Software)',
+        'echo   Installed to: %INSTALL_DIR%',
+        'echo   Shortcut created on Desktop: "Akash Tunnel Joint Tracer"',
+        'echo   Launching software now...',
+        'echo ============================================================================',
+        'wscript.exe "%LAUNCHER_CMD%"',
+        'exit /b 0',
+        '::===PAYLOAD_START===',
+        ...b64Lines,
+      ];
+
+      res.setHeader('Content-Type', 'application/x-bat; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="Install_Akash_Tunnel_Software_PC.bat"'
+      );
+      res.send(batLines.join('\r\n'));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to build offline installer';
+      res.status(500).send(msg);
     }
   });
 

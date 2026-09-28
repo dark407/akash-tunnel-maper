@@ -90,11 +90,22 @@ export function createDefaultPlaneSurfaceConfig(): PlaneSurfaceConfig {
 }
 
 export function loadSavedDesignGeometries(): SavedDesignGeometryRecord[] {
+  if (typeof window !== 'undefined' && window.akashDesktop?.isElectron) {
+    try {
+      const diskGeoms = window.akashDesktop.loadGeometriesFromDiskSync();
+      if (Array.isArray(diskGeoms) && diskGeoms.length > 0) {
+        return diskGeoms;
+      }
+    } catch {
+      // Fallback to localStorage
+    }
+  }
+
   try {
     const raw = localStorage.getItem(SAVED_GEOMETRIES_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
         return parsed;
       }
     }
@@ -102,28 +113,7 @@ export function loadSavedDesignGeometries(): SavedDesignGeometryRecord[] {
     // Ignore storage read errors
   }
 
-  // Provide default engineering design profiles if none saved yet
-  const defaults: SavedDesignGeometryRecord[] = [
-    {
-      id: 'geom-std-hrt-dshape',
-      name: 'HRT Standard D-Shaped (8.40m × 7.20m)',
-      tunnelName: 'HRT Adit-II Main Drive',
-      location: 'Package-II Head Race Tunnel',
-      chainage: 'RD 1423.50m',
-      savedAt: new Date().toISOString(),
-      geometry: createTunnelGeometry(8.4, 7.2, 4.2, 'd_shaped', 4.35, 'manual'),
-    },
-    {
-      id: 'geom-mat-horseshoe',
-      name: 'Main Access Tunnel Horseshoe (9.60m × 8.00m)',
-      tunnelName: 'Main Access Tunnel (MAT)',
-      location: 'Powerhouse Complex',
-      chainage: 'RD 0480.00m',
-      savedAt: new Date().toISOString(),
-      geometry: createTunnelGeometry(9.6, 8.0, 4.6, 'horseshoe', 4.8, 'manual'),
-    },
-  ];
-  return defaults;
+  return [];
 }
 
 export function saveDesignGeometryToLibrary(
@@ -140,6 +130,9 @@ export function saveDesignGeometryToLibrary(
     geometry: record.geometry,
   };
   const next = [newItem, ...existing.filter((g) => g.id !== newItem.id)].slice(0, 30);
+  if (typeof window !== 'undefined' && window.akashDesktop?.isElectron) {
+    window.akashDesktop.saveGeometriesToDisk(next).catch(() => {});
+  }
   try {
     localStorage.setItem(SAVED_GEOMETRIES_STORAGE_KEY, JSON.stringify(next));
   } catch {
@@ -150,6 +143,9 @@ export function saveDesignGeometryToLibrary(
 
 export function deleteSavedDesignGeometry(id: string): SavedDesignGeometryRecord[] {
   const next = loadSavedDesignGeometries().filter((g) => g.id !== id);
+  if (typeof window !== 'undefined' && window.akashDesktop?.isElectron) {
+    window.akashDesktop.saveGeometriesToDisk(next).catch(() => {});
+  }
   try {
     localStorage.setItem(SAVED_GEOMETRIES_STORAGE_KEY, JSON.stringify(next));
   } catch {
@@ -159,6 +155,17 @@ export function deleteSavedDesignGeometry(id: string): SavedDesignGeometryRecord
 }
 
 export function loadSavedProjectsFromMemory(): SavedProjectRecord[] {
+  if (typeof window !== 'undefined' && window.akashDesktop?.isElectron) {
+    try {
+      const diskProjects = window.akashDesktop.loadProjectsFromDiskSync();
+      if (Array.isArray(diskProjects) && diskProjects.length > 0) {
+        return diskProjects;
+      }
+    } catch {
+      // Fallback to localStorage
+    }
+  }
+
   try {
     const raw = localStorage.getItem(PROJECT_MEMORY_STORAGE_KEY);
     if (raw) {
@@ -199,13 +206,24 @@ export function saveProjectRecordToMemory(
       .toLowerCase()}|${(r.date || '').trim()}`;
 
   const targetKey = normKey(record);
+  const replacedIds: string[] = [];
   const filtered = existing.filter((item) => {
     if (item.id === record.id) return false;
-    if (overwriteMatchingKey && normKey(item) === targetKey) return false;
+    if (overwriteMatchingKey && normKey(item) === targetKey) {
+      replacedIds.push(item.id);
+      return false;
+    }
     return true;
   });
 
-  const next = [record, ...filtered].slice(0, 25);
+  const next = [record, ...filtered].slice(0, 50);
+
+  if (typeof window !== 'undefined' && window.akashDesktop?.isElectron) {
+    for (const oldId of replacedIds) {
+      window.akashDesktop.deleteProjectFromDisk(oldId).catch(() => {});
+    }
+    window.akashDesktop.saveProjectToDisk(record).catch(() => {});
+  }
 
   try {
     localStorage.setItem(PROJECT_MEMORY_STORAGE_KEY, JSON.stringify(next));
@@ -227,7 +245,7 @@ export function saveProjectRecordToMemory(
       });
       localStorage.setItem(PROJECT_MEMORY_STORAGE_KEY, JSON.stringify(compactNext));
       return {
-        records: compactNext,
+        records: next,
         savedRecord: record,
       };
     } catch {
@@ -235,7 +253,9 @@ export function saveProjectRecordToMemory(
         records: next,
         savedRecord: record,
         storageWarning:
-          'Saved in active session memory (use Export .akash.json for large high-res photo archives).',
+          typeof window !== 'undefined' && window.akashDesktop?.isElectron
+            ? undefined
+            : 'Saved in active session memory (use Export .akash.json for large high-res photo archives).',
       };
     }
   }
@@ -243,6 +263,9 @@ export function saveProjectRecordToMemory(
 
 export function deleteProjectRecordFromMemory(id: string): SavedProjectRecord[] {
   const next = loadSavedProjectsFromMemory().filter((r) => r.id !== id);
+  if (typeof window !== 'undefined' && window.akashDesktop?.isElectron) {
+    window.akashDesktop.deleteProjectFromDisk(id).catch(() => {});
+  }
   try {
     localStorage.setItem(PROJECT_MEMORY_STORAGE_KEY, JSON.stringify(next));
   } catch {

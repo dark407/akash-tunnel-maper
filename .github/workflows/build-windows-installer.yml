@@ -1,0 +1,40 @@
+name: Build Windows Desktop Installer (.EXE)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    name: Build AKASH-TUNNEL-MAPPER-Setup.exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Generate Windows Icon
+        run: node scripts/generate-win-icon.mjs
+
+      - name: Build Frontend & Package Windows Installer (.EXE)
+        run: npm run dist
+        env:
+          CI: false
+
+      - name: Upload AKASH-TUNNEL-MAPPER-Setup.exe Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AKASH-TUNNEL-MAPPER-Windows-Installer
+          path: release/AKASH-TUNNEL-MAPPER-Setup.exe
+          if-no-files-found: error

@@ -1,14 +1,20 @@
 {
-  "name": "react-example",
+  "name": "akash-tunnel-mapper",
+  "productName": "AKASH TUNNEL MAPPER",
+  "description": "Underground Geological & Geotechnical Tunnel Mapping Desktop Engineering Suite",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "main": "electron/main.js",
+  "author": "AKASH TUNNEL MAPPER Engineering",
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node --import tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "electron": "vite build && electron .",
+    "dist": "vite build && electron-builder --config electron-builder.json --win nsis",
+    "clean": "rm -rf dist release server.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -29,6 +35,8 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",

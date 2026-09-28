@@ -65,7 +65,7 @@ import {
 import { generateSampleTunnelPhotograph } from './engine/sampleFieldData';
 import { MappingWorkspace } from './components/MappingWorkspace';
 import { EngineeringSheetModal } from './components/EngineeringSheetModal';
-import { ThemeToggleButton } from './context/ThemeContext';
+import { ThemeToggleButton, useTheme } from './context/ThemeContext';
 import {
   ArrowLeft,
   ArrowRight,
@@ -86,6 +86,8 @@ type ScreenStep = 'start' | 'geometry_manual' | 'geometry_cad' | 'drive_and_phot
 const OFFLINE_DRAFT_STORAGE_KEY = 'akash_tunnel_mapper_field_draft_v1';
 
 export default function App() {
+  const { theme } = useTheme();
+  const isLight = theme === 'light';
   const [screen, setScreen] = useState<ScreenStep>('start');
   const [hasSavedDraft, setHasSavedDraft] = useState<boolean>(false);
 
@@ -105,18 +107,18 @@ export default function App() {
   const [cadStatus, setCadStatus] = useState<string>('');
   const cadInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Tunnel Drive Direction & Header Settings State
+  // Tunnel Drive Direction & Header Settings State (Fresh Software Defaults)
   const [settings, setSettings] = useState<TunnelSettings>({
-    tunnelName: 'HRT Adit-II Main Drive',
-    locationName: 'Head Race Tunnel Package-II (Underground Powerhouse)',
-    driveDirectionInput: 'N 070°',
-    driveDirection: 70,
-    chainage: 'RD 1420.00m - 1423.50m',
-    faceChainage: 'RD 1423.50m',
+    tunnelName: 'Tunnel Section 01',
+    locationName: '',
+    driveDirectionInput: 'N 000°',
+    driveDirection: 0,
+    chainage: 'RD 0.00m - 3.50m',
+    faceChainage: 'RD 3.50m',
     roundLength: 3.5,
     date: new Date().toISOString().slice(0, 10),
-    mappedBy: 'Engineering Geologist',
-    lithology: 'Quartzitic Phyllite with Foliation & Shear Seam',
+    mappedBy: '',
+    lithology: '',
   });
 
   // 4 Tunnel Surface Photographs (Each supports 1 MAIN PHOTO + 0–5 SUPPORTING PHOTOS)
@@ -178,25 +180,26 @@ export default function App() {
     createDefaultQIndexParameters()
   );
   const [rockMassSummary, setRockMassSummary] = useState<RockMassSummaryTable>(() =>
-    createDefaultRockMassSummary('Quartzitic Phyllite with Foliation & Shear Seam')
+    createDefaultRockMassSummary('Unmapped Rock Mass')
   );
   // User-selected Lithology Regions (Sections 11, 12, 13, 14: Never automatically divide tunnel into many regions)
   const [lithologyRegions, setLithologyRegions] = useState<LithologyRegion[]>([]);
-  // Survey Control Points (Sections 5, 6, 7, 8) & Connected Survey Profile (Overbreak/Undercut)
-  const initialSampleSurvey = useMemo(
-    () =>
-      generateRealisticSampleSurveyedProfile(
-        createTunnelGeometry(8.4, 7.2, 4.2, 'd_shaped', 4.35, 'manual'),
-        'face'
-      ),
-    []
-  );
-  const [controlPoints, setControlPoints] = useState<SurveyControlPoint[]>(
-    () => initialSampleSurvey.controlPoints
-  );
-  const [surveyProfile, setSurveyProfile] = useState<ConnectedSurveyProfile>(
-    () => initialSampleSurvey.profile
-  );
+  // Survey Control Points (Sections 5, 6, 7, 8) & Connected Survey Profile (Overbreak/Undercut) — Starts empty on fresh install
+  const [controlPoints, setControlPoints] = useState<SurveyControlPoint[]>([]);
+  const [surveyProfile, setSurveyProfile] = useState<ConnectedSurveyProfile>(() => ({
+    surface: 'face',
+    orderedControlPointIds: [],
+    isClosed: true,
+    visible: true,
+    locked: false,
+    pullIntervalMeters: 3.5,
+    useValidPullInterval: true,
+    overallOverbreakCategory: 'GEOLOGICAL',
+    overallOverbreakReason: '',
+    overallUndercutCategory: 'MECHANICAL_EXCAVATION',
+    overallUndercutReason: '',
+    zoneReasonOverrides: {},
+  }));
   // Placed Structural Geological Symbols (Sections 9, 10, 15)
   const [placedSymbols, setPlacedSymbols] = useState<PlacedGeologicalSymbol[]>([]);
 
@@ -216,32 +219,12 @@ export default function App() {
   const [sessionMemory, setSessionMemory] = useState<SessionLearningMemory>({
     rejectedAngleRanges: [],
     confirmedOrientations: [],
-    trainingSamplesTotal: 148,
-    verifiedExamplesCount: 42,
-    correctionsLearnedCount: 19,
+    trainingSamplesTotal: 0,
+    verifiedExamplesCount: 0,
+    correctionsLearnedCount: 0,
     lastUpdatedDate: new Date().toISOString().slice(0, 10),
-    currentModelVersion: 'AKASH AI Model 1.3',
-    modelHistory: [
-      {
-        version: 'AKASH AI Model 1.3',
-        updatedAt: new Date().toISOString().slice(0, 10),
-        trainingDataCount: 148,
-        verifiedExamplesCount: 42,
-        correctionsLearnedCount: 19,
-        validationScorePct: 95.4,
-        majorChanges:
-          'Multi-photo corroboration (Main + 0–5 Supporting Photos) & curved rock fracture ridge refinement',
-      },
-      {
-        version: 'AKASH AI Model 1.2',
-        updatedAt: '2026-09-25',
-        trainingDataCount: 112,
-        verifiedExamplesCount: 28,
-        correctionsLearnedCount: 11,
-        validationScorePct: 92.8,
-        majorChanges: '3D stereo ray triangulation & non-geological cable/bolt rejection',
-      },
-    ],
+    currentModelVersion: 'AKASH AI Engine 2.0',
+    modelHistory: [],
     verifiedRecords: [],
   });
 
@@ -1352,14 +1335,18 @@ export default function App() {
             </div>
 
             {/* Live Vector Cross-Section Preview */}
-            <div className="flex flex-col items-center justify-center bg-[#090C12] border border-slate-800 rounded p-3">
+            <div
+              className={`flex flex-col items-center justify-center border border-slate-800 rounded p-3 ${
+                isLight ? 'bg-slate-50' : 'bg-[#090C12]'
+              }`}
+            >
               <svg viewBox="0 0 320 270" className="w-full h-56">
                 <line
                   x1="160"
                   y1="15"
                   x2="160"
                   y2="245"
-                  stroke="#334155"
+                  stroke={isLight ? '#94A3B8' : '#334155'}
                   strokeWidth="1"
                   strokeDasharray="4,4"
                 />
@@ -1368,14 +1355,14 @@ export default function App() {
                   y1={240 - previewGeom.wallHeight * scale}
                   x2="280"
                   y2={240 - previewGeom.wallHeight * scale}
-                  stroke="#334155"
+                  stroke={isLight ? '#94A3B8' : '#334155'}
                   strokeWidth="1"
                   strokeDasharray="4,4"
                 />
                 <path
                   d={polyPath}
-                  fill="rgba(56, 189, 248, 0.08)"
-                  stroke="#38BDF8"
+                  fill={isLight ? 'rgba(2, 132, 199, 0.10)' : 'rgba(56, 189, 248, 0.08)'}
+                  stroke={isLight ? '#0284C7' : '#38BDF8'}
                   strokeWidth="2.2"
                 />
                 <text
@@ -1383,7 +1370,7 @@ export default function App() {
                   y="262"
                   textAnchor="middle"
                   fontSize="11"
-                  fill="#94A3B8"
+                  fill={isLight ? '#334155' : '#94A3B8'}
                   fontFamily="IBM Plex Mono, monospace"
                 >
                   W = {previewGeom.width.toFixed(2)}m · H = {previewGeom.height.toFixed(2)}m · Wall ={' '}
@@ -1440,13 +1427,6 @@ export default function App() {
               UPLOAD MASTER TUNNEL DWG / DXF
             </h2>
             <div className="flex items-center gap-2">
-              <button
-                onClick={handleDownloadSampleDXF}
-                className="flex items-center gap-1 text-xs font-mono text-cyan-400 hover:text-cyan-300"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Sample .DXF
-              </button>
               <ThemeToggleButton compact />
             </div>
           </div>
@@ -1482,12 +1462,16 @@ export default function App() {
             </div>
           )}
 
-          <div className="flex flex-col items-center justify-center bg-[#090C12] border border-slate-800 rounded p-3">
+          <div
+            className={`flex flex-col items-center justify-center border border-slate-800 rounded p-3 ${
+              isLight ? 'bg-slate-50' : 'bg-[#090C12]'
+            }`}
+          >
             <svg viewBox="0 0 320 265" className="w-full h-48">
               <path
                 d={polyPath}
-                fill="rgba(56, 189, 248, 0.08)"
-                stroke="#38BDF8"
+                fill={isLight ? 'rgba(2, 132, 199, 0.10)' : 'rgba(56, 189, 248, 0.08)'}
+                stroke={isLight ? '#0284C7' : '#38BDF8'}
                 strokeWidth="2.2"
               />
               <text
@@ -1495,7 +1479,7 @@ export default function App() {
                 y="258"
                 textAnchor="middle"
                 fontSize="11"
-                fill="#94A3B8"
+                fill={isLight ? '#334155' : '#94A3B8'}
                 fontFamily="IBM Plex Mono, monospace"
               >
                 MASTER PROFILE: {geometry.width.toFixed(2)}m W × {geometry.height.toFixed(2)}m H
@@ -1649,13 +1633,6 @@ export default function App() {
               <span className="text-xs font-mono font-semibold text-slate-200">
                 UPLOAD AVAILABLE TUNNEL SURFACE PHOTOGRAPHS (OPTIONAL COMBINATIONS SUPPORTED)
               </span>
-              <button
-                onClick={handleLoadAllSamplePhotos}
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono text-cyan-300 hover:text-cyan-200 bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-700/60 rounded"
-              >
-                <Wand2 className="w-3.5 h-3.5" />
-                Load Sample Field Photos
-              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

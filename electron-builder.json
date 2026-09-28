@@ -1,0 +1,43 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.akash.tunnelmapper",
+  "productName": "AKASH TUNNEL MAPPER",
+  "copyright": "Copyright © 2026 AKASH TUNNEL MAPPER Engineering Suite",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "build/icon.ico",
+    "package.json"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "icon": "build/icon.ico",
+    "artifactName": "AKASH-TUNNEL-MAPPER-Setup.exe",
+    "executableName": "AKASH TUNNEL MAPPER"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": true,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "AKASH TUNNEL MAPPER",
+    "uninstallDisplayName": "AKASH TUNNEL MAPPER",
+    "deleteAppDataOnUninstall": false,
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico",
+    "installerHeaderIcon": "build/icon.ico"
+  }
+}

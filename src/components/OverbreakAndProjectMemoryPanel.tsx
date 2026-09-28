@@ -307,10 +307,10 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
             disabled={surveyProfile.locked}
             onClick={onGenerateSampleAsBuiltProfile}
             className="flex items-center justify-center gap-1 px-2 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold rounded text-[11px]"
-            title="Generate 14 Survey Control Points (CP1→CP14) connected around the tunnel profile with realistic Overbreak & Undercut"
+            title="Place Survey Control Points around the tunnel perimeter for as-built profile adjustment"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            Load Sample As-Built
+            Auto-Place Perimeter Pts
           </button>
           <button
             type="button"
