@@ -17,7 +17,8 @@ if %ERRORLEVEL% NEQ 0 (
   exit /b 1
 )
 
-echo [Step 1/4] Preparing packages (please wait 1-2 minutes)...
+echo [Step 1/4] Normalizing public npm package versions and installing packages...
+node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));pkg.dependencies={'@google/genai':'^1.0.0','@tailwindcss/vite':'^4.0.9','@vitejs/plugin-react':'^4.3.4','lucide-react':'^0.475.0','react':'^19.0.0','react-dom':'^19.0.0','vite':'^6.2.0','express':'^4.21.2','dotenv':'^16.4.7','motion':'^12.4.7'};pkg.devDependencies={'@types/express':'^4.17.21','@types/node':'^22.13.5','@types/react':'^19.0.10','@types/react-dom':'^19.0.4','autoprefixer':'^10.4.20','electron':'^34.2.0','electron-builder':'^25.1.8','esbuild':'^0.25.0','tailwindcss':'^4.0.9','tsx':'^4.19.2','typescript':'^5.7.3'};fs.writeFileSync('package.json',JSON.stringify(pkg,null,2));if(fs.existsSync('package-lock.json'))fs.unlinkSync('package-lock.json');"
 call npm install --legacy-peer-deps
 if %ERRORLEVEL% NEQ 0 (
   echo [ERROR] Package installation failed. Check your internet connection.
@@ -26,7 +27,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [Step 2/4] Generating Windows Application Icon (.ico)...
+echo [Step 2/4] Generating 256x256 Windows Application Icon (.ico)...
 call node scripts/generate-win-icon.mjs
 
 echo.

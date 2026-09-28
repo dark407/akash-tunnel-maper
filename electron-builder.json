@@ -3,6 +3,7 @@
   "appId": "com.akash.tunnelmapper",
   "productName": "AKASH TUNNEL MAPPER",
   "copyright": "Copyright © 2026 AKASH TUNNEL MAPPER Engineering Suite",
+  "npmRebuild": false,
   "directories": {
     "output": "release",
     "buildResources": "build"
@@ -11,7 +12,8 @@
     "dist/**/*",
     "electron/**/*",
     "build/icon.ico",
-    "package.json"
+    "package.json",
+    "!node_modules/**/*"
   ],
   "win": {
     "target": [

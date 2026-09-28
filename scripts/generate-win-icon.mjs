@@ -2,12 +2,12 @@ import fs from 'fs';
 import path from 'path';
 
 /**
- * Generates a valid multi-entry Windows .ico file (256x256 32-bit BGRA BMP DIB inside ICO container)
- * for AKASH TUNNEL MAPPER (used by Electron BrowserWindow, NSIS Installer, Desktop Shortcut & Start Menu).
+ * Generates a standard 256x256 32-bit BGRA Windows .ico file
+ * (electron-builder requires Windows NSIS icons to be at least 256x256 pixels).
  */
 function createAkashTunnelMapperIcoBuffer() {
-  const width = 64;
-  const height = 64;
+  const width = 256;
+  const height = 256;
   const pixelBytes = width * height * 4;
   const maskRowBytes = Math.ceil(width / 32) * 4;
   const maskBytes = maskRowBytes * height;
@@ -22,9 +22,9 @@ function createAkashTunnelMapperIcoBuffer() {
   icoBuffer.writeUInt16LE(1, 2); // Type: 1 = ICO
   icoBuffer.writeUInt16LE(1, 4); // Count: 1 image
 
-  // ICONDIRENTRY
-  icoBuffer.writeUInt8(width, 6);
-  icoBuffer.writeUInt8(height, 7);
+  // ICONDIRENTRY (0 means 256px in Windows ICO specification)
+  icoBuffer.writeUInt8(0, 6); // Width: 256
+  icoBuffer.writeUInt8(0, 7); // Height: 256
   icoBuffer.writeUInt8(0, 8); // Palette count
   icoBuffer.writeUInt8(0, 9); // Reserved
   icoBuffer.writeUInt16LE(1, 10); // Color planes
@@ -42,23 +42,22 @@ function createAkashTunnelMapperIcoBuffer() {
   icoBuffer.writeUInt32LE(0, dibOffset + 16); // Compression (BI_RGB)
   icoBuffer.writeUInt32LE(pixelBytes + maskBytes, dibOffset + 20);
 
-  // Draw 64x64 Engineering Tunnel Arch + Joint Trace Icon (bottom-up rows for BMP)
+  // Draw 256x256 Engineering Tunnel Arch + Joint Trace Icon (bottom-up rows for BMP)
   const pixelOffset = dibOffset + dibHeaderSize;
   const cx = width / 2;
 
   for (let y = 0; y < height; y++) {
-    // Flip y so y=0 is top in logical coordinates, written to bottom-up BMP row (height - 1 - y)
     const bmpRow = height - 1 - y;
+    const ny = y / 4; // Normalized to 64x64 coordinate space
     for (let x = 0; x < width; x++) {
+      const nx = x / 4;
       const idx = pixelOffset + (bmpRow * width + x) * 4;
 
-      // Rounded dark slate background (#0B0E14) with cyan border
-      const dx = x - cx;
-      const dy = y - height / 2;
+      const dx = nx - 32;
+      const dy = ny - 32;
       const maxDist = Math.max(Math.abs(dx), Math.abs(dy));
 
       if (maxDist > 30) {
-        // Transparent outside rounded square
         icoBuffer[idx + 0] = 0;
         icoBuffer[idx + 1] = 0;
         icoBuffer[idx + 2] = 0;
@@ -66,24 +65,21 @@ function createAkashTunnelMapperIcoBuffer() {
         continue;
       }
 
-      // Base dark navy fill (B=20, G=14, R=11, A=255)
       let r = 11;
       let g = 18;
       let b = 30;
       const a = 255;
 
-      // Outer border
       if (maxDist >= 28) {
         r = 14;
         g = 165;
         b = 233;
       }
 
-      // D-Shaped Tunnel Arch Outline (Cyan #38BDF8)
-      const inWallSpan = Math.abs(x - cx) >= 17 && Math.abs(x - cx) <= 19 && y >= 28 && y <= 50;
-      const inInvert = Math.abs(x - cx) <= 19 && y >= 49 && y <= 51;
-      const archDist = Math.hypot(x - cx, y - 28);
-      const inCrownArch = y <= 28 && archDist >= 17 && archDist <= 19.2;
+      const inWallSpan = Math.abs(nx - 32) >= 17 && Math.abs(nx - 32) <= 19 && ny >= 28 && ny <= 50;
+      const inInvert = Math.abs(nx - 32) <= 19 && ny >= 49 && ny <= 51;
+      const archDist = Math.hypot(nx - 32, ny - 28);
+      const inCrownArch = ny <= 28 && archDist >= 17 && archDist <= 19.2;
 
       if (inWallSpan || inInvert || inCrownArch) {
         r = 56;
@@ -91,17 +87,15 @@ function createAkashTunnelMapperIcoBuffer() {
         b = 248;
       }
 
-      // Geological Joint Trace inside tunnel (Amber/Gold #F59E0B)
-      const jointY = Math.round(24 + (x - 16) * 0.55 + Math.sin((x - 16) * 0.25) * 2.0);
-      if (x >= 16 && x <= 47 && Math.abs(y - jointY) <= 1.2) {
+      const jointY = 24 + (nx - 16) * 0.55 + Math.sin((nx - 16) * 0.25) * 2.0;
+      if (nx >= 16 && nx <= 47 && Math.abs(ny - jointY) <= 1.2) {
         r = 245;
         g = 158;
         b = 11;
       }
 
-      // Conjugate Joint Trace (Emerald #10B981)
-      const conjY = Math.round(44 - (x - 18) * 0.48);
-      if (x >= 20 && x <= 45 && Math.abs(y - conjY) <= 1.1) {
+      const conjY = 44 - (nx - 18) * 0.48;
+      if (nx >= 20 && nx <= 45 && Math.abs(ny - conjY) <= 1.1) {
         r = 16;
         g = 185;
         b = 129;
@@ -125,4 +119,4 @@ if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
 const icoBuf = createAkashTunnelMapperIcoBuffer();
 fs.writeFileSync(path.join(buildDir, 'icon.ico'), icoBuf);
 fs.writeFileSync(path.join(publicDir, 'icon.ico'), icoBuf);
-console.log('Generated build/icon.ico and public/icon.ico (' + icoBuf.length + ' bytes)');
+console.log('Generated 256x256 build/icon.ico and public/icon.ico (' + icoBuf.length + ' bytes)');
