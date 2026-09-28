@@ -1522,17 +1522,6 @@ export default function App() {
 
           <div className="w-full flex flex-col gap-2.5">
             <button
-              onClick={() => setScreen('geometry_manual')}
-              className={`w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-mono font-semibold border rounded-lg transition-colors cursor-pointer ${
-                isLight
-                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-900 border-slate-300 hover:border-cyan-600'
-                  : 'bg-[#131924] hover:bg-[#1A2232] text-slate-100 border-slate-700 hover:border-cyan-500/60'
-              }`}
-            >
-              [ Create Tunnel Shape ]
-            </button>
-
-            <button
               onClick={() => {
                 setCustomEditorInitialTab('freeform_canvas');
                 setReturnScreenFromCustomEditor('start');
@@ -1541,10 +1530,10 @@ export default function App() {
               className={`w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-mono font-semibold border rounded-lg transition-colors cursor-pointer ${
                 isLight
                   ? 'bg-sky-50 hover:bg-sky-100 text-sky-950 border-sky-400'
-                  : 'bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-200 border-cyan-600/70'
+                  : 'bg-[#131924] hover:bg-[#1A2232] text-cyan-200 border-cyan-600/70'
               }`}
             >
-              [ Freeform Custom Profile / Cavern Editor ]
+              [ Create Tunnel Shape ]
             </button>
 
             <button
