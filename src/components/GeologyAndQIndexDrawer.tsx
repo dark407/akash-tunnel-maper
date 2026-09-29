@@ -3,6 +3,7 @@ import {
   GsiParameters,
   Joint,
   JointSet,
+  OutputSheetMode,
   ParameterInputStatus,
   QIndexParameters,
   QSystemParamKey,
@@ -11,11 +12,19 @@ import {
   RmrParameters,
   RockMassClassificationMethodId,
   RockMassSummaryTable,
+  SavedProjectRecord,
   SurfaceType,
   TunnelGeometry,
   TunnelSettings,
 } from '../types/tunnel';
 import { exportGeologyAndQIndexToCSV } from '../engine/photoWarpEngine';
+import {
+  buildLongitudinalChainageLog,
+  computeEmpiricalSupportRecommendation,
+  exportMappedGeologicalSheetToDXF,
+  LongitudinalStationLogRow,
+  triggerDownloadDXFSheet,
+} from '../engine/kinematicsSupportAndDxfEngine';
 import {
   calculateBieniawskiRmr,
   calculateHoekGsi,
@@ -54,6 +63,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
+import { ThemeToggleButton, useTheme } from '../context/ThemeContext';
 
 interface GeologyAndQIndexDrawerProps {
   activeTab: 'geology_tables' | 'q_index';
@@ -79,7 +89,9 @@ interface GeologyAndQIndexDrawerProps {
   onUpdateGsiParams: (next: GsiParameters) => void;
   rockMassSummary: RockMassSummaryTable;
   onUpdateRockMassSummary: (next: RockMassSummaryTable) => void;
-  onOpenExportSheet: () => void;
+  onOpenExportSheet: (mode?: OutputSheetMode) => void;
+  onOpenKinematics?: () => void;
+  savedProjects?: SavedProjectRecord[];
 }
 
 const JN_OPTIONS = [
@@ -162,9 +174,19 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   rockMassSummary,
   onUpdateRockMassSummary,
   onOpenExportSheet,
+  onOpenKinematics,
+  savedProjects = [],
 }) => {
   const [mergeSourceSet, setMergeSourceSet] = useState<string>('J2');
   const [mergeTargetSet, setMergeTargetSet] = useState<string>('J1');
+  const [classificationSubView, setClassificationSubView] = useState<
+    'parameters' | 'support_chart' | 'chainage_log'
+  >('parameters');
+  const [demoAlignmentStations, setDemoAlignmentStations] = useState<LongitudinalStationLogRow[] | null>(
+    null
+  );
+  const { theme } = useTheme();
+  const isLight = theme === 'light';
 
   const qResult = evaluateQSystemWithValidation(qIndexParams, geometry.width, qParamStatus);
   const rmrResult = calculateBieniawskiRmr(rmrParams);
@@ -1826,27 +1848,72 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => onChangeTab('geology_tables')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold transition-colors ${
+            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold transition-colors cursor-pointer ${
               activeTab === 'geology_tables'
                 ? 'bg-cyan-600 text-white'
                 : 'bg-slate-800/80 text-slate-300 hover:text-white'
             }`}
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
-            1. GEOLOGICAL &amp; DISCONTINUITY TABLES ({jointSets.length} Sets · {joints.length}{' '}
-            Traces)
+            1. GEOLOGICAL MAPPING TABLES ({jointSets.length} Sets · {joints.length} Traces)
           </button>
 
+          {onOpenKinematics && (
+            <button
+              type="button"
+              onClick={onOpenKinematics}
+              className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold bg-amber-950/70 hover:bg-amber-900/80 text-amber-200 border border-amber-600/50 transition-colors cursor-pointer"
+              title="Open Step 2: Kinematics (Stereonet, Planar/Wedge/Toppling & 3D Wedge Stability)"
+            >
+              2. KINEMATICS (STEREONET &amp; WEDGES)
+            </button>
+          )}
+
           <button
-            onClick={() => onChangeTab('q_index')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold transition-colors ${
-              activeTab === 'q_index'
+            onClick={() => {
+              onChangeTab('q_index');
+              setClassificationSubView('parameters');
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold transition-colors cursor-pointer ${
+              activeTab === 'q_index' && classificationSubView === 'parameters'
                 ? 'bg-indigo-600 text-white'
                 : 'bg-slate-800/80 text-slate-300 hover:text-white'
             }`}
           >
             <Calculator className="w-3.5 h-3.5" />
-            2. ROCK MASS CLASSIFICATION ({getMethodSummaryBadge()})
+            3. ROCK MASS CLASSIFICATION ({getMethodSummaryBadge()})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              onChangeTab('q_index');
+              setClassificationSubView('support_chart');
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-semibold transition-colors cursor-pointer ${
+              activeTab === 'q_index' && classificationSubView === 'support_chart'
+                ? 'bg-emerald-600 text-white'
+                : 'bg-slate-800/80 text-emerald-300 hover:text-white border border-emerald-700/50'
+            }`}
+            title="Empirical Support Recommendation Chart (Barton Q & RMR89: Bolt Spacing, Bolt Length & Shotcrete Thickness)"
+          >
+            Support Chart (Q &amp; RMR89)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              onChangeTab('q_index');
+              setClassificationSubView('chainage_log');
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-semibold transition-colors cursor-pointer ${
+              activeTab === 'q_index' && classificationSubView === 'chainage_log'
+                ? 'bg-cyan-600 text-white'
+                : 'bg-slate-800/80 text-cyan-300 hover:text-white border border-cyan-700/50'
+            }`}
+            title="Chainage Log Strip (Longitudinal Summary comparing RMR, Q, RQD & Support Class across stations)"
+          >
+            Chainage Log Strip
           </button>
 
           {/* Method Selection Switcher (Always accessible, never deletes geological mapping) */}
@@ -1883,7 +1950,7 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
 
           <button
             onClick={handleDownloadCSV}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded transition-colors"
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded transition-colors cursor-pointer"
             title="Export Discontinuity Sets, Individual Traces, and Selected Rock Mass Classification to CSV"
           >
             <Download className="w-3.5 h-3.5" />
@@ -1891,12 +1958,39 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
           </button>
 
           <button
-            onClick={onOpenExportSheet}
-            className="flex items-center gap-1 px-3 py-1 text-xs font-mono font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded transition-colors"
+            type="button"
+            onClick={() => {
+              const dxfStr = exportMappedGeologicalSheetToDXF({
+                geometry,
+                settings,
+                joints,
+                jointSets,
+                selectedMethod,
+                qIndexParams,
+                rmrParams,
+                gsiParams,
+                qValue: qResult.isComplete ? qResult.qValue : null,
+                rmrValue: rmrResult.finalRmr,
+              });
+              const safeCh = (settings.faceChainage || 'Station').replace(/[^a-zA-Z0-9_-]/g, '_');
+              triggerDownloadDXFSheet(`Mapped_Geological_Sheet_${safeCh}.dxf`, dxfStr);
+            }}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-mono font-semibold bg-amber-600 hover:bg-amber-500 text-white rounded transition-colors cursor-pointer"
+            title="One-Click DXF Export of Custom Tunnel Profile + Mapped Joint Traces + Station Classification for AutoCAD / Civil 3D"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export .DXF (AutoCAD)
+          </button>
+
+          <button
+            onClick={() => onOpenExportSheet('FINAL_ENGINEERING_SHEET')}
+            className="flex items-center gap-1 px-3 py-1 text-xs font-mono font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded transition-colors cursor-pointer"
           >
             <CheckCircle2 className="w-3.5 h-3.5" />
-            Final Review &amp; Mapping Sheet
+            4. Engineering Output →
           </button>
+
+          <ThemeToggleButton compact />
 
           <button
             onClick={onClose}
@@ -2300,30 +2394,616 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
              side-by-side when BOTH_RMR_AND_Q is selected without mixing them).
              ==================================================================== */
           <div className="space-y-4">
-            {selectedMethod === 'RMR' && renderRmrSection(false)}
-            {selectedMethod === 'Q_SYSTEM' && renderQSystemSection(false)}
-            {selectedMethod === 'GSI' && renderGsiSection()}
-            {selectedMethod === 'BOTH_RMR_AND_Q' && (
-              <div className="space-y-4">
-                <div className="p-2 bg-slate-900/90 border border-indigo-500/40 rounded flex items-center justify-between text-[11px]">
-                  <span className="font-bold text-indigo-300">
-                    DUAL STATION CLASSIFICATION ({settings.faceChainage}) — RMR AND Q-SYSTEM STORED
-                    SEPARATELY WITHOUT MIXING PARAMETERS
-                  </span>
-                  <span className="text-slate-400">
-                    RMR:{' '}
-                    <strong className="text-white">
-                      {rmrResult.finalRmr !== null ? rmrResult.finalRmr : 'Incomplete'}
-                    </strong>{' '}
-                    | Q:{' '}
-                    <strong className="text-cyan-300">
-                      {qResult.isComplete ? qResult.qValue.toFixed(2) : 'Incomplete'}
-                    </strong>
-                  </span>
-                </div>
-                {renderRmrSection(true)}
-                <div className="border-t border-slate-800 pt-3">{renderQSystemSection(true)}</div>
-              </div>
+            {classificationSubView === 'support_chart' ? (
+              (() => {
+                const sup = computeEmpiricalSupportRecommendation(
+                  geometry,
+                  qIndexParams,
+                  rmrParams,
+                  qResult.isComplete,
+                  qResult.isComplete ? qResult.qValue : null,
+                  rmrResult.finalRmr
+                );
+
+                // Map Q (0.001 .. 1000) to X (65 .. 515) on log10 scale
+                // Map De (1.5 .. 40) to Y (215 .. 25) on log10 scale
+                const qClamp = Math.max(0.001, Math.min(1000, sup.qValue ?? 4.0));
+                const logQ = Math.log10(qClamp); // -3 .. +3
+                const pxX = 65 + ((logQ + 3) / 6) * 450;
+
+                const deClamp = Math.max(1.5, Math.min(40, sup.equivalentDimensionDe));
+                const logDe = Math.log10(deClamp);
+                const minLogDe = Math.log10(1.5);
+                const maxLogDe = Math.log10(40);
+                const pxY = 215 - ((logDe - minLogDe) / (maxLogDe - minLogDe)) * 190;
+
+                return (
+                  <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+                    {/* Left: Interactive Grimstad & Barton (1993) Q-Support Chart SVG */}
+                    <div className="xl:col-span-6 bg-slate-950 border border-slate-800 rounded p-3 flex flex-col">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-bold text-emerald-300 text-[11px]">
+                          EMPIRICAL SUPPORT CHART — GRIMSTAD &amp; BARTON (1993) Q vs. De (Span/ESR)
+                        </span>
+                        <span className="text-[10px] text-cyan-300">
+                          De = {sup.spanMeters.toFixed(2)}m / {sup.esr.toFixed(2)} ={' '}
+                          <strong>{sup.equivalentDimensionDe}m</strong>
+                        </span>
+                      </div>
+
+                      <svg
+                        viewBox="0 0 545 250"
+                        className={`w-full h-[225px] rounded border ${
+                          isLight ? 'bg-slate-50 border-slate-300' : 'bg-[#070B12] border-slate-800'
+                        }`}
+                      >
+                        {/* Support Category Background Zones (Log Q from -3 to +3) */}
+                        <rect x="65" y="25" width="75" height="190" fill="rgba(225, 29, 72, 0.14)" />
+                        <rect x="140" y="25" width="75" height="190" fill="rgba(249, 115, 22, 0.13)" />
+                        <rect x="215" y="25" width="75" height="190" fill="rgba(245, 158, 11, 0.12)" />
+                        <rect x="290" y="25" width="75" height="190" fill="rgba(56, 189, 248, 0.12)" />
+                        <rect x="365" y="25" width="75" height="190" fill="rgba(16, 185, 129, 0.12)" />
+                        <rect x="440" y="25" width="75" height="190" fill="rgba(34, 197, 94, 0.10)" />
+
+                        {/* Grid Lines for Log10(Q) */}
+                        {[
+                          { q: 0.001, lbl: '0.001' },
+                          { q: 0.01, lbl: '0.01' },
+                          { q: 0.1, lbl: '0.1' },
+                          { q: 1, lbl: '1' },
+                          { q: 4, lbl: '4' },
+                          { q: 10, lbl: '10' },
+                          { q: 40, lbl: '40' },
+                          { q: 100, lbl: '100' },
+                          { q: 1000, lbl: '1000' },
+                        ].map((tick) => {
+                          const x = 65 + ((Math.log10(tick.q) + 3) / 6) * 450;
+                          return (
+                            <g key={tick.lbl}>
+                              <line
+                                x1={x}
+                                y1="25"
+                                x2={x}
+                                y2="215"
+                                stroke={isLight ? '#CBD5E1' : '#1E293B'}
+                                strokeWidth="1"
+                                strokeDasharray="3,3"
+                              />
+                              <text
+                                x={x}
+                                y="230"
+                                textAnchor="middle"
+                                fontSize="9"
+                                fill={isLight ? '#475569' : '#94A3B8'}
+                              >
+                                {tick.lbl}
+                              </text>
+                            </g>
+                          );
+                        })}
+
+                        {/* Grid Lines for De = Span / ESR */}
+                        {[2, 5, 10, 20, 35].map((deVal) => {
+                          const y =
+                            215 -
+                            ((Math.log10(deVal) - minLogDe) / (maxLogDe - minLogDe)) * 190;
+                          return (
+                            <g key={deVal}>
+                              <line
+                                x1="65"
+                                y1={y}
+                                x2="515"
+                                y2={y}
+                                stroke={isLight ? '#CBD5E1' : '#1E293B'}
+                                strokeWidth="1"
+                              />
+                              <text
+                                x="58"
+                                y={y + 3}
+                                textAnchor="end"
+                                fontSize="9"
+                                fill={isLight ? '#475569' : '#94A3B8'}
+                              >
+                                {deVal}m
+                              </text>
+                            </g>
+                          );
+                        })}
+
+                        {/* No-Support Limit Line: De = 2 * Q^0.4 */}
+                        <path
+                          d="M 250 215 L 435 25"
+                          fill="none"
+                          stroke={isLight ? '#059669' : '#10B981'}
+                          strokeWidth="1.8"
+                          strokeDasharray="5,4"
+                        />
+
+                        {/* Category Labels */}
+                        <text
+                          x="102"
+                          y="55"
+                          textAnchor="middle"
+                          fontSize="9"
+                          fontWeight="700"
+                          fill={isLight ? '#BE123C' : '#FDA4AF'}
+                        >
+                          CAT 8–9 (RRS+Sfr)
+                        </text>
+                        <text
+                          x="178"
+                          y="85"
+                          textAnchor="middle"
+                          fontSize="9"
+                          fontWeight="700"
+                          fill={isLight ? '#C2410C' : '#FDBA74'}
+                        >
+                          CAT 7 (Sfr 120–150)
+                        </text>
+                        <text
+                          x="252"
+                          y="110"
+                          textAnchor="middle"
+                          fontSize="9"
+                          fontWeight="700"
+                          fill={isLight ? '#B45309' : '#FDE68A'}
+                        >
+                          CAT 5–6 (Sfr 60–120)
+                        </text>
+                        <text
+                          x="328"
+                          y="135"
+                          textAnchor="middle"
+                          fontSize="9"
+                          fontWeight="700"
+                          fill={isLight ? '#0369A1' : '#7DD3FC'}
+                        >
+                          CAT 4 (Bolts+Sfr 50)
+                        </text>
+                        <text
+                          x="435"
+                          y="165"
+                          textAnchor="middle"
+                          fontSize="9"
+                          fontWeight="700"
+                          fill={isLight ? '#047857' : '#6EE7B7'}
+                        >
+                          CAT 1–2 (Spot Bolts)
+                        </text>
+
+                        {/* Current Station Operating Point (Q, De) */}
+                        <line
+                          x1={pxX}
+                          y1="25"
+                          x2={pxX}
+                          y2="215"
+                          stroke={isLight ? '#0284C7' : '#22D3EE'}
+                          strokeWidth="1.2"
+                          strokeDasharray="2,2"
+                        />
+                        <line
+                          x1="65"
+                          y1={pxY}
+                          x2="515"
+                          y2={pxY}
+                          stroke={isLight ? '#0284C7' : '#22D3EE'}
+                          strokeWidth="1.2"
+                          strokeDasharray="2,2"
+                        />
+                        <circle
+                          cx={pxX}
+                          cy={pxY}
+                          r="8"
+                          fill="rgba(34, 211, 238, 0.28)"
+                          stroke={isLight ? '#0284C7' : '#22D3EE'}
+                          strokeWidth="2"
+                        />
+                        <circle cx={pxX} cy={pxY} r="3.5" fill={isLight ? '#0284C7' : '#FFFFFF'} />
+                        <rect
+                          x={Math.min(410, Math.max(70, pxX - 55))}
+                          y={Math.max(28, pxY - 26)}
+                          width="115"
+                          height="18"
+                          rx="3"
+                          fill={isLight ? '#FFFFFF' : '#0F172A'}
+                          stroke={isLight ? '#0284C7' : '#22D3EE'}
+                        />
+                        <text
+                          x={Math.min(467, Math.max(127, pxX + 2))}
+                          y={Math.max(40, pxY - 14)}
+                          textAnchor="middle"
+                          fontSize="9"
+                          fontWeight="700"
+                          fill={isLight ? '#0369A1' : '#22D3EE'}
+                        >
+                          Q={sup.qValue !== null ? sup.qValue.toFixed(2) : 'N/A'}, De={sup.equivalentDimensionDe}m
+                        </text>
+
+                        <text
+                          x="290"
+                          y="245"
+                          textAnchor="middle"
+                          fontSize="9.5"
+                          fontWeight="700"
+                          fill={isLight ? '#0F172A' : '#E2E8F0'}
+                        >
+                          Rock Mass Quality Q = (RQD/Jn) × (Jr/Ja) × (Jw/SRF) [Log Scale]
+                        </text>
+                      </svg>
+                    </div>
+
+                    {/* Right: Highlighted Rockbolt Spacing, Bolt Length & Shotcrete Cards (Barton Q + RMR89) */}
+                    <div className="xl:col-span-6 space-y-2.5">
+                      <div className="p-3 bg-slate-950 border border-emerald-500/50 rounded space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-emerald-300 text-xs">
+                            A. BARTON Q-SYSTEM SUPPORT PRESCRIPTION ({sup.qSupportCategoryTitle})
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-600/50 text-[10px] font-bold">
+                            Q = {sup.qValue !== null ? sup.qValue.toFixed(2) : 'Unconfirmed'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 text-center">
+                          <div className="p-2 rounded bg-slate-900 border border-slate-800">
+                            <div className="text-[10px] text-slate-400">Rockbolt Length (L)</div>
+                            <div className="text-sm font-bold text-cyan-300">
+                              {sup.boltLengthMeters.toFixed(2)} m
+                            </div>
+                            <div className="text-[9px] text-slate-500">L = 2 + 0.15·B/ESR</div>
+                          </div>
+                          <div className="p-2 rounded bg-slate-900 border border-slate-800">
+                            <div className="text-[10px] text-slate-400">Bolt Spacing (c/c)</div>
+                            <div className="text-sm font-bold text-amber-300">
+                              {sup.boltSpacingMeters.toFixed(2)} m × {sup.boltSpacingMeters.toFixed(2)} m
+                            </div>
+                            <div className="text-[9px] text-slate-500">Systematic Pattern</div>
+                          </div>
+                          <div className="p-2 rounded bg-slate-900 border border-slate-800">
+                            <div className="text-[10px] text-slate-400">Shotcrete (Sfr)</div>
+                            <div className="text-sm font-bold text-emerald-300">
+                              {sup.shotcreteThicknessMm > 0
+                                ? `${sup.shotcreteThicknessMm} mm Sfr`
+                                : 'Unlined / Spot'}
+                            </div>
+                            <div className="text-[9px] text-slate-500">{sup.steelRibsPrescription}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-3 bg-slate-950 border border-indigo-500/50 rounded space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-indigo-300 text-xs">
+                            B. BIENIAWSKI (1989) RMR89 EMPIRICAL SUPPORT TABLE
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-indigo-950 text-indigo-200 border border-indigo-600/50 text-[10px] font-bold">
+                            {sup.rmrClassLabel}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-[11px]">
+                          <div className="p-1.5 bg-slate-900/90 rounded border border-slate-800">
+                            <span className="text-slate-400 block text-[10px]">Excavation Round:</span>
+                            <span className="text-slate-200">{sup.rmrExcavationMethod}</span>
+                          </div>
+                          <div className="p-1.5 bg-slate-900/90 rounded border border-slate-800">
+                            <span className="text-slate-400 block text-[10px]">Rockbolts (20mm dia):</span>
+                            <span className="text-cyan-200">{sup.rmrBoltPrescription}</span>
+                          </div>
+                          <div className="p-1.5 bg-slate-900/90 rounded border border-slate-800">
+                            <span className="text-slate-400 block text-[10px]">Shotcrete:</span>
+                            <span className="text-emerald-200">{sup.rmrShotcretePrescription}</span>
+                          </div>
+                          <div className="p-1.5 bg-slate-900/90 rounded border border-slate-800">
+                            <span className="text-slate-400 block text-[10px]">Steel Sets / Ribs:</span>
+                            <span className="text-amber-200">{sup.rmrSteelSetsPrescription}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : classificationSubView === 'chainage_log' ? (
+              (() => {
+                const computedRows = buildLongitudinalChainageLog(
+                  savedProjects,
+                  settings,
+                  geometry,
+                  qIndexParams,
+                  rmrParams,
+                  qResult.isComplete ? qResult.qValue : null,
+                  rmrResult.finalRmr
+                );
+                const rows =
+                  demoAlignmentStations && demoAlignmentStations.length > computedRows.length
+                    ? demoAlignmentStations
+                    : computedRows;
+
+                return (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-950 border border-slate-800 rounded p-2.5">
+                      <div>
+                        <span className="font-bold text-cyan-300 text-xs">
+                          LONGITUDINAL CHAINAGE LOG STRIP (MULTI-ROUND ALIGNMENT SUMMARY)
+                        </span>
+                        <p className="text-[10px] text-slate-400">
+                          Compares RMR, Q-Value, RQD (%), and Support Class across saved tunnel stations to highlight Fault / Weak Zones along the drive.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {rows.length < 4 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const baseCh = computedRows[0]?.chainageMeters || 132;
+                              const sampleRows: LongitudinalStationLogRow[] = [
+                                {
+                                  id: 'st-1',
+                                  chainageMeters: baseCh - 12,
+                                  chainageLabel: `RD ${(baseCh - 12).toFixed(1)}m`,
+                                  tunnelName: settings.tunnelName,
+                                  location: settings.locationName || 'HRT',
+                                  rmrValue: 68,
+                                  rmrClass: 'Class II',
+                                  qValue: 11.4,
+                                  qClass: 'Good',
+                                  rqdPct: 78,
+                                  supportCategory: 'Cat 3 (L=3.3m, 50mm Sfr)',
+                                  isWeakOrFaultZone: false,
+                                  isCurrentStation: false,
+                                },
+                                {
+                                  id: 'st-2',
+                                  chainageMeters: baseCh - 8,
+                                  chainageLabel: `RD ${(baseCh - 8).toFixed(1)}m`,
+                                  tunnelName: settings.tunnelName,
+                                  location: settings.locationName || 'HRT',
+                                  rmrValue: 54,
+                                  rmrClass: 'Class III',
+                                  qValue: 4.6,
+                                  qClass: 'Fair',
+                                  rqdPct: 64,
+                                  supportCategory: 'Cat 4 (L=3.3m, 60mm Sfr)',
+                                  isWeakOrFaultZone: false,
+                                  isCurrentStation: false,
+                                },
+                                {
+                                  id: 'st-3',
+                                  chainageMeters: baseCh - 4,
+                                  chainageLabel: `RD ${(baseCh - 4).toFixed(1)}m`,
+                                  tunnelName: settings.tunnelName,
+                                  location: settings.locationName || 'HRT',
+                                  rmrValue: 28,
+                                  rmrClass: 'Class IV (Shear F1)',
+                                  qValue: 0.32,
+                                  qClass: 'Very Poor',
+                                  rqdPct: 32,
+                                  supportCategory: 'Cat 7 (L=3.3m, 140mm Sfr + Ribs)',
+                                  isWeakOrFaultZone: true,
+                                  isCurrentStation: false,
+                                },
+                                ...computedRows,
+                                {
+                                  id: 'st-5',
+                                  chainageMeters: baseCh + 4,
+                                  chainageLabel: `RD ${(baseCh + 4).toFixed(1)}m`,
+                                  tunnelName: settings.tunnelName,
+                                  location: settings.locationName || 'HRT',
+                                  rmrValue: 61,
+                                  rmrClass: 'Class II',
+                                  qValue: 7.8,
+                                  qClass: 'Fair/Good',
+                                  rqdPct: 72,
+                                  supportCategory: 'Cat 4 (L=3.3m, 60mm Sfr)',
+                                  isWeakOrFaultZone: false,
+                                  isCurrentStation: false,
+                                },
+                              ];
+                              setDemoAlignmentStations(sampleRows);
+                            }}
+                            className="px-2.5 py-1 rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-600/50 text-[10px] font-bold cursor-pointer"
+                          >
+                            + Load Multi-Round Alignment Strip (RD 120m → RD 150m)
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Multi-Track Longitudinal Strip Chart SVG */}
+                    <div className="bg-slate-950 border border-slate-800 rounded p-3">
+                      {(() => {
+                        const n = Math.max(1, rows.length);
+                        const colW = Math.min(160, Math.max(95, Math.floor(680 / n)));
+                        const svgW = Math.max(760, 90 + n * colW);
+
+                        return (
+                          <svg
+                            viewBox={`0 0 ${svgW} 175`}
+                            className={`w-full h-[170px] rounded border ${
+                              isLight ? 'bg-slate-50 border-slate-300' : 'bg-[#070B12] border-slate-800'
+                            }`}
+                          >
+                            {/* Track Labels on Left */}
+                            <text x="10" y="32" fontSize="9.5" fontWeight="700" fill={isLight ? '#334155' : '#94A3B8'}>
+                              CHAINAGE
+                            </text>
+                            <text x="10" y="68" fontSize="9.5" fontWeight="700" fill={isLight ? '#4F46E5' : '#818CF8'}>
+                              RMR (0–100)
+                            </text>
+                            <text x="10" y="104" fontSize="9.5" fontWeight="700" fill={isLight ? '#0284C7' : '#38BDF8'}>
+                              Q-VALUE
+                            </text>
+                            <text x="10" y="138" fontSize="9.5" fontWeight="700" fill={isLight ? '#059669' : '#34D399'}>
+                              RQD (%)
+                            </text>
+                            <text x="10" y="164" fontSize="9.5" fontWeight="700" fill={isLight ? '#B45309' : '#FBBF24'}>
+                              SUPPORT
+                            </text>
+
+                            <line
+                              x1="85"
+                              y1="10"
+                              x2="85"
+                              y2="170"
+                              stroke={isLight ? '#94A3B8' : '#334155'}
+                              strokeWidth="1.2"
+                            />
+
+                            {rows.map((r, idx) => {
+                              const cx = 90 + idx * colW + colW / 2;
+                              const x0 = 90 + idx * colW;
+                              const rmrBarW = ((r.rmrValue ?? 50) / 100) * (colW - 24);
+                              return (
+                                <g key={r.id}>
+                                  <rect
+                                    x={x0 + 2}
+                                    y="10"
+                                    width={colW - 4}
+                                    height="158"
+                                    fill={
+                                      r.isWeakOrFaultZone
+                                        ? 'rgba(225, 29, 72, 0.14)'
+                                        : r.isCurrentStation
+                                        ? 'rgba(14, 165, 233, 0.12)'
+                                        : isLight
+                                        ? '#FFFFFF'
+                                        : 'rgba(15, 23, 42, 0.55)'
+                                    }
+                                    stroke={
+                                      r.isWeakOrFaultZone
+                                        ? '#F43F5E'
+                                        : r.isCurrentStation
+                                        ? '#0284C7'
+                                        : isLight
+                                        ? '#CBD5E1'
+                                        : '#1E293B'
+                                    }
+                                    strokeWidth={r.isCurrentStation || r.isWeakOrFaultZone ? '1.5' : '0.8'}
+                                  />
+
+                                  {/* Station Chainage Header */}
+                                  <text
+                                    x={cx}
+                                    y="27"
+                                    textAnchor="middle"
+                                    fontSize="9.5"
+                                    fontWeight="700"
+                                    fill={
+                                      r.isWeakOrFaultZone
+                                        ? isLight
+                                          ? '#BE123C'
+                                          : '#FDA4AF'
+                                        : r.isCurrentStation
+                                        ? isLight
+                                          ? '#0369A1'
+                                          : '#38BDF8'
+                                        : isLight
+                                        ? '#0F172A'
+                                        : '#F8FAFC'
+                                    }
+                                  >
+                                    {r.chainageLabel}
+                                  </text>
+                                  {r.isWeakOrFaultZone && (
+                                    <text x={cx} y="38" textAnchor="middle" fontSize="8" fontWeight="700" fill="#E11D48">
+                                      ⚠ FAULT / WEAK ZONE
+                                    </text>
+                                  )}
+
+                                  {/* RMR Bar & Value */}
+                                  <rect
+                                    x={x0 + 12}
+                                    y="52"
+                                    width={Math.max(8, rmrBarW)}
+                                    height="12"
+                                    rx="2"
+                                    fill={r.isWeakOrFaultZone ? '#F43F5E' : '#6366F1'}
+                                  />
+                                  <text
+                                    x={cx}
+                                    y="75"
+                                    textAnchor="middle"
+                                    fontSize="9"
+                                    fontWeight="700"
+                                    fill={isLight ? '#312E81' : '#E0E7FF'}
+                                  >
+                                    RMR = {r.rmrValue ?? 'N/A'} ({r.rmrClass})
+                                  </text>
+
+                                  {/* Q-Value Readout */}
+                                  <text
+                                    x={cx}
+                                    y="104"
+                                    textAnchor="middle"
+                                    fontSize="10"
+                                    fontWeight="700"
+                                    fill={isLight ? '#0369A1' : '#38BDF8'}
+                                  >
+                                    Q = {r.qValue !== null ? r.qValue.toFixed(2) : 'N/A'} ({r.qClass})
+                                  </text>
+
+                                  {/* RQD (%) */}
+                                  <text
+                                    x={cx}
+                                    y="138"
+                                    textAnchor="middle"
+                                    fontSize="9.5"
+                                    fontWeight="700"
+                                    fill={isLight ? '#047857' : '#34D399'}
+                                  >
+                                    RQD {r.rqdPct}%
+                                  </text>
+
+                                  {/* Support Category */}
+                                  <text
+                                    x={cx}
+                                    y="162"
+                                    textAnchor="middle"
+                                    fontSize="8.5"
+                                    fontWeight="700"
+                                    fill={isLight ? '#B45309' : '#FDE68A'}
+                                  >
+                                    {r.supportCategory.slice(0, 22)}
+                                  </text>
+                                </g>
+                              );
+                            })}
+                          </svg>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              <>
+                {selectedMethod === 'RMR' && renderRmrSection(false)}
+                {selectedMethod === 'Q_SYSTEM' && renderQSystemSection(false)}
+                {selectedMethod === 'GSI' && renderGsiSection()}
+                {selectedMethod === 'BOTH_RMR_AND_Q' && (
+                  <div className="space-y-4">
+                    <div className="p-2 bg-slate-900/90 border border-indigo-500/40 rounded flex items-center justify-between text-[11px]">
+                      <span className="font-bold text-indigo-300">
+                        DUAL STATION CLASSIFICATION ({settings.faceChainage}) — RMR AND Q-SYSTEM STORED
+                        SEPARATELY WITHOUT MIXING PARAMETERS
+                      </span>
+                      <span className="text-slate-400">
+                        RMR:{' '}
+                        <strong className="text-white">
+                          {rmrResult.finalRmr !== null ? rmrResult.finalRmr : 'Incomplete'}
+                        </strong>{' '}
+                        | Q:{' '}
+                        <strong className="text-cyan-300">
+                          {qResult.isComplete ? qResult.qValue.toFixed(2) : 'Incomplete'}
+                        </strong>
+                      </span>
+                    </div>
+                    {renderRmrSection(true)}
+                    <div className="border-t border-slate-800 pt-3">{renderQSystemSection(true)}</div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

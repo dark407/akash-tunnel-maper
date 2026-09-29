@@ -1,5 +1,6 @@
-import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useContainerResizeObserver, useResponsiveLayout } from '../hooks/useResponsiveLayout';
+import { ThemeToggleButton, useTheme } from '../context/ThemeContext';
 import {
   Joint,
   JointSet,
@@ -15,6 +16,7 @@ import {
   RockMassSummaryTable,
   GsiParameters,
   ParameterInputStatus,
+  SavedProjectRecord,
   SectionToSectionVolumeRow,
   SurfaceType,
   SurveyControlPoint,
@@ -29,8 +31,11 @@ import {
   createDefaultQIndexParameters,
   createDefaultRockMassSummary,
   exportGeologyAndQIndexToCSV,
-  exportMappingSheetToDXF,
 } from '../engine/photoWarpEngine';
+import {
+  exportMappedGeologicalSheetToDXF,
+  triggerDownloadDXFSheet,
+} from '../engine/kinematicsSupportAndDxfEngine';
 import {
   computeNonOverlappingLabelPlacement,
   DipDirectionSymbolGlyph,
@@ -62,8 +67,10 @@ import {
   Image as ImageIcon,
   Maximize2,
   Printer,
+  Sliders,
   X,
 } from 'lucide-react';
+import { SheetSettingsAndStorageEditor } from './SheetSettingsAndStorageEditor';
 
 interface EngineeringSheetModalProps {
   isOpen: boolean;
@@ -87,13 +94,20 @@ interface EngineeringSheetModalProps {
   placedSymbols?: PlacedGeologicalSymbol[];
   overbreakAnalysis?: OverbreakUndercutAnalysis;
   sectionVolumeRows?: SectionToSectionVolumeRow[];
+  initialOutputMode?: OutputSheetMode;
+  onUpdateSettings?: React.Dispatch<React.SetStateAction<TunnelSettings>>;
+  savedProjects?: SavedProjectRecord[];
+  onSaveCurrentProject?: () => void;
+  onLoadProjectRecord?: (record: SavedProjectRecord) => void;
+  onDeleteProjectRecord?: (id: string) => void;
+  onCreateNextChainageSection?: () => void;
 }
 
 export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   isOpen,
   onClose,
   geometry,
-  settings,
+  settings: propSettings,
   photos,
   joints,
   jointSets,
@@ -111,8 +125,29 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   placedSymbols = [],
   overbreakAnalysis,
   sectionVolumeRows = [],
+  initialOutputMode = 'FINAL_ENGINEERING_SHEET',
+  onUpdateSettings: propOnUpdateSettings,
+  savedProjects = [],
+  onSaveCurrentProject,
+  onLoadProjectRecord,
+  onDeleteProjectRecord,
+  onCreateNextChainageSection,
 }) => {
-  const [outputMode, setOutputMode] = useState<OutputSheetMode>('FINAL_ENGINEERING_SHEET');
+  const { theme } = useTheme();
+  const isLight = theme === 'light';
+  const [localSettings, setLocalSettings] = useState<TunnelSettings>(propSettings);
+  useEffect(() => {
+    setLocalSettings(propSettings);
+  }, [propSettings]);
+
+  const settings = propOnUpdateSettings ? propSettings : localSettings;
+  const handleUpdateSettings: React.Dispatch<React.SetStateAction<TunnelSettings>> =
+    propOnUpdateSettings || setLocalSettings;
+
+  const [isSettingsDrawerOpen, setIsSettingsDrawerOpen] = useState<boolean>(false);
+  const [outputMode, setOutputMode] = useState<OutputSheetMode>(initialOutputMode);
+  const [overlayOverbreakOnGeology, setOverlayOverbreakOnGeology] = useState<boolean>(false);
+  const [overlayJointsOnQuantity, setOverlayJointsOnQuantity] = useState<boolean>(false);
   const [arrangement, setArrangement] = useState<SheetLayoutArrangement>('AUTO_INTELLIGENT');
   const [showConfidenceLabels, setShowConfidenceLabels] = useState<boolean>(false);
   const [sheetZoomMode, setSheetZoomMode] = useState<'auto_fit' | '100' | '125' | '150'>('auto_fit');
@@ -121,11 +156,18 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   const responsive = useResponsiveLayout();
   const previewBounds = useContainerResizeObserver(previewContainerRef, 1280, 820, isOpen);
 
+  useEffect(() => {
+    if (isOpen && initialOutputMode) {
+      setOutputMode(initialOutputMode);
+    }
+  }, [isOpen, initialOutputMode]);
+
   useLayoutEffect(() => {
     if (!isOpen) return;
     previewBounds.recalculate();
   }, [
     isOpen,
+    isSettingsDrawerOpen,
     outputMode,
     arrangement,
     sheetZoomMode,
@@ -218,7 +260,9 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     showPerimeterPlan,
     headerBox,
     drawingArenaBox,
+    rightColumnBox,
     contentMetrics,
+    effectiveSheetConfig,
     facePxPerMeter,
     faceCenterX,
     faceTopY,
@@ -554,22 +598,22 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
 
   // Export AutoCAD DXF Vector Profile & Traces
   const handleDownloadDXF = () => {
-    const dxfString = exportMappingSheetToDXF(
+    const dxfContent = exportMappedGeologicalSheetToDXF({
       geometry,
       settings,
       joints,
-      overbreakAnalysis,
-      controlPoints
+      jointSets,
+      selectedMethod: selectedClassificationMethod,
+      qIndexParams: qIndex,
+      rmrParams: rmr,
+      gsiParams: gsi,
+      qValue: qResult.isComplete ? qResult.qValue : null,
+      rmrValue: rmrResult.finalRmr,
+    });
+    triggerDownloadDXFSheet(
+      `${settings.tunnelName.replace(/\s+/g, '_')}_${settings.faceChainage.replace(/\s+/g, '_')}_Geological_Sheet.dxf`,
+      dxfContent
     );
-    const blob = new Blob([dxfString], { type: 'application/dxf;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${settings.tunnelName.replace(/\s+/g, '_')}_${settings.faceChainage.replace(/\s+/g, '_')}_vectors.dxf`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   };
 
   // Export CSV Engineering Tables & Q-Index
@@ -606,13 +650,15 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
       >
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-display font-bold text-xs xl:text-sm tracking-wider text-slate-100">
-            FINAL ENGINEERING TUNNEL MAPPING SHEET
+            {outputMode === 'ENGINEERING_QUANTITY_SHEET'
+              ? 'OVERBREAK & ENGINEERING QUANTITY SHEET'
+              : 'GEOLOGICAL TUNNEL MAPPING SHEET'}
           </span>
           <div className="flex items-center gap-1 bg-slate-900 p-1 rounded border border-slate-800">
             {(
               [
-                { id: 'FINAL_ENGINEERING_SHEET', label: '1. Geological & Overbreak Sheet' },
-                { id: 'ENGINEERING_QUANTITY_SHEET', label: '2. Engineering Quantity Sheet' },
+                { id: 'FINAL_ENGINEERING_SHEET', label: '1. Geological Mapping Sheet' },
+                { id: 'ENGINEERING_QUANTITY_SHEET', label: '2. Overbreak & Quantity Sheet' },
                 { id: 'CLEAN_MAPPING_DRAWING', label: '3. Clean Mapping Drawing' },
                 { id: 'PHOTO_AND_AI_TRACING', label: '4. Photo + Vector Tracing' },
                 { id: 'VECTOR_MAPPING_ONLY', label: '5. Vector Mapping Only' },
@@ -624,7 +670,9 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 onClick={() => setOutputMode(tab.id)}
                 className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
                   outputMode === tab.id
-                    ? 'bg-cyan-600 text-white'
+                    ? tab.id === 'ENGINEERING_QUANTITY_SHEET'
+                      ? 'bg-rose-600 text-white font-bold'
+                      : 'bg-cyan-600 text-white font-bold'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -632,6 +680,30 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
               </button>
             ))}
           </div>
+
+          {outputMode === 'FINAL_ENGINEERING_SHEET' && (
+            <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none px-2 py-1 rounded bg-slate-900 border border-slate-800">
+              <input
+                type="checkbox"
+                checked={overlayOverbreakOnGeology}
+                onChange={(e) => setOverlayOverbreakOnGeology(e.target.checked)}
+                className="rounded border-slate-700 bg-slate-900 text-rose-500"
+              />
+              + Overbreak Overlay
+            </label>
+          )}
+
+          {outputMode === 'ENGINEERING_QUANTITY_SHEET' && (
+            <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none px-2 py-1 rounded bg-slate-900 border border-slate-800">
+              <input
+                type="checkbox"
+                checked={overlayJointsOnQuantity}
+                onChange={(e) => setOverlayJointsOnQuantity(e.target.checked)}
+                className="rounded border-slate-700 bg-slate-900 text-cyan-500"
+              />
+              + Geology Traces Overlay
+            </label>
+          )}
 
           {/* Layout Engine Mode Toggle: Prominent Face + Perimeter vs Maximize Tunnel Face */}
           <div className="flex items-center gap-1 bg-slate-900 p-1 rounded border border-slate-800">
@@ -657,6 +729,50 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             >
               <Maximize2 className="w-3 h-3" />
               Maximize Face
+            </button>
+          </div>
+
+          {/* Quick Toggle: Adaptive Layout (Auto-Resizing) vs Fixed Layout (Manual Control) */}
+          <div
+            className="flex items-center gap-1 bg-slate-900 p-1 rounded border border-slate-800"
+            title="Switch between Adaptive Layout (auto-font/table resizing) and Fixed Layout (manual control)"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                const nextCfg = {
+                  ...effectiveSheetConfig,
+                  layoutMode: 'ADAPTIVE_LAYOUT' as const,
+                };
+                saveSheetConfigToStorage(nextCfg);
+                handleUpdateSettings((prev) => ({ ...prev, sheetConfig: nextCfg }));
+              }}
+              className={`px-2 py-1 text-xs font-mono rounded transition-colors whitespace-nowrap cursor-pointer ${
+                (effectiveSheetConfig.layoutMode || 'ADAPTIVE_LAYOUT') === 'ADAPTIVE_LAYOUT'
+                  ? 'bg-cyan-600 text-white font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Adaptive Layout
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const nextCfg = {
+                  ...effectiveSheetConfig,
+                  layoutMode: 'FIXED_LAYOUT' as const,
+                };
+                saveSheetConfigToStorage(nextCfg);
+                handleUpdateSettings((prev) => ({ ...prev, sheetConfig: nextCfg }));
+                setIsSettingsDrawerOpen(true);
+              }}
+              className={`px-2 py-1 text-xs font-mono rounded transition-colors whitespace-nowrap cursor-pointer ${
+                effectiveSheetConfig.layoutMode === 'FIXED_LAYOUT'
+                  ? 'bg-amber-600 text-white font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Fixed Layout
             </button>
           </div>
 
@@ -707,6 +823,19 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
 
         <div className="flex items-center gap-2">
           <button
+            type="button"
+            onClick={() => setIsSettingsDrawerOpen((prev) => !prev)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold rounded border transition-colors whitespace-nowrap cursor-pointer ${
+              isSettingsDrawerOpen
+                ? 'bg-emerald-600 text-white border-emerald-400 shadow-md'
+                : 'bg-emerald-950/90 hover:bg-emerald-900 text-emerald-200 border-emerald-600/70'
+            }`}
+            title="Edit Project Details, Location, Client/Contractor Logos, Block Placement & Chainage Storage"
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            {isSettingsDrawerOpen ? 'Hide Sheet Settings & Storage' : 'Sheet Settings, Logos & Storage'}
+          </button>
+          <button
             onClick={handleDownloadDXF}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded border border-slate-700 transition-colors whitespace-nowrap"
             title="Export Master Tunnel Profile and Mapped Vector Polylines to AutoCAD .DXF"
@@ -743,6 +872,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             <Printer className="w-3.5 h-3.5" />
             Export PDF / Print
           </button>
+          <ThemeToggleButton compact />
           <button
             onClick={onClose}
             className="p-1.5 text-slate-400 hover:text-white rounded hover:bg-slate-800"
@@ -789,10 +919,48 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
         )}
       </div>
 
-      {/* Main Engineering Sheet Preview Stage (Space-aware & auto-fitted to viewport) */}
+      {/* Main Engineering Sheet Preview Stage + Optional Live Settings & Chainage Storage Drawer */}
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        {isSettingsDrawerOpen && (
+          <aside className="no-print w-[410px] max-w-[46vw] bg-[#111621] border-r border-slate-800 flex flex-col h-full shrink-0 z-20 shadow-2xl">
+            <div className="flex items-center justify-between px-3.5 py-2.5 bg-[#0D121B] border-b border-slate-800">
+              <div>
+                <div className="font-display font-bold text-xs text-emerald-300 tracking-wide">
+                  SHEET SETTINGS, LOGOS &amp; CHAINAGE STORAGE
+                </div>
+                <div className="text-[10px] text-slate-400 font-mono">
+                  Live-edit project details, logos, placement &amp; face records
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSettingsDrawerOpen(false)}
+                className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+                title="Close Settings Drawer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <SheetSettingsAndStorageEditor
+                settings={settings}
+                onUpdateSettings={handleUpdateSettings}
+                savedProjects={savedProjects}
+                onSaveCurrentProject={() => onSaveCurrentProject?.()}
+                onLoadProjectRecord={onLoadProjectRecord}
+                onDeleteProjectRecord={onDeleteProjectRecord}
+                onCreateNextChainageSection={onCreateNextChainageSection}
+                compactDrawerMode={true}
+              />
+            </div>
+          </aside>
+        )}
+
       <div
         ref={previewContainerRef}
-        className={`flex-1 flex items-center justify-center bg-[#0B0E14] print:p-0 print:bg-white ${
+        className={`flex-1 flex items-center justify-center print:p-0 print:bg-white ${
+          isLight ? 'bg-slate-200' : 'bg-[#0B0E14]'
+        } ${
           sheetZoomMode === 'auto_fit' ? 'overflow-hidden p-2' : 'overflow-auto p-4 items-start'
         }`}
       >
@@ -827,13 +995,13 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 <rect x={rightWallLeftX} y={planTopY} width={rightWallW_px} height={roundH_px} />
               </clipPath>
 
-              {/* Right Column Table Clip Paths to Prevent Any Text Intersection (Section 16) */}
+              {/* Engineering Column Clip Path to Prevent Any Text Intersection (Supports RIGHT or LEFT column) */}
               <clipPath id="sheet-right-col-clip">
                 <rect
-                  x={orientationBlock.x}
-                  y={orientationBlock.y}
-                  width={orientationBlock.width}
-                  height={sheetH - orientationBlock.y - margin}
+                  x={rightColumnBox.x}
+                  y={rightColumnBox.y}
+                  width={rightColumnBox.width}
+                  height={rightColumnBox.height + 6}
                 />
               </clipPath>
 
@@ -889,78 +1057,430 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
               y={margin + 4}
               width={sheetW - (margin + 4) * 2}
               height={sheetH - (margin + 4) * 2}
-              fill="url(#eng-grid)"
+              fill={effectiveSheetConfig.showBackgroundGrid !== false ? 'url(#eng-grid)' : '#FFFFFF'}
               stroke="#0F172A"
               strokeWidth="0.9"
             />
 
             {/* ==============================================================
-                1. COMPACT ENGINEERING HEADER BLOCK (Priority 6: Project Info)
+                1. CUSTOMIZABLE ENGINEERING HEADER & TITLE BLOCK
+                   (Includes Project, Location, Client, Contractor, Logos & Chainage)
                ============================================================== */}
-            {showTitleAndTables && (
-              <g>
-                <rect
-                  x={headerBox.x}
-                  y={headerBox.y}
-                  width={headerBox.width}
-                  height={headerBox.height}
-                  fill="#F8FAFC"
-                  stroke="#0F172A"
-                  strokeWidth="1.2"
-                />
-                {/* Vertical dividers in header */}
-                <line x1="490" y1={headerBox.y} x2="490" y2={headerBox.y + headerBox.height} stroke="#0F172A" strokeWidth="1" />
-                <line x1="880" y1={headerBox.y} x2="880" y2={headerBox.y + headerBox.height} stroke="#0F172A" strokeWidth="1" />
-                <line x1="1270" y1={headerBox.y} x2="1270" y2={headerBox.y + headerBox.height} stroke="#0F172A" strokeWidth="1" />
-                <line x1="490" y1={headerBox.y + 38} x2={headerBox.x + headerBox.width} y2={headerBox.y + 38} stroke="#0F172A" strokeWidth="0.8" />
+            {showTitleAndTables &&
+              (() => {
+                const cfg = effectiveSheetConfig;
+                const logoPos = cfg.logoPosition || 'HEADER_CORNERS';
+                const logoW =
+                  cfg.logoSize === 'LARGE' ? 112 : cfg.logoSize === 'COMPACT' ? 76 : 94;
+                const logoH = headerBox.height - 10;
 
-                {/* Zone 1: Title & Project */}
-                <text x="36" y={headerBox.y + 23} fontSize="14.5" fontWeight="700" fill="#0F172A">
-                  {outputMode === 'ENGINEERING_QUANTITY_SHEET'
-                    ? 'ENGINEERING OVERBREAK, UNDERCUT & EXCAVATION QUANTITY SHEET'
-                    : 'ENGINEERING GEOLOGICAL TUNNEL MAPPING SHEET'}
-                </text>
-                <text x="36" y={headerBox.y + 44} fontSize="11.5" fontWeight="700" fill="#1E293B">
-                  TUNNEL: {settings.tunnelName.toUpperCase()}
-                </text>
-                <text x="36" y={headerBox.y + 63} fontSize="10.5" fill="#334155">
-                  LITHOLOGY: {settings.lithology.slice(0, 34)} · PROFILE: {(geometry.customProfile?.name || geometry.crownGeometry.replace(/_/g, '-')).toUpperCase().slice(0, 26)} ({geometry.width.toFixed(2)}m × {geometry.height.toFixed(2)}m{geometry.designAreaSqMeters ? ` · A=${geometry.designAreaSqMeters.toFixed(1)}m²` : ''})
-                </text>
+                const hasClientLogo =
+                  logoPos !== 'HIDDEN' &&
+                  logoPos !== 'BOTTOM_SIGN_BLOCK' &&
+                  Boolean(cfg.clientLogoDataUrl);
+                const hasContractorLogo =
+                  logoPos !== 'HIDDEN' &&
+                  logoPos !== 'BOTTOM_SIGN_BLOCK' &&
+                  Boolean(cfg.contractorLogoDataUrl);
+                const hasConsultantLogo =
+                  logoPos !== 'HIDDEN' &&
+                  logoPos !== 'BOTTOM_SIGN_BLOCK' &&
+                  Boolean(cfg.consultantLogoDataUrl);
 
-                {/* Zone 2: Chainage & Pull */}
-                <text x="504" y={headerBox.y + 16} fontSize="9.5" fill="#475569">
-                  CHAINAGE / RD INTERVAL:
-                </text>
-                <text x="504" y={headerBox.y + 31} fontSize="11.5" fontWeight="700" fill="#0F172A">
-                  {settings.chainage}
-                </text>
-                <text x="504" y={headerBox.y + 53} fontSize="10" fill="#475569">
-                  FACE RD: <tspan fontWeight="700" fill="#0F172A">{settings.faceChainage}</tspan> · PULL: <tspan fontWeight="700" fill="#0F172A">{settings.roundLength.toFixed(2)} m</tspan>
-                </text>
+                // Compute left & right logo reservations inside headerBox so logos NEVER overlap text
+                let leftLogoSpace = 0;
+                let rightLogoSpace = 0;
+                if (logoPos === 'HEADER_CORNERS') {
+                  if (hasClientLogo) leftLogoSpace = logoW + 14;
+                  if (hasContractorLogo) rightLogoSpace += logoW + 10;
+                  if (hasConsultantLogo) rightLogoSpace += logoW + 10;
+                } else if (logoPos === 'HEADER_LEFT_GROUP') {
+                  const cnt =
+                    (hasClientLogo ? 1 : 0) +
+                    (hasContractorLogo ? 1 : 0) +
+                    (hasConsultantLogo ? 1 : 0);
+                  leftLogoSpace = cnt > 0 ? cnt * (logoW + 8) + 8 : 0;
+                } else if (logoPos === 'HEADER_RIGHT_GROUP') {
+                  const cnt =
+                    (hasClientLogo ? 1 : 0) +
+                    (hasContractorLogo ? 1 : 0) +
+                    (hasConsultantLogo ? 1 : 0);
+                  rightLogoSpace = cnt > 0 ? cnt * (logoW + 8) + 8 : 0;
+                }
 
-                {/*Zone 3: Drive Direction & Master Dimensions */}
-                <text x="894" y={headerBox.y + 16} fontSize="9.5" fill="#475569">
-                  TUNNEL DRIVE DIRECTION (AZIMUTH):
-                </text>
-                <text x="894" y={headerBox.y + 31} fontSize="12" fontWeight="700" fill="#0F172A">
-                  N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E (Az {settings.driveDirection.toFixed(1)}°)
-                </text>
-                <text x="894" y={headerBox.y + 53} fontSize="9.5" fill="#475569">
-                  W: <tspan fontWeight="700" fill="#0F172A">{geometry.width.toFixed(2)}m</tspan> · H: <tspan fontWeight="700" fill="#0F172A">{geometry.height.toFixed(2)}m</tspan> · WALL L/R: <tspan fontWeight="700" fill="#0F172A">{(geometry.leftWallHeight ?? geometry.wallHeight).toFixed(2)}/{(geometry.rightWallHeight ?? geometry.wallHeight).toFixed(2)}m</tspan> · CROWN: <tspan fontWeight="700" fill="#0F172A">{geometry.crownArcLength.toFixed(2)}m</tspan>
-                </text>
+                const textLeftX = headerBox.x + leftLogoSpace;
+                const textRightX = headerBox.x + headerBox.width - rightLogoSpace;
+                const textAvailW = Math.max(800, textRightX - textLeftX);
 
-                {/* Zone 4: Date, Geologist & Scale */}
-                <text x="1284" y={headerBox.y + 18} fontSize="10" fill="#475569">
-                  DATE: <tspan fontWeight="700" fill="#0F172A">{settings.date}</tspan>
-                </text>
-                <text x="1284" y={headerBox.y + 32} fontSize="10" fill="#475569">
-                  MAPPED BY: <tspan fontWeight="700" fill="#0F172A">{settings.mappedBy}</tspan>
-                </text>
-                <text x="1284" y={headerBox.y + 53} fontSize="10" fontWeight="700" fill="#0F172A">
-                  FACE SCALE 1:{engineeringScaleDenominator} ({geometry.source.toUpperCase()})
-                </text>
-              </g>
-            )}
+                // 4 proportional zones inside [textLeftX, textRightX]
+                const div1X = Math.round(textLeftX + textAvailW * 0.36);
+                const div2X = Math.round(textLeftX + textAvailW * 0.60);
+                const div3X = Math.round(textLeftX + textAvailW * 0.81);
+                const midRowY = headerBox.y + Math.round(headerBox.height * 0.52);
+
+                const sheetTitleText =
+                  outputMode === 'ENGINEERING_QUANTITY_SHEET'
+                    ? cfg.quantitySheetTitle ||
+                      'ENGINEERING OVERBREAK, UNDERCUT & EXCAVATION QUANTITY SHEET'
+                    : cfg.geologySheetTitle || 'ENGINEERING GEOLOGICAL TUNNEL MAPPING SHEET';
+
+                const locLabel =
+                  settings.locationName || settings.location || 'Main Underground Heading';
+
+                return (
+                  <g>
+                    <rect
+                      x={headerBox.x}
+                      y={headerBox.y}
+                      width={headerBox.width}
+                      height={headerBox.height}
+                      fill="#F8FAFC"
+                      stroke="#0F172A"
+                      strokeWidth="1.3"
+                    />
+
+                    {/* Render Header Logos in Selected Position */}
+                    {logoPos === 'HEADER_CORNERS' && (
+                      <>
+                        {hasClientLogo && cfg.clientLogoDataUrl && (
+                          <g>
+                            <rect
+                              x={headerBox.x + 6}
+                              y={headerBox.y + 5}
+                              width={logoW}
+                              height={logoH}
+                              fill="#FFFFFF"
+                              stroke="#CBD5E1"
+                              strokeWidth="0.8"
+                            />
+                            <image
+                              href={cfg.clientLogoDataUrl}
+                              x={headerBox.x + 8}
+                              y={headerBox.y + 7}
+                              width={logoW - 4}
+                              height={logoH - 4}
+                              preserveAspectRatio="xMidYMid meet"
+                            />
+                            <line
+                              x1={textLeftX}
+                              y1={headerBox.y}
+                              x2={textLeftX}
+                              y2={headerBox.y + headerBox.height}
+                              stroke="#0F172A"
+                              strokeWidth="1"
+                            />
+                          </g>
+                        )}
+                        {(hasContractorLogo || hasConsultantLogo) && (
+                          <g>
+                            <line
+                              x1={textRightX}
+                              y1={headerBox.y}
+                              x2={textRightX}
+                              y2={headerBox.y + headerBox.height}
+                              stroke="#0F172A"
+                              strokeWidth="1"
+                            />
+                            {hasContractorLogo && cfg.contractorLogoDataUrl && (
+                              <g>
+                                <rect
+                                  x={textRightX + 5}
+                                  y={headerBox.y + 5}
+                                  width={logoW}
+                                  height={logoH}
+                                  fill="#FFFFFF"
+                                  stroke="#CBD5E1"
+                                  strokeWidth="0.8"
+                                />
+                                <image
+                                  href={cfg.contractorLogoDataUrl}
+                                  x={textRightX + 7}
+                                  y={headerBox.y + 7}
+                                  width={logoW - 4}
+                                  height={logoH - 4}
+                                  preserveAspectRatio="xMidYMid meet"
+                                />
+                              </g>
+                            )}
+                            {hasConsultantLogo && cfg.consultantLogoDataUrl && (
+                              <g>
+                                <rect
+                                  x={textRightX + (hasContractorLogo ? logoW + 10 : 5)}
+                                  y={headerBox.y + 5}
+                                  width={logoW}
+                                  height={logoH}
+                                  fill="#FFFFFF"
+                                  stroke="#CBD5E1"
+                                  strokeWidth="0.8"
+                                />
+                                <image
+                                  href={cfg.consultantLogoDataUrl}
+                                  x={textRightX + (hasContractorLogo ? logoW + 12 : 7)}
+                                  y={headerBox.y + 7}
+                                  width={logoW - 4}
+                                  height={logoH - 4}
+                                  preserveAspectRatio="xMidYMid meet"
+                                />
+                              </g>
+                            )}
+                          </g>
+                        )}
+                      </>
+                    )}
+
+                    {logoPos === 'HEADER_LEFT_GROUP' && leftLogoSpace > 0 && (
+                      <g>
+                        {[
+                          cfg.clientLogoDataUrl,
+                          cfg.contractorLogoDataUrl,
+                          cfg.consultantLogoDataUrl,
+                        ]
+                          .filter((u): u is string => Boolean(u))
+                          .map((url, idx) => (
+                            <g key={`hdr-l-logo-${idx}`}>
+                              <rect
+                                x={headerBox.x + 6 + idx * (logoW + 8)}
+                                y={headerBox.y + 5}
+                                width={logoW}
+                                height={logoH}
+                                fill="#FFFFFF"
+                                stroke="#CBD5E1"
+                                strokeWidth="0.8"
+                              />
+                              <image
+                                href={url}
+                                x={headerBox.x + 8 + idx * (logoW + 8)}
+                                y={headerBox.y + 7}
+                                width={logoW - 4}
+                                height={logoH - 4}
+                                preserveAspectRatio="xMidYMid meet"
+                              />
+                            </g>
+                          ))}
+                        <line
+                          x1={textLeftX}
+                          y1={headerBox.y}
+                          x2={textLeftX}
+                          y2={headerBox.y + headerBox.height}
+                          stroke="#0F172A"
+                          strokeWidth="1"
+                        />
+                      </g>
+                    )}
+
+                    {logoPos === 'HEADER_RIGHT_GROUP' && rightLogoSpace > 0 && (
+                      <g>
+                        <line
+                          x1={textRightX}
+                          y1={headerBox.y}
+                          x2={textRightX}
+                          y2={headerBox.y + headerBox.height}
+                          stroke="#0F172A"
+                          strokeWidth="1"
+                        />
+                        {[
+                          cfg.clientLogoDataUrl,
+                          cfg.contractorLogoDataUrl,
+                          cfg.consultantLogoDataUrl,
+                        ]
+                          .filter((u): u is string => Boolean(u))
+                          .map((url, idx) => (
+                            <g key={`hdr-r-logo-${idx}`}>
+                              <rect
+                                x={textRightX + 6 + idx * (logoW + 8)}
+                                y={headerBox.y + 5}
+                                width={logoW}
+                                height={logoH}
+                                fill="#FFFFFF"
+                                stroke="#CBD5E1"
+                                strokeWidth="0.8"
+                              />
+                              <image
+                                href={url}
+                                x={textRightX + 8 + idx * (logoW + 8)}
+                                y={headerBox.y + 7}
+                                width={logoW - 4}
+                                height={logoH - 4}
+                                preserveAspectRatio="xMidYMid meet"
+                              />
+                            </g>
+                          ))}
+                      </g>
+                    )}
+
+                    {/* Vertical & horizontal dividers in header */}
+                    <line
+                      x1={div1X}
+                      y1={headerBox.y}
+                      x2={div1X}
+                      y2={headerBox.y + headerBox.height}
+                      stroke="#0F172A"
+                      strokeWidth="1"
+                    />
+                    <line
+                      x1={div2X}
+                      y1={headerBox.y}
+                      x2={div2X}
+                      y2={headerBox.y + headerBox.height}
+                      stroke="#0F172A"
+                      strokeWidth="1"
+                    />
+                    <line
+                      x1={div3X}
+                      y1={headerBox.y}
+                      x2={div3X}
+                      y2={headerBox.y + headerBox.height}
+                      stroke="#0F172A"
+                      strokeWidth="1"
+                    />
+                    <line
+                      x1={div1X}
+                      y1={midRowY}
+                      x2={textRightX}
+                      y2={midRowY}
+                      stroke="#0F172A"
+                      strokeWidth="0.8"
+                    />
+
+                    {/* Zone 1: Editable Sheet Title, Project, Location & Tunnel */}
+                    <text
+                      x={textLeftX + 10}
+                      y={headerBox.y + 20}
+                      fontSize={Math.min(13.5, contentMetrics.headerTitleFontSize)}
+                      fontWeight="700"
+                      fill="#0F172A"
+                    >
+                      {sheetTitleText.slice(0, 58)}
+                    </text>
+                    <text
+                      x={textLeftX + 10}
+                      y={headerBox.y + 39}
+                      fontSize="10.5"
+                      fontWeight="700"
+                      fill="#0F172A"
+                    >
+                      PROJECT: {(cfg.projectName || 'Underground Tunnel Project').slice(0, 34)} ·
+                      LOC: {locLabel.slice(0, 22)}
+                    </text>
+                    <text
+                      x={textLeftX + 10}
+                      y={headerBox.y + 55}
+                      fontSize="10"
+                      fontWeight="700"
+                      fill="#1E293B"
+                    >
+                      TUNNEL: {settings.tunnelName.toUpperCase().slice(0, 22)} · PROFILE:{' '}
+                      {(
+                        geometry.customProfile?.name || geometry.crownGeometry.replace(/_/g, '-')
+                      )
+                        .toUpperCase()
+                        .slice(0, 18)}{' '}
+                      ({geometry.width.toFixed(2)}m × {geometry.height.toFixed(2)}m)
+                    </text>
+                    <text x={textLeftX + 10} y={headerBox.y + 69} fontSize="9.2" fill="#334155">
+                      LITHOLOGY: {(settings.lithology || 'Mapped Rock Mass').slice(0, 38)} · DRIVE: N{' '}
+                      {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E
+                    </text>
+
+                    {/* Zone 2: Client, Contractor & Consultant (Top) + Chainage & Pull (Bottom) */}
+                    <text x={div1X + 10} y={headerBox.y + 15} fontSize="9.2" fill="#475569">
+                      CLIENT:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {(cfg.clientName || 'Project Authority').slice(0, 30)}
+                      </tspan>
+                    </text>
+                    <text x={div1X + 10} y={headerBox.y + 30} fontSize="9.2" fill="#475569">
+                      CONTRACTOR:{' '}
+                      <tspan fontWeight="700" fill="#065F46">
+                        {(cfg.contractorName || 'Main Contractor').slice(0, 26)}
+                      </tspan>
+                    </text>
+                    <text x={div1X + 10} y={midRowY + 14} fontSize="9.5" fill="#475569">
+                      FACE CHAINAGE:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {settings.faceChainage}
+                      </tspan>{' '}
+                      · PULL:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {settings.roundLength.toFixed(2)}m
+                      </tspan>
+                    </text>
+                    <text x={div1X + 10} y={midRowY + 28} fontSize="9.0" fill="#334155">
+                      INTERVAL: <tspan fontWeight="700">{settings.chainage.slice(0, 28)}</tspan>
+                    </text>
+
+                    {/* Zone 3: Consultant & Contract No. (Top) + Dimensions & Azimuth (Bottom) */}
+                    <text x={div2X + 10} y={headerBox.y + 15} fontSize="9.2" fill="#475569">
+                      CONSULTANT:{' '}
+                      <tspan fontWeight="700" fill="#1E293B">
+                        {(cfg.consultantName || 'Supervision Consultant').slice(0, 24)}
+                      </tspan>
+                    </text>
+                    <text x={div2X + 10} y={headerBox.y + 30} fontSize="9.2" fill="#475569">
+                      CONTRACT:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {(cfg.contractNumber || 'PKG-01').slice(0, 24)}
+                      </tspan>
+                    </text>
+                    <text x={div2X + 10} y={midRowY + 14} fontSize="9.2" fill="#475569">
+                      SPAN W:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {geometry.width.toFixed(2)}m
+                      </tspan>{' '}
+                      · HT:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {geometry.height.toFixed(2)}m
+                      </tspan>{' '}
+                      · WALL:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {geometry.wallHeight.toFixed(2)}m
+                      </tspan>
+                    </text>
+                    <text x={div2X + 10} y={midRowY + 28} fontSize="9.0" fill="#334155">
+                      DESIGN AREA:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {(
+                          overbreakAnalysis?.designAreaSqMeters ??
+                          geometry.designAreaSqMeters ??
+                          geometry.width * geometry.height * 0.85
+                        ).toFixed(2)}{' '}
+                        m²
+                      </tspan>{' '}
+                      · CROWN: {geometry.crownArcLength.toFixed(2)}m
+                    </text>
+
+                    {/* Zone 4: Drawing No, Revision, Date, Mapped By & Scale */}
+                    <text x={div3X + 10} y={headerBox.y + 15} fontSize="9.2" fill="#475569">
+                      DWG NO:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {(cfg.drawingNumber || 'DWG-001').slice(0, 15)}
+                      </tspan>{' '}
+                      ({(cfg.revisionNumber || 'Rev 0').slice(0, 6)})
+                    </text>
+                    <text x={div3X + 10} y={headerBox.y + 30} fontSize="9.2" fill="#475569">
+                      DATE:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {settings.date}
+                      </tspan>
+                    </text>
+                    <text x={div3X + 10} y={midRowY + 14} fontSize="9.2" fill="#475569">
+                      MAPPED BY:{' '}
+                      <tspan fontWeight="700" fill="#0F172A">
+                        {(settings.mappedBy || 'Geologist / Surveyor').slice(0, 18)}
+                      </tspan>
+                    </text>
+                    <text
+                      x={div3X + 10}
+                      y={midRowY + 28}
+                      fontSize="9.2"
+                      fontWeight="700"
+                      fill="#0F172A"
+                    >
+                      SCALE 1:{engineeringScaleDenominator} ({geometry.source.toUpperCase()})
+                    </text>
+                  </g>
+                );
+              })()}
 
             {/* ==============================================================
                 2. DEVELOPED PERIMETER MAPPING (Priority 2: Left Wall | Crown | Right Wall)
@@ -975,7 +1495,9 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   fontWeight="700"
                   fill="#0F172A"
                 >
-                  DEVELOPED PERIMETER MAPPING (LEFT WALL — CROWN ARCH — RIGHT WALL) · PULL = {roundLen.toFixed(2)} m
+                  {outputMode === 'ENGINEERING_QUANTITY_SHEET'
+                    ? `DEVELOPED PERIMETER OVERBREAK & AS-BUILT SURVEY STRIP (LEFT WALL — CROWN ARCH — RIGHT WALL) · PULL = ${roundLen.toFixed(2)} m`
+                    : `DEVELOPED PERIMETER GEOLOGICAL MAPPING (LEFT WALL — CROWN ARCH — RIGHT WALL) · PULL = ${roundLen.toFixed(2)} m`}
                 </text>
 
                 {/* Drive Direction Indicator Arrow on Left */}
@@ -1212,8 +1734,9 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 fontWeight="700"
                 fill="#0F172A"
               >
-                MAIN TUNNEL FACE GEOLOGICAL MAPPING ({settings.faceChainage} · DRIVE N{' '}
-                {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E · {geometry.width.toFixed(2)}m × {geometry.height.toFixed(2)}m)
+                {outputMode === 'ENGINEERING_QUANTITY_SHEET'
+                  ? `TUNNEL CROSS-SECTION — DESIGN vs. AS-BUILT GEOLOGICAL OVERBREAK & UNDERCUT PROFILE (${settings.faceChainage} · ${geometry.width.toFixed(2)}m × ${geometry.height.toFixed(2)}m)`
+                  : `MAIN TUNNEL FACE GEOLOGICAL MAPPING (${settings.faceChainage} · DRIVE N ${String(Math.round(settings.driveDirection)).padStart(3, '0')}° E · ${geometry.width.toFixed(2)}m × ${geometry.height.toFixed(2)}m)`}
               </text>
 
               {/* Clean Paper-Neutral Interior Fill Inside Tunnel Profile (Never Black!) */}
@@ -1236,8 +1759,10 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 </g>
               )}
 
-              {/* LAYER 2: SUBTLE LITHOLOGY REGIONS (Transparent geological pattern below joints & symbols) */}
-              {showVectors && lithologyRegions.length > 0 && (
+              {/* LAYER 2: SUBTLE LITHOLOGY REGIONS (Shown on Geological Mapping Sheet, or if overlayJointsOnQuantity is enabled) */}
+              {showVectors &&
+                (outputMode !== 'ENGINEERING_QUANTITY_SHEET' || overlayJointsOnQuantity) &&
+                lithologyRegions.length > 0 && (
                 <g>
                   {lithologyRegions.map((reg) => {
                     if (!showPerimeterPlan && reg.surface !== 'face') return null;
@@ -1295,8 +1820,9 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 </g>
               )}
 
-              {/* LAYER 2.5: OVERBREAK / UNDERCUT VECTOR ANALYSIS REGIONS & SURVEYED AS-BUILT PROFILE */}
+              {/* LAYER 2.5: OVERBREAK / UNDERCUT VECTOR ANALYSIS REGIONS & SURVEYED AS-BUILT PROFILE (Dedicated to Overbreak & Quantity Sheet, or optional overlay on Geology Sheet) */}
               {showVectors &&
+                (outputMode === 'ENGINEERING_QUANTITY_SHEET' || overlayOverbreakOnGeology) &&
                 overbreakAnalysis &&
                 overbreakAnalysis.hasValidSurveyProfile &&
                 overbreakAnalysis.surface === 'face' && (
@@ -1461,7 +1987,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             {/* ==============================================================
                 4. LAYERS 3, 4 & 5: GEOLOGICAL FEATURES, JOINTS & STRUCTURAL SYMBOLS
                ============================================================== */}
-            {showVectors && (
+            {showVectors && (outputMode !== 'ENGINEERING_QUANTITY_SHEET' || overlayJointsOnQuantity) && (
               <g>
                 {/* Traced Geological Features & Discontinuities */}
                 {joints.map((joint) => {
@@ -1627,7 +2153,8 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             {showVectors && (
               <g>
                 {/* 6A. Joint Callout Labels (Non-Overlapping) */}
-                {joints.map((joint) => {
+                {(outputMode !== 'ENGINEERING_QUANTITY_SHEET' || overlayJointsOnQuantity) &&
+                  joints.map((joint) => {
                   if (!showPerimeterPlan && joint.surface !== 'face') return null;
                   const placement = nonOverlappingSheetLabels.jointPlacements[joint.id];
                   if (!placement) return null;
@@ -1686,9 +2213,10 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                 })}
 
                 {/* 6B. Placed Geological Symbol Labels (Non-Overlapping) */}
-                {placedSymbols
-                  .filter((sym) => sym.visible !== false && (showPerimeterPlan || sym.surface === 'face'))
-                  .map((sym) => {
+                {(outputMode !== 'ENGINEERING_QUANTITY_SHEET' || overlayJointsOnQuantity) &&
+                  placedSymbols
+                    .filter((sym) => sym.visible !== false && (showPerimeterPlan || sym.surface === 'face'))
+                    .map((sym) => {
                     const placement = nonOverlappingSheetLabels.symbolPlacements[sym.id];
                     if (!placement) return null;
                     const meta = getStructuralSymbolMeta(sym.symbolType);
@@ -1732,10 +2260,11 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     );
                   })}
 
-                {/* 6C. Survey Control Points & Multi-Line Non-Overlapping Labels (Sections 5, 6, 7) */}
-                {controlPoints
-                  .filter((cp) => cp.visible !== false && (showPerimeterPlan || cp.surface === 'face'))
-                  .map((cp) => {
+                {/* 6C. Survey Control Points & Multi-Line Non-Overlapping Labels (Dedicated to Overbreak & Quantity Sheet, or optional overlay on Geology Sheet) */}
+                {(outputMode === 'ENGINEERING_QUANTITY_SHEET' || overlayOverbreakOnGeology) &&
+                  controlPoints
+                    .filter((cp) => cp.visible !== false && (showPerimeterPlan || cp.surface === 'face'))
+                    .map((cp) => {
                     const pt = surfacePointToSheetXY(cp.point, cp.surface);
                     const placement = nonOverlappingSheetLabels.cpPlacements[cp.id];
                     return (
@@ -1930,6 +2459,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             {showTitleAndTables && (
               <g clipPath="url(#sheet-right-col-clip)">
                 {/* 7A. Structural Orientation & Tunnel Drive Azimuth Compass */}
+                {orientationBlock.height > 0 && (
                 <g transform={`translate(${orientationBlock.x}, ${orientationBlock.y})`}>
                   <rect
                     x="0"
@@ -1947,10 +2477,12 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     fontWeight="700"
                     fill="#0F172A"
                   >
-                    DRIVE DIRECTION &amp; STEREOGRAPHIC POLE SUMMARY
+                    {outputMode === 'ENGINEERING_QUANTITY_SHEET'
+                      ? 'CROSS-SECTION RADIAL DEVIATION & POLAR OVERBREAK PROFILE'
+                      : 'DRIVE DIRECTION & STEREOGRAPHIC POLE SUMMARY'}
                   </text>
 
-                  {/* Stereonet Circle & Pole Summary — Dynamically scaled to fill available orientationBlock space */}
+                  {/* Stereonet OR Radial Overbreak Deviation Diagram */}
                   {(() => {
                     const stereoR = Math.max(40, Math.min(70, (orientationBlock.height - 42) / 2));
                     const stereoCx = Math.round(stereoR + 22);
@@ -1963,6 +2495,68 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     const infoBodyFs = Number((contentMetrics.legendFontSize * Math.min(1.14, stereoScaleBoost)).toFixed(2));
                     const poleRadius = Number(Math.max(2.9, Math.min(4.2, stereoR * 0.062)).toFixed(1));
                     const cardinalFs = Number(Math.max(8.0, Math.min(10.2, stereoR * 0.16)).toFixed(1));
+
+                    if (outputMode === 'ENGINEERING_QUANTITY_SHEET') {
+                      const obArea = overbreakAnalysis?.overbreakAreaSqMeters ?? 0;
+                      const ucArea = overbreakAnalysis?.undercutAreaSqMeters ?? 0;
+                      const maxOb = overbreakAnalysis?.maxRadialOverbreakMeters ?? 0;
+                      const avgOb = overbreakAnalysis?.avgRadialOverbreakMeters ?? 0;
+                      const maxUc = overbreakAnalysis?.maxRadialUndercutMeters ?? 0;
+                      const desPerim = overbreakAnalysis?.designPerimeterMeters ?? geometry.totalPerimeter;
+                      const survPerim = overbreakAnalysis?.surveyedPerimeterMeters ?? desPerim;
+                      const designR = stereoR * 0.76;
+
+                      return (
+                        <>
+                          <g transform={`translate(${stereoCx}, ${stereoCy})`}>
+                            <circle cx="0" cy="0" r={stereoR} fill="#FFFFFF" stroke="#CBD5E1" strokeWidth="1" />
+                            {/* Design Reference Circle */}
+                            <circle
+                              cx="0"
+                              cy="0"
+                              r={designR}
+                              fill="rgba(14, 165, 233, 0.06)"
+                              stroke="#0F172A"
+                              strokeWidth="1.5"
+                              strokeDasharray="4,3"
+                            />
+                            {/* Simulated Polar Overbreak / Undercut Contour */}
+                            <path
+                              d={`M ${-designR * 1.04} ${designR * 0.55} L ${-designR * 1.12} 0 L ${-designR * 0.85} ${-designR * 0.82} L 0 ${-designR * 1.16} L ${designR * 0.88} ${-designR * 0.8} L ${designR * 1.1} 0 L ${designR * 0.96} ${designR * 0.55} Z`}
+                              fill="rgba(225, 29, 72, 0.14)"
+                              stroke="#E11D48"
+                              strokeWidth="1.5"
+                            />
+                            <line x1={-stereoR} y1="0" x2={stereoR} y2="0" stroke="#94A3B8" strokeWidth="0.7" />
+                            <line x1="0" y1={-stereoR} x2="0" y2={stereoR} stroke="#94A3B8" strokeWidth="0.7" />
+                            <text x="0" y={-stereoR - 4} textAnchor="middle" fontSize={cardinalFs - 0.5} fontWeight="700" fill="#BE123C">
+                              CROWN (+{maxOb.toFixed(2)}m)
+                            </text>
+                            <text x="0" y={stereoR + 10} textAnchor="middle" fontSize={cardinalFs - 0.5} fontWeight="600" fill="#475569">
+                              INVERT (0.00m)
+                            </text>
+                          </g>
+
+                          <g transform={`translate(${textStartX}, ${Math.round(33 + (availInfoH - lineSpacing * 4) * 0.22)})`}>
+                            <text x="0" y="0" fontSize={infoTitleFs} fontWeight="700" fill="#0F172A">
+                              STATION: {settings.faceChainage} · PULL INTERVAL: {(overbreakAnalysis?.effectivePullIntervalMeters ?? settings.roundLength).toFixed(2)} m
+                            </text>
+                            <text x="0" y={lineSpacing} fontSize={infoBodyFs} fill="#BE123C" fontWeight="700">
+                              · Radial Overbreak: Max = +{maxOb.toFixed(3)} m · Avg = +{avgOb.toFixed(3)} m ({overbreakAnalysis?.overbreakRegions.length ?? 0} Zones)
+                            </text>
+                            <text x="0" y={lineSpacing * 2} fontSize={infoBodyFs} fill="#B45309" fontWeight="700">
+                              · Radial Undercut: Max = -{maxUc.toFixed(3)} m · Area = {ucArea.toFixed(2)} m² ({overbreakAnalysis?.undercutRegions.length ?? 0} Zones)
+                            </text>
+                            <text x="0" y={lineSpacing * 3} fontSize={infoBodyFs - 0.3} fill="#334155">
+                              · Perimeter: Design = {desPerim.toFixed(2)} m vs. Surveyed As-Built = {survPerim.toFixed(2)} m
+                            </text>
+                            <text x="0" y={lineSpacing * 4.05} fontSize={infoBodyFs} fontWeight="700" fill="#0F172A">
+                              NET OVERBREAK: +{obArea.toFixed(2)} m² ({(overbreakAnalysis?.overbreakPercent ?? 0).toFixed(1)}%) · CONTROL PTS: {controlPoints.length}
+                            </text>
+                          </g>
+                        </>
+                      );
+                    }
 
                     return (
                       <>
@@ -2036,8 +2630,10 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     );
                   })()}
                 </g>
+                )}
 
-                {/* 7B. Professional Geological & Lithological Legend (Priority 4 - Space-Aware & Content-Aware) */}
+                {/* 7B. Professional Legend (Geological & Lithological OR Overbreak, Undercut & Survey Legend) */}
+                {legendBlock.height > 0 && (
                 <g transform={`translate(${legendBlock.x}, ${legendBlock.y})`}>
                   <rect
                     x="0"
@@ -2055,113 +2651,191 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     fontWeight="700"
                     fill="#0F172A"
                   >
-                    GEOLOGICAL &amp; LITHOLOGICAL MAPPING LEGEND
+                    {outputMode === 'ENGINEERING_QUANTITY_SHEET'
+                      ? 'OVERBREAK, UNDERCUT & AS-BUILT SURVEY LEGEND'
+                      : 'GEOLOGICAL & LITHOLOGICAL MAPPING LEGEND'}
                   </text>
                   <line x1="0" y1="24" x2={legendBlock.width} y2="24" stroke="#0F172A" strokeWidth="0.8" />
 
-                  {/* Column 1: Structural Symbols (Auto-scaled to legendBlock.height) */}
-                  {(() => {
-                    const ls = contentMetrics.legendRowSpacing;
-                    const lf = contentMetrics.legendFontSize;
-                    const sw = Math.round(Math.max(30, Math.min(40, legendBlock.width * 0.068)));
-                    const midSw = sw / 2;
-                    const textX = sw + 10;
-                    const startY = Math.round(36 + Math.max(0, (legendBlock.height - 36 - ls * 4.5) * 0.3));
-                    return (
-                      <g transform={`translate(14, ${startY})`}>
-                        <line x1="0" y1="0" x2={sw} y2="0" stroke="#DC2626" strokeWidth="2.2" />
-                        <line x1={midSw} y1="0" x2={midSw} y2="7.5" stroke="#DC2626" strokeWidth="1.7" />
-                        <text x={textX} y="3.5" fontSize={lf} fontWeight="600" fill="#0F172A">
-                          Joint Trace + Dip Dir / Dip
-                        </text>
+                  {outputMode === 'ENGINEERING_QUANTITY_SHEET' ? (
+                    (() => {
+                      const ls = contentMetrics.legendRowSpacing;
+                      const lf = contentMetrics.legendFontSize;
+                      const sw = Math.round(Math.max(32, Math.min(42, legendBlock.width * 0.07)));
+                      const midSw = sw / 2;
+                      const textX = sw + 10;
+                      const startY = Math.round(36 + Math.max(0, (legendBlock.height - 36 - ls * 4.2) * 0.25));
+                      return (
+                        <>
+                          <g transform={`translate(14, ${startY})`}>
+                            <line x1="0" y1="0" x2={sw} y2="0" stroke="#0F172A" strokeWidth="2.4" />
+                            <text x={textX} y="3.5" fontSize={lf} fontWeight="700" fill="#0F172A">
+                              Design Excavation Boundary
+                            </text>
 
-                        <line x1="0" y1={ls} x2={sw} y2={ls} stroke="#0284C7" strokeWidth="2.2" strokeDasharray="6,3" />
-                        <polygon points={`${midSw - 4.5},${ls} ${midSw + 4.5},${ls} ${midSw},${ls + 7.5}`} fill="none" stroke="#0284C7" strokeWidth="1.4" />
-                        <text x={textX} y={ls + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
-                          Bedding (S0) / Foliation (S1)
-                        </text>
+                            <line x1="0" y1={ls} x2={sw} y2={ls} stroke="#059669" strokeWidth="2.2" strokeDasharray="6,3" />
+                            <text x={textX} y={ls + 3.5} fontSize={lf} fontWeight="700" fill="#065F46">
+                              Surveyed As-Built Profile
+                            </text>
 
-                        <line x1="0" y1={ls * 2} x2={sw} y2={ls * 2} stroke="#E11D48" strokeWidth="5.5" strokeOpacity="0.22" />
-                        <line x1="0" y1={ls * 2} x2={sw} y2={ls * 2} stroke="#E11D48" strokeWidth="2.2" strokeDasharray="8,2,2,2" />
-                        <polygon points={`${midSw - 4.5},${ls * 2} ${midSw + 4.5},${ls * 2} ${midSw},${ls * 2 + 7.5}`} fill="#E11D48" />
-                        <text x={textX} y={ls * 2 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
-                          Fault / Shear Zone / Gouge
-                        </text>
+                            <rect x="0" y={ls * 2 - 7} width={sw} height="13" fill="rgba(225, 29, 72, 0.16)" stroke="#E11D48" strokeWidth="1.1" />
+                            <rect x="0" y={ls * 2 - 7} width={sw} height="13" fill="url(#sheet-overbreak-hatch)" />
+                            <text x={textX} y={ls * 2 + 3} fontSize={lf} fontWeight="700" fill="#BE123C">
+                              Overbreak (Outside Design)
+                            </text>
 
-                        <path d={`M 2 ${ls * 3} Q ${midSw * 0.55} ${ls * 3 - 5} ${midSw} ${ls * 3} T ${sw - 2} ${ls * 3}`} fill="none" stroke="#0284C7" strokeWidth="1.8" />
-                        <text x={textX} y={ls * 3 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
-                          Water Seepage / Flow / Vein
-                        </text>
+                            <rect x="0" y={ls * 3 - 7} width={sw} height="13" fill="rgba(217, 119, 6, 0.18)" stroke="#D97706" strokeWidth="1.1" />
+                            <rect x="0" y={ls * 3 - 7} width={sw} height="13" fill="url(#sheet-undercut-hatch)" />
+                            <text x={textX} y={ls * 3 + 3} fontSize={lf} fontWeight="700" fill="#B45309">
+                              Undercut (Inside Design)
+                            </text>
 
-                        <circle cx={midSw} cy={ls * 4} r="4.8" fill="#FFFFFF" stroke="#059669" strokeWidth="1.5" />
-                        <line x1={midSw - 6} y1={ls * 4} x2={midSw + 6} y2={ls * 4} stroke="#059669" strokeWidth="1.3" />
-                        <line x1={midSw} y1={ls * 4 - 6} x2={midSw} y2={ls * 4 + 6} stroke="#059669" strokeWidth="1.3" />
-                        <text x={textX} y={ls * 4 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
-                          Survey Control Point (CP)
-                        </text>
-                      </g>
-                    );
-                  })()}
-
-                  {/* Column 2: Active Lithology Units & Standard Rock Patterns (Auto-scaled swatches & text) */}
-                  {(() => {
-                    const ls = contentMetrics.legendRowSpacing;
-                    const swatchW = Math.round(Math.max(32, Math.min(42, legendBlock.width * 0.07)));
-                    const swatchH = Math.round(Math.max(14, Math.min(18, ls * 0.64)));
-                    const startY = Math.round(30 + Math.max(0, (legendBlock.height - 36 - ls * 4.5) * 0.25));
-                    return (
-                      <g transform={`translate(${Math.round(legendBlock.width * 0.51)}, ${startY})`}>
-                        {(lithologyRegions.length > 0
-                          ? Array.from(
-                              new Map(lithologyRegions.map((r) => [r.patternType, r])).values()
-                            ).slice(0, contentMetrics.maxLegendLithologyRows)
-                          : [
-                              { patternType: 'quartzite', lithologyName: 'Quartzite', colorHex: '#EAB308' },
-                              { patternType: 'phyllite', lithologyName: 'Phyllite / Schist', colorHex: '#38BDF8' },
-                              { patternType: 'granite', lithologyName: 'Granite / Gneiss', colorHex: '#FB7185' },
-                              { patternType: 'dolerite', lithologyName: 'Dolerite / Basalt', colorHex: '#475569' },
-                              { patternType: 'shear_zone', lithologyName: 'Shear / Breccia Zone', colorHex: '#EF4444' },
-                            ]
-                        ).map((unit, uIdx) => (
-                          <g key={`leg-lith-${uIdx}`} transform={`translate(0, ${uIdx * ls})`}>
-                            <rect
-                              x="0"
-                              y="0"
-                              width={swatchW}
-                              height={swatchH}
-                              fill={unit.colorHex}
-                              fillOpacity="0.22"
-                              stroke="#334155"
-                              strokeWidth="0.9"
-                            />
-                            <rect
-                              x="0"
-                              y="0"
-                              width={swatchW}
-                              height={swatchH}
-                              fill={`url(#sheet-lith-${unit.patternType})`}
-                              stroke="#334155"
-                              strokeWidth="0.9"
-                            />
-                            <text
-                              x={swatchW + 9}
-                              y={Math.round(swatchH * 0.74)}
-                              fontSize={contentMetrics.legendFontSize}
-                              fontWeight="700"
-                              fill="#0F172A"
-                            >
-                              {unit.lithologyName.slice(0, 27)}
+                            <circle cx={midSw} cy={ls * 4} r="4.8" fill="#FFFFFF" stroke="#059669" strokeWidth="1.5" />
+                            <line x1={midSw - 6} y1={ls * 4} x2={midSw + 6} y2={ls * 4} stroke="#059669" strokeWidth="1.3" />
+                            <line x1={midSw} y1={ls * 4 - 6} x2={midSw} y2={ls * 4 + 6} stroke="#059669" strokeWidth="1.3" />
+                            <text x={textX} y={ls * 4 + 3.5} fontSize={lf} fontWeight="700" fill="#0F172A">
+                              Survey Control Point (CP1..CPn)
                             </text>
                           </g>
-                        ))}
-                      </g>
-                    );
-                  })()}
+
+                          <g transform={`translate(${Math.round(legendBlock.width * 0.51)}, ${startY})`}>
+                            <rect x="0" y="-7" width={sw} height="14" rx="2" fill="#FFE4E6" stroke="#E11D48" strokeWidth="1" />
+                            <text x={midSw} y="3" textAnchor="middle" fontSize="7.5" fontWeight="700" fill="#BE123C">GEO</text>
+                            <text x={textX} y="3" fontSize={lf} fontWeight="700" fill="#0F172A">
+                              Geological Wedge / Joint Overbreak
+                            </text>
+
+                            <rect x="0" y={ls - 7} width={sw} height="14" rx="2" fill="#FEF3C7" stroke="#D97706" strokeWidth="1" />
+                            <text x={midSw} y={ls + 3} textAnchor="middle" fontSize="7.5" fontWeight="700" fill="#B45309">MECH</text>
+                            <text x={textX} y={ls + 3} fontSize={lf} fontWeight="700" fill="#0F172A">
+                              Mechanical / Drill Lookout Cause
+                            </text>
+
+                            <text x="0" y={ls * 2.15} fontSize={lf - 0.3} fontWeight="700" fill="#0F172A">
+                              VOLUME FORMULA (SINGLE SECTION):
+                            </text>
+                            <text x="0" y={ls * 2.95} fontSize={lf - 0.5} fill="#334155">
+                              V = Area (m²) × Pull Interval L (m)
+                            </text>
+                            <text x="0" y={ls * 3.85} fontSize={lf - 0.3} fontWeight="700" fill="#0F172A">
+                              MULTI-SECTION PRISMOIDAL VOLUME:
+                            </text>
+                            <text x="0" y={ls * 4.55} fontSize={lf - 0.5} fill="#334155">
+                              V = (ΔRD / 6) × (A₁ + 4·Aₘ + A₂)
+                            </text>
+                          </g>
+                        </>
+                      );
+                    })()
+                  ) : (
+                    <>
+                      {/* Column 1: Structural Symbols (Auto-scaled to legendBlock.height) */}
+                      {(() => {
+                        const ls = contentMetrics.legendRowSpacing;
+                        const lf = contentMetrics.legendFontSize;
+                        const sw = Math.round(Math.max(30, Math.min(40, legendBlock.width * 0.068)));
+                        const midSw = sw / 2;
+                        const textX = sw + 10;
+                        const startY = Math.round(36 + Math.max(0, (legendBlock.height - 36 - ls * 4.5) * 0.3));
+                        return (
+                          <g transform={`translate(14, ${startY})`}>
+                            <line x1="0" y1="0" x2={sw} y2="0" stroke="#DC2626" strokeWidth="2.2" />
+                            <line x1={midSw} y1="0" x2={midSw} y2="7.5" stroke="#DC2626" strokeWidth="1.7" />
+                            <text x={textX} y="3.5" fontSize={lf} fontWeight="600" fill="#0F172A">
+                              Joint Trace + Dip Dir / Dip
+                            </text>
+
+                            <line x1="0" y1={ls} x2={sw} y2={ls} stroke="#0284C7" strokeWidth="2.2" strokeDasharray="6,3" />
+                            <polygon points={`${midSw - 4.5},${ls} ${midSw + 4.5},${ls} ${midSw},${ls + 7.5}`} fill="none" stroke="#0284C7" strokeWidth="1.4" />
+                            <text x={textX} y={ls + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                              Bedding (S0) / Foliation (S1)
+                            </text>
+
+                            <line x1="0" y1={ls * 2} x2={sw} y2={ls * 2} stroke="#E11D48" strokeWidth="5.5" strokeOpacity="0.22" />
+                            <line x1="0" y1={ls * 2} x2={sw} y2={ls * 2} stroke="#E11D48" strokeWidth="2.2" strokeDasharray="8,2,2,2" />
+                            <polygon points={`${midSw - 4.5},${ls * 2} ${midSw + 4.5},${ls * 2} ${midSw},${ls * 2 + 7.5}`} fill="#E11D48" />
+                            <text x={textX} y={ls * 2 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                              Fault / Shear Zone / Gouge
+                            </text>
+
+                            <path d={`M 2 ${ls * 3} Q ${midSw * 0.55} ${ls * 3 - 5} ${midSw} ${ls * 3} T ${sw - 2} ${ls * 3}`} fill="none" stroke="#0284C7" strokeWidth="1.8" />
+                            <text x={textX} y={ls * 3 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                              Water Seepage / Flow / Vein
+                            </text>
+
+                            <circle cx={midSw} cy={ls * 4} r="4.8" fill="#FFFFFF" stroke="#059669" strokeWidth="1.5" />
+                            <line x1={midSw - 6} y1={ls * 4} x2={midSw + 6} y2={ls * 4} stroke="#059669" strokeWidth="1.3" />
+                            <line x1={midSw} y1={ls * 4 - 6} x2={midSw} y2={ls * 4 + 6} stroke="#059669" strokeWidth="1.3" />
+                            <text x={textX} y={ls * 4 + 3.5} fontSize={lf} fontWeight="600" fill="#0F172A">
+                              Survey Control Point (CP)
+                            </text>
+                          </g>
+                        );
+                      })()}
+
+                      {/* Column 2: Active Lithology Units & Standard Rock Patterns (Auto-scaled swatches & text) */}
+                      {(() => {
+                        const ls = contentMetrics.legendRowSpacing;
+                        const swatchW = Math.round(Math.max(32, Math.min(42, legendBlock.width * 0.07)));
+                        const swatchH = Math.round(Math.max(14, Math.min(18, ls * 0.64)));
+                        const startY = Math.round(30 + Math.max(0, (legendBlock.height - 36 - ls * 4.5) * 0.25));
+                        return (
+                          <g transform={`translate(${Math.round(legendBlock.width * 0.51)}, ${startY})`}>
+                            {(lithologyRegions.length > 0
+                              ? Array.from(
+                                  new Map(lithologyRegions.map((r) => [r.patternType, r])).values()
+                                ).slice(0, contentMetrics.maxLegendLithologyRows)
+                              : [
+                                  { patternType: 'quartzite', lithologyName: 'Quartzite', colorHex: '#EAB308' },
+                                  { patternType: 'phyllite', lithologyName: 'Phyllite / Schist', colorHex: '#38BDF8' },
+                                  { patternType: 'granite', lithologyName: 'Granite / Gneiss', colorHex: '#FB7185' },
+                                  { patternType: 'dolerite', lithologyName: 'Dolerite / Basalt', colorHex: '#475569' },
+                                  { patternType: 'shear_zone', lithologyName: 'Shear / Breccia Zone', colorHex: '#EF4444' },
+                                ]
+                            ).map((unit, uIdx) => (
+                              <g key={`leg-lith-${uIdx}`} transform={`translate(0, ${uIdx * ls})`}>
+                                <rect
+                                  x="0"
+                                  y="0"
+                                  width={swatchW}
+                                  height={swatchH}
+                                  fill={unit.colorHex}
+                                  fillOpacity="0.22"
+                                  stroke="#334155"
+                                  strokeWidth="0.9"
+                                />
+                                <rect
+                                  x="0"
+                                  y="0"
+                                  width={swatchW}
+                                  height={swatchH}
+                                  fill={`url(#sheet-lith-${unit.patternType})`}
+                                  stroke="#334155"
+                                  strokeWidth="0.9"
+                                />
+                                <text
+                                  x={swatchW + 9}
+                                  y={Math.round(swatchH * 0.74)}
+                                  fontSize={contentMetrics.legendFontSize}
+                                  fontWeight="700"
+                                  fill="#0F172A"
+                                >
+                                  {unit.lithologyName.slice(0, 27)}
+                                </text>
+                              </g>
+                            ))}
+                          </g>
+                        );
+                      })()}
+                    </>
+                  )}
                 </g>
+                )}
 
                 {/* 7C. Content-Aware Table: Regional Overbreak & Undercut Breakdown OR Discontinuity-Set Table */}
                 {outputMode === 'ENGINEERING_QUANTITY_SHEET' ? (
                   <>
+                    {jointTableBlock.height > 0 && (
                     <g transform={`translate(${jointTableBlock.x}, ${jointTableBlock.y})`}>
                       <rect
                         x="0"
@@ -2221,142 +2895,214 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                           ...(overbreakAnalysis?.overbreakRegions || []),
                           ...(overbreakAnalysis?.undercutRegions || []),
                         ];
-                        if (zones.length === 0) {
-                          return (
-                            <text
-                              x={jointTableBlock.width / 2}
-                              y={Math.min(95, jointTableBlock.height / 2 + 12)}
-                              textAnchor="middle"
-                              fontSize="9"
-                              fill="#64748B"
-                            >
-                              Connect Survey Control Points (CP1→CP2→...) to compute Overbreak &amp; Undercut zones.
-                            </text>
-                          );
-                        }
-                         const visibleZones = zones.slice(0, contentMetrics.maxVisibleOverbreakZones);
-                        const rowH = Math.min(
-                          52,
-                          Math.max(
-                            19,
-                            Math.floor((jointTableBlock.height - 42) / Math.max(1, visibleZones.length))
-                          )
-                        );
+                        const visibleZones = zones.slice(0, contentMetrics.maxVisibleOverbreakZones);
+                        const availTableH = jointTableBlock.height - 42;
+                        const isFixedMode = effectiveSheetConfig.layoutMode === 'FIXED_LAYOUT';
+                        const rowH =
+                          visibleZones.length > 0
+                            ? isFixedMode
+                              ? Math.min(
+                                  64,
+                                  Math.max(
+                                    19,
+                                    Math.min(
+                                      effectiveSheetConfig.manualTableRowHeight ?? 34,
+                                      Math.floor(availTableH / Math.max(1, visibleZones.length))
+                                    )
+                                  )
+                                )
+                              : Math.min(
+                                  68,
+                                  Math.max(19, Math.floor(availTableH / Math.max(1, visibleZones.length)))
+                                )
+                            : 0;
+                        const usedRowsH = visibleZones.length * rowH;
+                        const remainingBottomH = isFixedMode ? 0 : availTableH - usedRowsH;
                         const cols = contentMetrics.overbreakColumns;
                         const cellFs = contentMetrics.tableCellFontSize;
                         const subFs = contentMetrics.tableSubCellFontSize;
                         const compactRow = rowH < 25;
 
-                        return visibleZones.map((z, idx) => {
-                          const rowY = 41 + idx * rowH;
-                          const isOB = z.type === 'OVERBREAK';
-                          return (
-                            <g key={z.id} transform={`translate(0, ${rowY})`}>
-                              <rect
-                                x="0"
-                                y="0"
-                                width={jointTableBlock.width}
-                                height={rowH}
-                                fill={idx % 2 === 0 ? '#FFFFFF' : '#F8FAFC'}
-                                stroke="#CBD5E1"
-                                strokeWidth="0.6"
-                              />
-                              <rect
-                                x="5"
-                                y={Math.max(2, (rowH - 14) / 2)}
-                                width={cols[0].width - 10}
-                                height="14"
-                                rx="2"
-                                fill={isOB ? '#E11D48' : '#D97706'}
-                              />
+                        return (
+                          <>
+                            {visibleZones.length === 0 && (
                               <text
-                                x={cols[0].width / 2}
-                                y={Math.max(2, (rowH - 14) / 2) + 10}
+                                x={jointTableBlock.width / 2}
+                                y={Math.min(72, jointTableBlock.height / 3)}
                                 textAnchor="middle"
-                                fontSize={subFs}
-                                fontWeight="700"
-                                fill="#FFFFFF"
-                              >
-                                {z.id}
-                              </text>
-                              <text
-                                x={cols[1].x + 5}
-                                y={compactRow ? rowH * 0.62 : rowH * 0.42}
                                 fontSize={cellFs}
-                                fontWeight="700"
-                                fill="#0F172A"
+                                fontWeight="600"
+                                fill="#475569"
                               >
-                                {z.locationLabel.slice(0, cols[1].maxChars)}
+                                Connect Survey Control Points (CP1→CP2→...) to compute Overbreak &amp; Undercut zones.
                               </text>
-                              {!compactRow && (
-                                <text
-                                  x={cols[1].x + 5}
-                                  y={rowH * 0.78}
-                                  fontSize={subFs}
-                                  fill="#475569"
-                                >
-                                  Perim: {z.affectedPerimeterMeters.toFixed(2)}m
-                                </text>
-                              )}
-                              <text
-                                x={cols[2].x + 5}
-                                y={compactRow ? rowH * 0.62 : rowH * 0.42}
-                                fontSize={cellFs}
-                                fontWeight="700"
-                                fill={isOB ? '#BE123C' : '#B45309'}
-                              >
-                                {isOB ? '+' : '-'}
-                                {z.areaSqMeters.toFixed(2)} m²
-                              </text>
-                              {!compactRow && (
-                                <text
-                                  x={cols[2].x + 5}
-                                  y={rowH * 0.78}
-                                  fontSize={subFs}
-                                  fill="#475569"
-                                >
-                                  ({z.percentageOfDesign.toFixed(1)}%)
-                                </text>
-                              )}
-                              <text
-                                x={cols[3].x + 5}
-                                y={rowH * 0.56}
-                                fontSize={cellFs}
-                                fontWeight="700"
-                                fill="#0F172A"
-                              >
-                                {isOB ? '+' : '-'}
-                                {z.maxRadialMeters.toFixed(2)} m
-                              </text>
-                              <text
-                                x={cols[4].x + 5}
-                                y={compactRow ? rowH * 0.62 : rowH * 0.42}
-                                fontSize={subFs + 0.3}
-                                fontWeight="700"
-                                fill="#0F172A"
-                              >
-                                [{z.reasonCategory === 'GEOLOGICAL' ? 'GEOL' : 'MECH'}]{' '}
-                                {z.linkedJointSets
-                                  ? `(${Array.isArray(z.linkedJointSets) ? z.linkedJointSets.join(', ') : z.linkedJointSets})`
-                                  : ''}
-                              </text>
-                              {!compactRow && (
-                                <text
-                                  x={cols[4].x + 5}
-                                  y={rowH * 0.78}
-                                  fontSize={subFs}
-                                  fill="#334155"
-                                >
-                                  {z.reasonDetail.slice(0, cols[4].subMaxChars)}
-                                </text>
-                              )}
-                            </g>
-                          );
-                        });
+                            )}
+                            {visibleZones.map((z, idx) => {
+                              const rowY = 41 + idx * rowH;
+                              const isOB = z.type === 'OVERBREAK';
+                              const badgeH = Math.min(20, Math.max(14, Math.round(rowH * 0.44)));
+                              const badgeY = Math.max(2, (rowH - badgeH) / 2);
+                              return (
+                                <g key={z.id} transform={`translate(0, ${rowY})`}>
+                                  <rect
+                                    x="0"
+                                    y="0"
+                                    width={jointTableBlock.width}
+                                    height={rowH}
+                                    fill={idx % 2 === 0 ? '#FFFFFF' : '#F8FAFC'}
+                                    stroke="#CBD5E1"
+                                    strokeWidth="0.6"
+                                  />
+                                  <rect
+                                    x="5"
+                                    y={badgeY}
+                                    width={cols[0].width - 10}
+                                    height={badgeH}
+                                    rx="2"
+                                    fill={isOB ? '#E11D48' : '#D97706'}
+                                  />
+                                  <text
+                                    x={cols[0].width / 2}
+                                    y={badgeY + badgeH * 0.72}
+                                    textAnchor="middle"
+                                    fontSize={subFs + 0.4}
+                                    fontWeight="700"
+                                    fill="#FFFFFF"
+                                  >
+                                    {z.id}
+                                  </text>
+                                  <text
+                                    x={cols[1].x + 5}
+                                    y={compactRow ? rowH * 0.62 : rowH * 0.42}
+                                    fontSize={cellFs}
+                                    fontWeight="700"
+                                    fill="#0F172A"
+                                  >
+                                    {z.locationLabel.slice(0, cols[1].maxChars)}
+                                  </text>
+                                  {!compactRow && (
+                                    <text
+                                      x={cols[1].x + 5}
+                                      y={rowH * 0.78}
+                                      fontSize={subFs}
+                                      fill="#475569"
+                                    >
+                                      Perim: {z.affectedPerimeterMeters.toFixed(2)}m
+                                    </text>
+                                  )}
+                                  <text
+                                    x={cols[2].x + 5}
+                                    y={compactRow ? rowH * 0.62 : rowH * 0.42}
+                                    fontSize={cellFs}
+                                    fontWeight="700"
+                                    fill={isOB ? '#BE123C' : '#B45309'}
+                                  >
+                                    {isOB ? '+' : '-'}
+                                    {z.areaSqMeters.toFixed(2)} m²
+                                  </text>
+                                  {!compactRow && (
+                                    <text
+                                      x={cols[2].x + 5}
+                                      y={rowH * 0.78}
+                                      fontSize={subFs}
+                                      fill="#475569"
+                                    >
+                                      ({z.percentageOfDesign.toFixed(1)}%)
+                                    </text>
+                                  )}
+                                  <text
+                                    x={cols[3].x + 5}
+                                    y={rowH * 0.56}
+                                    fontSize={cellFs}
+                                    fontWeight="700"
+                                    fill="#0F172A"
+                                  >
+                                    {isOB ? '+' : '-'}
+                                    {z.maxRadialMeters.toFixed(2)} m
+                                  </text>
+                                  <text
+                                    x={cols[4].x + 5}
+                                    y={compactRow ? rowH * 0.62 : rowH * 0.42}
+                                    fontSize={subFs + 0.3}
+                                    fontWeight="700"
+                                    fill="#0F172A"
+                                  >
+                                    [{z.reasonCategory === 'GEOLOGICAL' ? 'GEOL' : 'MECH'}]{' '}
+                                    {z.linkedJointSets
+                                      ? `(${Array.isArray(z.linkedJointSets) ? z.linkedJointSets.join(', ') : z.linkedJointSets})`
+                                      : ''}
+                                  </text>
+                                  {!compactRow && (
+                                    <text
+                                      x={cols[4].x + 5}
+                                      y={rowH * 0.78}
+                                      fontSize={subFs}
+                                      fill="#334155"
+                                    >
+                                      {z.reasonDetail.slice(0, cols[4].subMaxChars)}
+                                    </text>
+                                  )}
+                                </g>
+                              );
+                            })}
+
+                            {/* Adaptive Station Excavation & Control Point Matrix to Utilize Any Remaining White Space */}
+                            {remainingBottomH >= 48 && (() => {
+                              const fillerY = 41 + usedRowsH;
+                              const desA = overbreakAnalysis?.designAreaSqMeters ?? geometry.width * geometry.height * 0.85;
+                              const srvA = overbreakAnalysis?.surveyedAreaSqMeters ?? desA;
+                              const obA = overbreakAnalysis?.overbreakAreaSqMeters ?? 0;
+                              const ucA = overbreakAnalysis?.undercutAreaSqMeters ?? 0;
+                              const pullM = overbreakAnalysis?.effectivePullIntervalMeters ?? settings.roundLength;
+                              const netDiffA = srvA - desA;
+                              const netDiffVol = netDiffA * pullM;
+                              const cellW = Math.floor(jointTableBlock.width / 3);
+                              return (
+                                <g transform={`translate(0, ${fillerY})`}>
+                                  <rect
+                                    x="0"
+                                    y="0"
+                                    width={jointTableBlock.width}
+                                    height={remainingBottomH}
+                                    fill="#F8FAFC"
+                                    stroke="#0F172A"
+                                    strokeWidth="0.9"
+                                  />
+                                  <rect x="0" y="0" width={jointTableBlock.width} height="18" fill="#E2E8F0" />
+                                  <text x="10" y="12.5" fontSize={subFs + 0.4} fontWeight="700" fill="#0F172A">
+                                    STATION AS-BUILT QUANTITY &amp; PAYLINE RECONCILIATION MATRIX ({settings.faceChainage})
+                                  </text>
+                                  <line x1={cellW} y1="18" x2={cellW} y2={remainingBottomH} stroke="#CBD5E1" strokeWidth="0.8" />
+                                  <line x1={cellW * 2} y1="18" x2={cellW * 2} y2={remainingBottomH} stroke="#CBD5E1" strokeWidth="0.8" />
+                                  <text x="10" y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0F172A">
+                                    Design Area: {desA.toFixed(2)} m²
+                                  </text>
+                                  <text x="10" y="46" fontSize={subFs} fill="#334155">
+                                    Design Vol ({pullM.toFixed(1)}m): {(desA * pullM).toFixed(2)} m³
+                                  </text>
+                                  <text x={cellW + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#065F46">
+                                    Surveyed Area: {srvA.toFixed(2)} m²
+                                  </text>
+                                  <text x={cellW + 10} y="46" fontSize={subFs} fill="#334155">
+                                    As-Built Vol ({pullM.toFixed(1)}m): {(srvA * pullM).toFixed(2)} m³
+                                  </text>
+                                  <text x={cellW * 2 + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill={netDiffA >= 0 ? '#BE123C' : '#B45309'}>
+                                    Net Diff: {netDiffA >= 0 ? '+' : ''}{netDiffA.toFixed(2)} m² ({netDiffVol >= 0 ? '+' : ''}{netDiffVol.toFixed(2)} m³)
+                                  </text>
+                                  <text x={cellW * 2 + 10} y="46" fontSize={subFs} fill="#334155">
+                                    OB: +{obA.toFixed(2)}m² · UC: -{ucA.toFixed(2)}m² · CPs: {controlPoints.length}
+                                  </text>
+                                </g>
+                              );
+                            })()}
+                          </>
+                        );
                       })()}
                     </g>
+                    )}
 
                     {/* 7D. EXCAVATION QUANTITY & MULTI-SECTION VOLUME BLOCK */}
+                    {qIndexAndNotesBlock.height > 0 && (
                     <g transform={`translate(${qIndexAndNotesBlock.x}, ${qIndexAndNotesBlock.y})`}>
                       <rect
                         x="0"
@@ -2459,13 +3205,36 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         fontWeight="700"
                         fill="#0F172A"
                       >
-                        CONTRACTOR GEOLOGIST SIGN: ____________________ · CLIENT GEOLOGIST SIGN: ____________________
+                        {(effectiveSheetConfig.leftSignatoryTitle || 'CONTRACTOR GEOLOGIST SIGN')}: ____________________ · {(effectiveSheetConfig.rightSignatoryTitle || 'CLIENT GEOLOGIST SIGN')}: ____________________
                       </text>
+                      {effectiveSheetConfig.logoPosition === 'BOTTOM_SIGN_BLOCK' && (
+                        <g transform={`translate(${qIndexAndNotesBlock.width - 170}, ${qIndexAndNotesBlock.height - 21})`}>
+                          {[
+                            effectiveSheetConfig.clientLogoDataUrl,
+                            effectiveSheetConfig.contractorLogoDataUrl,
+                            effectiveSheetConfig.consultantLogoDataUrl,
+                          ]
+                            .filter((u): u is string => Boolean(u))
+                            .map((url, idx) => (
+                              <image
+                                key={`bot-q-logo-${idx}`}
+                                href={url}
+                                x={idx * 54}
+                                y="0"
+                                width="50"
+                                height="19"
+                                preserveAspectRatio="xMidYMid meet"
+                              />
+                            ))}
+                        </g>
+                      )}
                     </g>
+                    )}
                   </>
                 ) : (
                   <>
                     {/* 7C. Content-Aware Discontinuity-Set & Structural Data Table (Zero Intersection!) */}
+                    {jointTableBlock.height > 0 && (
                     <g transform={`translate(${jointTableBlock.x}, ${jointTableBlock.y})`}>
                       <rect
                         x="0"
@@ -2541,128 +3310,197 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         </text>
                       ) : (
                         (() => {
-                           const visibleSets = jointSets.slice(0, contentMetrics.maxVisibleJointSets);
+                          const visibleSets = jointSets.slice(0, contentMetrics.maxVisibleJointSets);
                           const availRowsH = jointTableBlock.height - 42;
-                          const rowH = Math.min(
-                            54,
-                            Math.max(19, Math.floor(availRowsH / Math.max(1, visibleSets.length)))
-                          );
+                          const isFixedMode = effectiveSheetConfig.layoutMode === 'FIXED_LAYOUT';
+                          const rowH = isFixedMode
+                            ? Math.min(
+                                64,
+                                Math.max(
+                                  19,
+                                  Math.min(
+                                    effectiveSheetConfig.manualTableRowHeight ?? 34,
+                                    Math.floor(availRowsH / Math.max(1, visibleSets.length))
+                                  )
+                                )
+                              )
+                            : Math.min(
+                                68,
+                                Math.max(19, Math.floor(availRowsH / Math.max(1, visibleSets.length)))
+                              );
+                          const usedRowsH = visibleSets.length * rowH;
+                          const remainingBottomH = isFixedMode ? 0 : availRowsH - usedRowsH;
                           const cols = contentMetrics.discontinuityColumns;
                           const cellFs = contentMetrics.tableCellFontSize;
                           const subFs = contentMetrics.tableSubCellFontSize;
                           const compactRow = rowH < 25;
 
-                          return visibleSets.map((js, idx) => {
-                            const rowY = 41 + idx * rowH;
-                            const badgeH = Math.min(20, Math.max(13, Math.round(rowH * 0.46)));
-                            const badgeY = Math.max(2, (rowH - badgeH) / 2);
+                          return (
+                            <>
+                              {visibleSets.map((js, idx) => {
+                                const rowY = 41 + idx * rowH;
+                                const badgeH = Math.min(20, Math.max(13, Math.round(rowH * 0.46)));
+                                const badgeY = Math.max(2, (rowH - badgeH) / 2);
 
-                            return (
-                              <g key={js.id} transform={`translate(0, ${rowY})`}>
-                                <rect
-                                  x="0"
-                                  y="0"
-                                  width={jointTableBlock.width}
-                                  height={rowH}
-                                  fill={idx % 2 === 0 ? '#FFFFFF' : '#F8FAFC'}
-                                  stroke="#CBD5E1"
-                                  strokeWidth="0.6"
-                                />
-                                <rect
-                                  x="5"
-                                  y={badgeY}
-                                  width={cols[0].width - 10}
-                                  height={badgeH}
-                                  rx="2"
-                                  fill={js.color}
-                                />
-                                <text
-                                  x={cols[0].width / 2}
-                                  y={badgeY + badgeH * 0.74}
-                                  textAnchor="middle"
-                                  fontSize={cellFs}
-                                  fontWeight="700"
-                                  fill="#FFFFFF"
-                                >
-                                  {js.id}
-                                </text>
-                                <text
-                                  x={cols[1].x + 5}
-                                  y={compactRow ? rowH * 0.64 : rowH * 0.42}
-                                  fontSize={cellFs}
-                                  fontWeight="700"
-                                  fill="#0F172A"
-                                >
-                                  {js.orientation.slice(0, cols[1].maxChars)}
-                                </text>
-                                {!compactRow && (
-                                  <text
-                                    x={cols[1].x + 5}
-                                    y={rowH * 0.78}
-                                    fontSize={subFs}
-                                    fill="#475569"
-                                  >
-                                    Str:{' '}
-                                    {js.avgStrike !== null
-                                      ? `${String(js.avgStrike).padStart(3, '0')}°`
-                                      : 'N/A'}{' '}
-                                    ({js.jointCount || 1}j)
-                                  </text>
-                                )}
+                                return (
+                                  <g key={js.id} transform={`translate(0, ${rowY})`}>
+                                    <rect
+                                      x="0"
+                                      y="0"
+                                      width={jointTableBlock.width}
+                                      height={rowH}
+                                      fill={idx % 2 === 0 ? '#FFFFFF' : '#F8FAFC'}
+                                      stroke="#CBD5E1"
+                                      strokeWidth="0.6"
+                                    />
+                                    <rect
+                                      x="5"
+                                      y={badgeY}
+                                      width={cols[0].width - 10}
+                                      height={badgeH}
+                                      rx="2"
+                                      fill={js.color}
+                                    />
+                                    <text
+                                      x={cols[0].width / 2}
+                                      y={badgeY + badgeH * 0.74}
+                                      textAnchor="middle"
+                                      fontSize={cellFs}
+                                      fontWeight="700"
+                                      fill="#FFFFFF"
+                                    >
+                                      {js.id}
+                                    </text>
+                                    <text
+                                      x={cols[1].x + 5}
+                                      y={compactRow ? rowH * 0.64 : rowH * 0.42}
+                                      fontSize={cellFs}
+                                      fontWeight="700"
+                                      fill="#0F172A"
+                                    >
+                                      {js.orientation.slice(0, cols[1].maxChars)}
+                                    </text>
+                                    {!compactRow && (
+                                      <text
+                                        x={cols[1].x + 5}
+                                        y={rowH * 0.78}
+                                        fontSize={subFs}
+                                        fill="#475569"
+                                      >
+                                        Str:{' '}
+                                        {js.avgStrike !== null
+                                          ? `${String(js.avgStrike).padStart(3, '0')}°`
+                                          : 'N/A'}{' '}
+                                        ({js.jointCount || 1}j)
+                                      </text>
+                                    )}
 
-                                {/* Strictly fitted cell text using computed column char budgets */}
-                                <text
-                                  x={cols[2].x + 5}
-                                  y={rowH * 0.56}
-                                  fontSize={cellFs}
-                                  fill="#0F172A"
-                                >
-                                  {js.spacing.slice(0, cols[2].maxChars)}
-                                </text>
-                                <text
-                                  x={cols[3].x + 5}
-                                  y={rowH * 0.56}
-                                  fontSize={cellFs}
-                                  fill="#0F172A"
-                                >
-                                  {js.persistence.slice(0, cols[3].maxChars)}
-                                </text>
-                                <text
-                                  x={cols[4].x + 5}
-                                  y={rowH * 0.56}
-                                  fontSize={cellFs}
-                                  fill="#0F172A"
-                                >
-                                  {js.aperture.slice(0, cols[4].maxChars)}
-                                </text>
-                                <text
-                                  x={cols[5].x + 5}
-                                  y={compactRow ? rowH * 0.64 : rowH * 0.41}
-                                  fontSize={subFs + 0.3}
-                                  fontWeight="600"
-                                  fill="#0F172A"
-                                >
-                                  {js.roughness.slice(0, cols[5].maxChars)}
-                                </text>
-                                {!compactRow && (
-                                  <text
-                                    x={cols[5].x + 5}
-                                    y={rowH * 0.77}
-                                    fontSize={subFs}
-                                    fill="#334155"
-                                  >
-                                    Infill: {js.infilling.slice(0, Math.max(12, cols[5].subMaxChars - 12))} ·{' '}
-                                    {js.water}
-                                  </text>
-                                )}
-                              </g>
-                            );
-                          });
+                                    {/* Strictly fitted cell text using computed column char budgets */}
+                                    <text
+                                      x={cols[2].x + 5}
+                                      y={rowH * 0.56}
+                                      fontSize={cellFs}
+                                      fill="#0F172A"
+                                    >
+                                      {js.spacing.slice(0, cols[2].maxChars)}
+                                    </text>
+                                    <text
+                                      x={cols[3].x + 5}
+                                      y={rowH * 0.56}
+                                      fontSize={cellFs}
+                                      fill="#0F172A"
+                                    >
+                                      {js.persistence.slice(0, cols[3].maxChars)}
+                                    </text>
+                                    <text
+                                      x={cols[4].x + 5}
+                                      y={rowH * 0.56}
+                                      fontSize={cellFs}
+                                      fill="#0F172A"
+                                    >
+                                      {js.aperture.slice(0, cols[4].maxChars)}
+                                    </text>
+                                    <text
+                                      x={cols[5].x + 5}
+                                      y={compactRow ? rowH * 0.64 : rowH * 0.41}
+                                      fontSize={subFs + 0.3}
+                                      fontWeight="600"
+                                      fill="#0F172A"
+                                    >
+                                      {js.roughness.slice(0, cols[5].maxChars)}
+                                    </text>
+                                    {!compactRow && (
+                                      <text
+                                        x={cols[5].x + 5}
+                                        y={rowH * 0.77}
+                                        fontSize={subFs}
+                                        fill="#334155"
+                                      >
+                                        Infill: {js.infilling.slice(0, Math.max(12, cols[5].subMaxChars - 12))} ·{' '}
+                                        {js.water}
+                                      </text>
+                                    )}
+                                  </g>
+                                );
+                              })}
+
+                              {/* Adaptive Geological & Structural Station Matrix when table has remaining height */}
+                              {remainingBottomH >= 46 && (() => {
+                                const fillerY = 41 + usedRowsH;
+                                const cellW = Math.floor(jointTableBlock.width / 3);
+                                const confirmedCnt = joints.filter(
+                                  (j) =>
+                                    j.orientationStatus === 'CONFIRMED' ||
+                                    j.orientationStatus === 'DIRECTLY_MEASURED' ||
+                                    j.orientationStatus === 'GEOMETRICALLY_CALCULATED'
+                                ).length;
+                                return (
+                                  <g transform={`translate(0, ${fillerY})`}>
+                                    <rect
+                                      x="0"
+                                      y="0"
+                                      width={jointTableBlock.width}
+                                      height={remainingBottomH}
+                                      fill="#F8FAFC"
+                                      stroke="#0F172A"
+                                      strokeWidth="0.9"
+                                    />
+                                    <rect x="0" y="0" width={jointTableBlock.width} height="18" fill="#E2E8F0" />
+                                    <text x="10" y="12.5" fontSize={subFs + 0.4} fontWeight="700" fill="#0F172A">
+                                      STATION STRUCTURAL &amp; KINEMATIC SUMMARY MATRIX ({settings.faceChainage})
+                                    </text>
+                                    <line x1={cellW} y1="18" x2={cellW} y2={remainingBottomH} stroke="#CBD5E1" strokeWidth="0.8" />
+                                    <line x1={cellW * 2} y1="18" x2={cellW * 2} y2={remainingBottomH} stroke="#CBD5E1" strokeWidth="0.8" />
+                                    <text x="10" y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0F172A">
+                                      Mapped Discontinuities: {joints.length} ({jointSets.length} Sets)
+                                    </text>
+                                    <text x="10" y="45" fontSize={subFs} fill="#334155">
+                                      3D Solved / Confirmed: {confirmedCnt} of {joints.length} traces
+                                    </text>
+                                    <text x={cellW + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0F172A">
+                                      Drive Azimuth: N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E
+                                    </text>
+                                    <text x={cellW + 10} y="45" fontSize={subFs} fill="#334155">
+                                      Pull Interval: {settings.roundLength.toFixed(2)} m · Scale 1:{engineeringScaleDenominator}
+                                    </text>
+                                    <text x={cellW * 2 + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0F172A">
+                                      Lithology Zones: {lithologyRegions.length || 1} ({settings.lithology.slice(0, 18)})
+                                    </text>
+                                    <text x={cellW * 2 + 10} y="45" fontSize={subFs} fill="#334155">
+                                      Placed Symbols: {placedSymbols.length} · Survey CPs: {controlPoints.length}
+                                    </text>
+                                  </g>
+                                );
+                              })()}
+                            </>
+                          );
                         })()
                       )}
                     </g>
+                    )}
 
                     {/* 7D. ROCK MASS CLASSIFICATION (Method-Specific: RMR / Q-System / Both / GSI) & CONTENT-AWARE GEOLOGICAL DESCRIPTION */}
+                    {qIndexAndNotesBlock.height > 0 && (
                     <g transform={`translate(${qIndexAndNotesBlock.x}, ${qIndexAndNotesBlock.y})`}>
                       <rect
                         x="0"
@@ -3211,15 +4049,38 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                         fontWeight="700"
                         fill="#0F172A"
                       >
-                        CONTRACTOR GEOLOGIST SIGN: ____________________ · CLIENT GEOLOGIST SIGN: ____________________
+                        {(effectiveSheetConfig.leftSignatoryTitle || 'CONTRACTOR GEOLOGIST SIGN')}: ____________________ · {(effectiveSheetConfig.rightSignatoryTitle || 'CLIENT GEOLOGIST SIGN')}: ____________________
                       </text>
+                      {effectiveSheetConfig.logoPosition === 'BOTTOM_SIGN_BLOCK' && (
+                        <g transform={`translate(${qIndexAndNotesBlock.width - 170}, ${qIndexAndNotesBlock.height - 21})`}>
+                          {[
+                            effectiveSheetConfig.clientLogoDataUrl,
+                            effectiveSheetConfig.contractorLogoDataUrl,
+                            effectiveSheetConfig.consultantLogoDataUrl,
+                          ]
+                            .filter((u): u is string => Boolean(u))
+                            .map((url, idx) => (
+                              <image
+                                key={`bot-g-logo-${idx}`}
+                                href={url}
+                                x={idx * 54}
+                                y="0"
+                                width="50"
+                                height="19"
+                                preserveAspectRatio="xMidYMid meet"
+                              />
+                            ))}
+                        </g>
+                      )}
                     </g>
+                    )}
                   </>
                 )}
               </g>
             )}
           </svg>
         </div>
+      </div>
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ import {
   JointSet,
   LithologyRegion,
   MappingWorkspaceMode,
+  OutputSheetMode,
   PhotoSurface,
   PlacedGeologicalSymbol,
   PlaneSurfaceConfig,
@@ -91,6 +92,7 @@ import {
 import { generateSampleTunnelPhotograph } from './engine/sampleFieldData';
 import { MappingWorkspace } from './components/MappingWorkspace';
 import { EngineeringSheetModal } from './components/EngineeringSheetModal';
+import { loadSavedSheetConfig, saveSheetConfigToStorage } from './engine/sheetLayoutEngine';
 import { EswaLoadingScreen, EswaTunnelLogo } from './components/EswaBrandIdentity';
 import { ThemeToggleButton, useTheme } from './context/ThemeContext';
 import { useResponsiveLayout } from './hooks/useResponsiveLayout';
@@ -143,18 +145,23 @@ export default function App() {
   const [cadStatus, setCadStatus] = useState<string>('');
   const cadInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Tunnel Drive Direction & Header Settings State (Fresh Software Defaults)
-  const [settings, setSettings] = useState<TunnelSettings>({
-    tunnelName: 'Tunnel Section 01',
-    locationName: '',
-    driveDirectionInput: 'N 000°',
-    driveDirection: 0,
-    chainage: 'RD 0.00m - 3.50m',
-    faceChainage: 'RD 3.50m',
-    roundLength: 3.5,
-    date: new Date().toISOString().slice(0, 10),
-    mappedBy: '',
-    lithology: '',
+  // Tunnel Drive Direction & Header Settings State (Fresh Software Defaults + Persisted Sheet Template Config)
+  const [settings, setSettings] = useState<TunnelSettings>(() => {
+    const initialSheetConfig = loadSavedSheetConfig();
+    return {
+      projectName: initialSheetConfig.projectName || 'Hydroelectric / Underground Tunnel Project',
+      tunnelName: 'Tunnel Section 01',
+      locationName: initialSheetConfig.location || 'Main Underground Heading',
+      driveDirectionInput: 'N 000°',
+      driveDirection: 0,
+      chainage: 'RD 0.00m - 3.50m',
+      faceChainage: 'RD 3.50m',
+      roundLength: 3.5,
+      date: new Date().toISOString().slice(0, 10),
+      mappedBy: '',
+      lithology: '',
+      sheetConfig: initialSheetConfig,
+    };
   });
 
   // 4 Tunnel Surface Photographs (Each supports 1 MAIN PHOTO + 0–5 SUPPORTING PHOTOS)
@@ -262,7 +269,7 @@ export default function App() {
     useState<ScreenStep>('start');
   const [isProjectMemoryModalOpen, setIsProjectMemoryModalOpen] = useState<boolean>(false);
   const [projectMemoryTab, setProjectMemoryTab] = useState<
-    'projects' | 'volumes' | 'geometries'
+    'projects' | 'sheet_settings' | 'volumes' | 'geometries'
   >('projects');
 
   // Session Learning Memory & Continuous Daily Learning Loop (Section 10 & Section 26)
@@ -363,6 +370,8 @@ export default function App() {
     'Ready. Upload or load surface photograph and press AI Trace.'
   );
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [exportModalInitialMode, setExportModalInitialMode] =
+    useState<OutputSheetMode>('FINAL_ENGINEERING_SHEET');
 
   // Check for saved offline field draft on startup (Section 20)
   useEffect(() => {
@@ -575,7 +584,7 @@ export default function App() {
   );
 
   const handleOpenProjectMemoryModal = useCallback(
-    (tab: 'projects' | 'volumes' | 'geometries' = 'projects') => {
+    (tab: 'projects' | 'sheet_settings' | 'volumes' | 'geometries' = 'projects') => {
       setProjectMemoryTab(tab);
       setIsProjectMemoryModalOpen(true);
     },
@@ -598,13 +607,26 @@ export default function App() {
     );
   }, [geometry, activeSurface, settings.roundLength]);
 
-  // Save current project into Project File Memory (Indexed by Tunnel + Location + Chainage + Date)
+  // Save current project into Project File Memory (Indexed by Project + Location + Tunnel + Chainage + Date)
   const handleSaveCurrentProjectToMemory = useCallback(() => {
     const chMeters = parseNumericChainageMeters(settings.faceChainage, settings.chainage);
+    const projName =
+      settings.projectName ||
+      settings.sheetConfig?.projectName ||
+      'Hydroelectric / Underground Tunnel Project';
+    const locName =
+      settings.locationName ||
+      settings.location ||
+      settings.sheetConfig?.location ||
+      'Main Underground Heading';
+    if (settings.sheetConfig) {
+      saveSheetConfigToStorage(settings.sheetConfig);
+    }
     const record: SavedProjectRecord = {
-      id: `proj-${settings.tunnelName.replace(/\s+/g, '_')}-${settings.faceChainage.replace(/\s+/g, '_')}-${settings.date}`,
+      id: `proj-${projName.replace(/\s+/g, '_')}-${locName.replace(/\s+/g, '_')}-${settings.tunnelName.replace(/\s+/g, '_')}-${settings.faceChainage.replace(/\s+/g, '_')}-${settings.date}`,
+      projectName: projName,
       tunnelName: settings.tunnelName,
-      location: settings.locationName || 'Underground Tunnel Works',
+      location: locName,
       chainage: settings.chainage,
       faceChainage: settings.faceChainage,
       numericChainageMeters: chMeters,
@@ -612,7 +634,12 @@ export default function App() {
       savedAt: new Date().toISOString(),
       mappingMode: 'TUNNEL_PROFILE',
       geometry,
-      settings,
+      settings: {
+        ...settings,
+        projectName: projName,
+        locationName: locName,
+      },
+      sheetConfig: settings.sheetConfig,
       photos,
       joints: clusteredJoints,
       customJointSetOverrides,
@@ -671,10 +698,20 @@ export default function App() {
     const curCh = parseNumericChainageMeters(settings.faceChainage, settings.chainage) ?? 1423.5;
     const pull = settings.roundLength > 0 ? settings.roundLength : 3.5;
     const nextCh = Number((curCh + pull).toFixed(2));
+    const projName =
+      settings.projectName ||
+      settings.sheetConfig?.projectName ||
+      'Hydroelectric / Underground Tunnel Project';
+    const locName =
+      settings.locationName ||
+      settings.location ||
+      settings.sheetConfig?.location ||
+      'Main Underground Heading';
     const companionRecord: SavedProjectRecord = {
-      id: `proj-${settings.tunnelName.replace(/\s+/g, '_')}-RD_${nextCh.toFixed(2)}m-${settings.date}`,
+      id: `proj-${projName.replace(/\s+/g, '_')}-${locName.replace(/\s+/g, '_')}-${settings.tunnelName.replace(/\s+/g, '_')}-RD_${nextCh.toFixed(2)}m-${settings.date}`,
+      projectName: projName,
       tunnelName: settings.tunnelName,
-      location: settings.locationName || 'Underground Tunnel Works',
+      location: locName,
       chainage: `RD ${curCh.toFixed(2)}m - ${nextCh.toFixed(2)}m`,
       faceChainage: `RD ${nextCh.toFixed(2)}m`,
       numericChainageMeters: nextCh,
@@ -684,9 +721,12 @@ export default function App() {
       geometry,
       settings: {
         ...settings,
+        projectName: projName,
+        locationName: locName,
         chainage: `RD ${curCh.toFixed(2)}m - ${nextCh.toFixed(2)}m`,
         faceChainage: `RD ${nextCh.toFixed(2)}m`,
       },
+      sheetConfig: settings.sheetConfig,
       photos,
       joints: clusteredJoints,
       customJointSetOverrides,
@@ -737,7 +777,23 @@ export default function App() {
 
   const handleLoadProjectRecord = useCallback((record: SavedProjectRecord) => {
     setGeometry(record.geometry);
-    setSettings(record.settings);
+    const restoredConfig =
+      record.sheetConfig || record.settings.sheetConfig || loadSavedSheetConfig(record.settings);
+    setSettings({
+      ...record.settings,
+      projectName:
+        record.projectName ||
+        record.settings.projectName ||
+        restoredConfig.projectName ||
+        'Hydroelectric / Underground Tunnel Project',
+      locationName:
+        record.location ||
+        record.settings.locationName ||
+        restoredConfig.location ||
+        'Main Underground Heading',
+      sheetConfig: restoredConfig,
+    });
+    saveSheetConfigToStorage(restoredConfig);
     setPhotos(record.photos);
     setJoints(record.joints || []);
     setCustomJointSetOverrides(record.customJointSetOverrides || {});
@@ -2478,7 +2534,10 @@ export default function App() {
         canUndo={historyPast.length > 0}
         canRedo={historyFuture.length > 0}
         onBackToSetup={() => setScreen('drive_and_photos')}
-        onOpenExportSheet={() => setIsExportModalOpen(true)}
+        onOpenExportSheet={(mode = 'FINAL_ENGINEERING_SHEET') => {
+          setExportModalInitialMode(mode);
+          setIsExportModalOpen(true);
+        }}
         onSaveOfflineDraft={handleSaveOfflineDraft}
         sessionMemory={sessionMemory}
         onRecordRejectedJoint={handleRecordRejectedJoint}
@@ -2531,6 +2590,7 @@ export default function App() {
           setReturnScreenFromCustomEditor('mapping');
           setScreen('geometry_custom');
         }}
+        savedProjects={savedProjects}
       />
 
       <EngineeringSheetModal
@@ -2538,6 +2598,15 @@ export default function App() {
         onClose={() => setIsExportModalOpen(false)}
         geometry={geometry}
         settings={settings}
+        onUpdateSettings={setSettings}
+        savedProjects={savedProjects}
+        onSaveCurrentProject={handleSaveCurrentProjectToMemory}
+        onLoadProjectRecord={handleLoadProjectRecord}
+        onDeleteProjectRecord={(id) => {
+          const next = deleteProjectRecordFromMemory(id);
+          setSavedProjects(next);
+        }}
+        onCreateNextChainageSection={handleCreateCompanionSectionForVolumeTest}
         photos={photos}
         joints={clusteredJoints}
         jointSets={jointSets}
@@ -2559,6 +2628,7 @@ export default function App() {
         placedSymbols={placedSymbols}
         overbreakAnalysis={overbreakAnalysis}
         sectionVolumeRows={sectionVolumeRows}
+        initialOutputMode={exportModalInitialMode}
       />
 
       {projectMemoryModalNode}

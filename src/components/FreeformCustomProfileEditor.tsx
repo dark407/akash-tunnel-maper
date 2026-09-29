@@ -34,6 +34,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import { ThemeToggleButton, useTheme } from '../context/ThemeContext';
 
 export type ProfileEditorMainTab =
   | 'freeform_canvas'
@@ -162,6 +163,8 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
   onBack,
   onUploadCADFile,
 }) => {
+  const { theme } = useTheme();
+  const isLight = theme === 'light';
   // Profile + Undo / Redo History Stack
   const [profile, setProfile] = useState<CustomTunnelProfileDefinition>(() =>
     createInitialGraphProfile(geometry)
@@ -753,6 +756,8 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
             Confirm Tunnel Shape &amp; Continue
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
+
+          <ThemeToggleButton compact />
         </div>
       </header>
 
@@ -968,7 +973,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                     y1={0}
                     x2={px}
                     y2={viewH - 28}
-                    stroke="#162033"
+                    stroke={isLight ? '#E2E8F0' : '#162033'}
                     strokeWidth="0.8"
                   />
                 );
@@ -982,7 +987,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                     y1={py}
                     x2={viewW}
                     y2={py}
-                    stroke="#162033"
+                    stroke={isLight ? '#E2E8F0' : '#162033'}
                     strokeWidth="0.8"
                   />
                 );
@@ -999,7 +1004,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                     y1={0}
                     x2={px}
                     y2={viewH - 28}
-                    stroke={isZero ? '#0284C7' : '#1E2D47'}
+                    stroke={isZero ? '#0284C7' : isLight ? '#CBD5E1' : '#1E2D47'}
                     strokeWidth={isZero ? '1.6' : '1.1'}
                     strokeDasharray={isZero ? '6,3' : undefined}
                   />
@@ -1015,7 +1020,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                     y1={py}
                     x2={viewW}
                     y2={py}
-                    stroke={isZero ? '#10B981' : '#1E2D47'}
+                    stroke={isZero ? '#10B981' : isLight ? '#CBD5E1' : '#1E2D47'}
                     strokeWidth={isZero ? '1.6' : '1.1'}
                   />
                 );
@@ -1025,8 +1030,14 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               {profileSvgPath && (
                 <path
                   d={profileSvgPath}
-                  fill={profile.isClosed ? 'rgba(14, 165, 233, 0.13)' : 'none'}
-                  stroke="#38BDF8"
+                  fill={
+                    profile.isClosed
+                      ? isLight
+                        ? 'rgba(2, 132, 199, 0.12)'
+                        : 'rgba(14, 165, 233, 0.13)'
+                      : 'none'
+                  }
+                  stroke={isLight ? '#0284C7' : '#38BDF8'}
                   strokeWidth="2.8"
                   strokeLinejoin="round"
                 />
@@ -1045,7 +1056,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                           y1={aPx.y}
                           x2={bPx.x}
                           y2={bPx.y}
-                          stroke={tool === 'draw_arc' ? '#F59E0B' : '#22D3EE'}
+                          stroke={tool === 'draw_arc' ? '#F59E0B' : isLight ? '#0284C7' : '#22D3EE'}
                           strokeWidth="2"
                           strokeDasharray="5,4"
                         />
@@ -1055,8 +1066,8 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                           width="116"
                           height="18"
                           rx="3"
-                          fill="#0F172A"
-                          stroke="#38BDF8"
+                          fill={isLight ? '#FFFFFF' : '#0F172A'}
+                          stroke={isLight ? '#0284C7' : '#38BDF8'}
                           strokeWidth="0.8"
                         />
                         <text
@@ -1065,7 +1076,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                           textAnchor="middle"
                           fontSize="10"
                           fontWeight="700"
-                          fill="#38BDF8"
+                          fill={isLight ? '#0369A1' : '#38BDF8'}
                         >
                           L={livePolarFromLast.len.toFixed(2)}m ∠{livePolarFromLast.deg.toFixed(1)}°
                         </text>
@@ -1105,10 +1116,18 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                         width="96"
                         height="20"
                         rx="4"
-                        fill={isSelected ? '#0284C7' : 'rgba(15, 23, 42, 0.90)'}
+                        fill={
+                          isSelected
+                            ? '#0284C7'
+                            : isLight
+                            ? 'rgba(255, 255, 255, 0.94)'
+                            : 'rgba(15, 23, 42, 0.90)'
+                        }
                         stroke={
                           isSelected
-                            ? '#FFFFFF'
+                            ? isLight
+                              ? '#0F172A'
+                              : '#FFFFFF'
                             : seg.type === 'arc'
                             ? '#F59E0B'
                             : '#475569'
@@ -1121,7 +1140,17 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                         textAnchor="middle"
                         fontSize="9.5"
                         fontWeight="700"
-                        fill={isSelected ? '#FFFFFF' : seg.type === 'arc' ? '#FDE68A' : '#E2E8F0'}
+                        fill={
+                          isSelected
+                            ? '#FFFFFF'
+                            : seg.type === 'arc'
+                            ? isLight
+                              ? '#B45309'
+                              : '#FDE68A'
+                            : isLight
+                            ? '#0F172A'
+                            : '#E2E8F0'
+                        }
                       >
                         {seg.type === 'arc'
                           ? `ARC L=${segMetric.arcLength.toFixed(2)}m`
@@ -1136,7 +1165,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                         cy={midPx.y - (seg.type === 'arc' ? 0 : 16)}
                         r={7}
                         fill="#F59E0B"
-                        stroke="#0F172A"
+                        stroke={isLight ? '#FFFFFF' : '#0F172A'}
                         strokeWidth="2"
                         className="cursor-ns-resize"
                         onMouseDown={(e) => {
@@ -1192,8 +1221,8 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                       cx={px.x}
                       cy={px.y}
                       r={isSelected ? 8 : 6}
-                      fill={isSelected ? '#22D3EE' : '#0F172A'}
-                      stroke={isSelected ? '#FFFFFF' : '#38BDF8'}
+                      fill={isSelected ? '#0284C7' : isLight ? '#FFFFFF' : '#0F172A'}
+                      stroke={isSelected ? (isLight ? '#0F172A' : '#FFFFFF') : isLight ? '#0284C7' : '#38BDF8'}
                       strokeWidth="2.2"
                     />
                     <text
@@ -1201,7 +1230,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                       y={px.y - 8}
                       fontSize="10.5"
                       fontWeight="700"
-                      fill={isSelected ? '#22D3EE' : '#F8FAFC'}
+                      fill={isSelected ? (isLight ? '#0369A1' : '#22D3EE') : isLight ? '#0F172A' : '#F8FAFC'}
                     >
                       {pt.label} ({pt.x.toFixed(2)}, {pt.y.toFixed(2)})
                     </text>
@@ -1210,8 +1239,21 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               })}
 
               {/* 7. Bottom X-Axis Scale Bar (Meters from Centerline) */}
-              <rect x={44} y={viewH - 28} width={viewW - 44} height={28} fill="#0D1320" />
-              <line x1={44} y1={viewH - 28} x2={viewW} y2={viewH - 28} stroke="#334155" strokeWidth="1.2" />
+              <rect
+                x={44}
+                y={viewH - 28}
+                width={viewW - 44}
+                height={28}
+                fill={isLight ? '#E2E8F0' : '#0D1320'}
+              />
+              <line
+                x1={44}
+                y1={viewH - 28}
+                x2={viewW}
+                y2={viewH - 28}
+                stroke={isLight ? '#94A3B8' : '#334155'}
+                strokeWidth="1.2"
+              />
               {graphGrid.vMajor.map((mx) => {
                 const px = originPx.x + mx * pxPerMeter;
                 if (px < 50 || px > viewW - 20) return null;
@@ -1222,7 +1264,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                       y1={viewH - 28}
                       x2={px}
                       y2={viewH - 21}
-                      stroke="#94A3B8"
+                      stroke={isLight ? '#475569' : '#94A3B8'}
                       strokeWidth="1.2"
                     />
                     <text
@@ -1231,7 +1273,15 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                       textAnchor="middle"
                       fontSize="10"
                       fontWeight={Math.abs(mx) < 1e-3 ? '700' : '500'}
-                      fill={Math.abs(mx) < 1e-3 ? '#38BDF8' : '#94A3B8'}
+                      fill={
+                        Math.abs(mx) < 1e-3
+                          ? isLight
+                            ? '#0369A1'
+                            : '#38BDF8'
+                          : isLight
+                          ? '#334155'
+                          : '#94A3B8'
+                      }
                     >
                       {mx > 0 ? `+${mx}m` : `${mx}m`}
                     </text>
@@ -1240,21 +1290,43 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               })}
 
               {/* 8. Left Y-Axis Scale Bar (Height in Meters) */}
-              <rect x={0} y={0} width={44} height={viewH} fill="#0D1320" />
-              <line x1={44} y1={0} x2={44} y2={viewH - 28} stroke="#334155" strokeWidth="1.2" />
+              <rect x={0} y={0} width={44} height={viewH} fill={isLight ? '#E2E8F0' : '#0D1320'} />
+              <line
+                x1={44}
+                y1={0}
+                x2={44}
+                y2={viewH - 28}
+                stroke={isLight ? '#94A3B8' : '#334155'}
+                strokeWidth="1.2"
+              />
               {graphGrid.hMajor.map((my) => {
                 const py = originPx.y - my * pxPerMeter;
                 if (py < 16 || py > viewH - 34) return null;
                 return (
                   <g key={`yscale-${my}`}>
-                    <line x1={37} y1={py} x2={44} y2={py} stroke="#94A3B8" strokeWidth="1.2" />
+                    <line
+                      x1={37}
+                      y1={py}
+                      x2={44}
+                      y2={py}
+                      stroke={isLight ? '#475569' : '#94A3B8'}
+                      strokeWidth="1.2"
+                    />
                     <text
                       x={33}
                       y={py + 3.5}
                       textAnchor="end"
                       fontSize="10"
                       fontWeight={Math.abs(my) < 1e-3 ? '700' : '500'}
-                      fill={Math.abs(my) < 1e-3 ? '#10B981' : '#94A3B8'}
+                      fill={
+                        Math.abs(my) < 1e-3
+                          ? isLight
+                            ? '#047857'
+                            : '#10B981'
+                          : isLight
+                          ? '#334155'
+                          : '#94A3B8'
+                      }
                     >
                       {my}m
                     </text>

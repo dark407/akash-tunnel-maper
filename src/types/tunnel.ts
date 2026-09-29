@@ -201,7 +201,78 @@ export interface PlaneSurfaceConfig {
   location?: string;
 }
 
+export type SheetEngineeringBlockId =
+  | 'ORIENTATION_POLAR'
+  | 'LEGEND_SUMMARY'
+  | 'DATA_TABLE'
+  | 'Q_INDEX_AND_NOTES';
+
+export type SheetLogoPosition =
+  | 'HEADER_CORNERS'      // Client logo on left of header, Contractor/Consultant logo on right of header
+  | 'HEADER_RIGHT_GROUP'  // Logos grouped cleanly in the right title block area
+  | 'HEADER_LEFT_GROUP'   // Logos grouped on the left title area
+  | 'BOTTOM_SIGN_BLOCK'   // Logos placed inside the bottom sign-off block
+  | 'HIDDEN';
+
+export type SheetAdaptiveScaleMode =
+  | 'AUTO_CONTENT'        // Automatically enlarges fonts/rows when content is sparse and compacts when dense
+  | 'SPACIOUS_LARGE'      // Boosts font sizes and row heights to maximize readability
+  | 'COMPACT_DENSE';      // Compact fonts and row heights for dense multi-zone tables
+
+export type SheetLayoutMode =
+  | 'ADAPTIVE_LAYOUT'     // Auto-font and table resizing based on content density
+  | 'FIXED_LAYOUT';       // Manual control over font scale, table row height, and block proportions
+
+export interface EngineeringSheetConfig {
+  projectName: string;              // e.g. "Hydroelectric Underground Tunnel Project"
+  location?: string;                // Optional location alias persisted in sheet config
+  clientName: string;               // e.g. "NHPC / Project Employer Authority"
+  contractorName: string;           // e.g. "Main Civil Works Contractor"
+  consultantName: string;           // e.g. "Engineering & Geological Supervision Consultant"
+  contractNumber: string;           // e.g. "PKG-II / CW-TUN-01"
+  drawingNumber: string;            // e.g. "DWG-GEO-OB-001"
+  revisionNumber: string;           // e.g. "Rev 0"
+  geologySheetTitle: string;        // Custom title for Geological Mapping Sheet
+  quantitySheetTitle: string;       // Custom title for Overbreak & Engineering Quantity Sheet
+  // Logos (Data URLs) & Placement
+  clientLogoDataUrl: string | null;
+  contractorLogoDataUrl: string | null;
+  consultantLogoDataUrl: string | null;
+  logoPosition: SheetLogoPosition;
+  logoSize: 'COMPACT' | 'STANDARD' | 'LARGE';
+  // Layout & Placement Customization (Never collapses or overlaps the Face Drawing / Canvas Arena)
+  headerPosition: 'TOP' | 'BOTTOM';
+  engineeringColumnPosition: 'RIGHT' | 'LEFT';
+  columnWidthMode: 'BALANCED' | 'WIDE_TABLES' | 'MAX_DRAWING';
+  blockOrder: SheetEngineeringBlockId[];
+  // Content Visibility Toggles
+  showPerimeterPlan: boolean;
+  showOrientationPolarBlock: boolean;
+  showLegendBlock: boolean;
+  showDataTableBlock: boolean;
+  showSummaryNotesBlock: boolean;
+  showSignatureStrip: boolean;
+  showBackgroundGrid: boolean;
+  // Layout Mode Toggle: 'ADAPTIVE_LAYOUT' (auto-font/table resizing) vs 'FIXED_LAYOUT' (manual control)
+  layoutMode: SheetLayoutMode;
+  adaptiveScaleMode: SheetAdaptiveScaleMode;
+  fontScaleMultiplier: number;      // 0.80 to 1.35 (default 1.0)
+  manualTableRowHeight?: number;    // Used in FIXED_LAYOUT (20px to 64px, default 34)
+  manualTableBlockRatio?: number;   // Used in FIXED_LAYOUT (0.25 to 0.55 of right column height, default 0.38)
+  // Sign-off titles & names
+  contractorSignTitle: string;
+  contractorSignName: string;
+  clientSignTitle: string;
+  clientSignName: string;
+  consultantSignTitle: string;
+  consultantSignName: string;
+  leftSignatoryTitle?: string;
+  rightSignatoryTitle?: string;
+  customFooterRemarks: string;
+}
+
 export interface TunnelSettings {
+  projectName?: string;        // Project / Contract Name for hierarchical Project -> Location -> Chainage storage
   tunnelName: string;
   location?: string;           // Project location / Adit / Heading (e.g. "Adit-II Main Portal")
   locationName?: string;       // Alias for project location
@@ -213,6 +284,7 @@ export interface TunnelSettings {
   date: string;
   mappedBy: string;
   lithology: string;           // e.g. "Quartzite / Phyllite with Shear Seam"
+  sheetConfig?: EngineeringSheetConfig;
 }
 
 export interface CameraCalibration {
@@ -1015,6 +1087,7 @@ export interface SavedDesignGeometryRecord {
 
 export interface SavedProjectRecord {
   id: string;
+  projectName?: string;
   tunnelName: string;
   location: string;
   chainage: string;
@@ -1026,6 +1099,7 @@ export interface SavedProjectRecord {
   planeSurfaceConfig?: PlaneSurfaceConfig;
   geometry: TunnelGeometry;
   settings: TunnelSettings;
+  sheetConfig?: EngineeringSheetConfig;
   photos: Record<SurfaceType, PhotoSurface>;
   joints: Joint[];
   customJointSetOverrides: Record<string, Partial<JointSet>>;

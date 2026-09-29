@@ -13,6 +13,7 @@ import {
   JointSet,
   LithologyRegion,
   MappingWorkspaceMode,
+  OutputSheetMode,
   OverbreakUndercutAnalysis,
   PhotoSurface,
   PlacedGeologicalSymbol,
@@ -23,6 +24,7 @@ import {
   RmrParameters,
   RockMassClassificationMethodId,
   RockMassSummaryTable,
+  SavedProjectRecord,
   GsiParameters,
   ParameterInputStatus,
   SessionLearningMemory,
@@ -168,7 +170,7 @@ interface MappingWorkspaceProps {
   canUndo: boolean;
   canRedo: boolean;
   onBackToSetup: () => void;
-  onOpenExportSheet: () => void;
+  onOpenExportSheet: (mode?: OutputSheetMode) => void;
   onSaveOfflineDraft: () => void;
   sessionMemory: SessionLearningMemory;
   onRecordRejectedJoint: (joint: Joint) => void;
@@ -210,8 +212,11 @@ interface MappingWorkspaceProps {
   onUpdateSurveyProfile: React.Dispatch<React.SetStateAction<ConnectedSurveyProfile>>;
   overbreakAnalysis: OverbreakUndercutAnalysis;
   onGenerateSampleAsBuiltProfile: () => void;
-  onOpenProjectMemoryModal: (tab?: 'projects' | 'volumes' | 'geometries') => void;
+  onOpenProjectMemoryModal: (
+    tab?: 'projects' | 'sheet_settings' | 'volumes' | 'geometries'
+  ) => void;
   onOpenCustomProfileEditor?: () => void;
+  savedProjects?: SavedProjectRecord[];
 }
 
 type ActiveTool =
@@ -295,6 +300,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   onGenerateSampleAsBuiltProfile,
   onOpenProjectMemoryModal,
   onOpenCustomProfileEditor,
+  savedProjects = [],
 }) => {
   const [activeTool, setActiveTool] = useState<ActiveTool>('select');
   const [selectedJointId, setSelectedJointId] = useState<string | null>(null);
@@ -446,7 +452,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   const [showLayerMenu, setShowLayerMenu] = useState<boolean>(false);
   const [layerVisibility, setLayerVisibility] = useState<VectorLayerVisibility>({
     photo: true,
-    overbreakUndercut: true,
+    overbreakUndercut: false,
     controlPoints: true,
     joints: true,
     fractures: true,
@@ -2996,7 +3002,11 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
 
           <button
             onClick={() => {
-              setActiveTool(activeTool === 'overbreak' ? 'select' : 'overbreak');
+              const nextTool = activeTool === 'overbreak' ? 'select' : 'overbreak';
+              setActiveTool(nextTool);
+              if (nextTool === 'overbreak') {
+                setLayerVisibility((prev) => ({ ...prev, overbreakUndercut: true }));
+              }
             }}
             className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded border transition-colors whitespace-nowrap ${
               activeTool === 'overbreak'
@@ -3220,11 +3230,20 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
         <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={() => onOpenProjectMemoryModal('projects')}
-            title="Project File Memory, Saved Geometries & Section-to-Section Volumes"
+            title="Project & Location Chainage Storage, Saved Geometries & Section-to-Section Volumes"
             className="flex items-center gap-1 px-2 py-1 text-[11px] font-mono text-cyan-200 hover:text-white bg-cyan-950/60 hover:bg-cyan-900/70 rounded border border-cyan-700/70 transition-colors whitespace-nowrap"
           >
             <Database className="w-3 h-3 text-cyan-400" />
-            Projects
+            Storage
+          </button>
+
+          <button
+            onClick={() => onOpenProjectMemoryModal('sheet_settings')}
+            title="Engineering Sheet Settings, Project/Client/Contractor Details, Logo Upload & Content Placement"
+            className="flex items-center gap-1 px-2 py-1 text-[11px] font-mono text-emerald-200 hover:text-white bg-emerald-950/60 hover:bg-emerald-900/70 rounded border border-emerald-700/70 transition-colors whitespace-nowrap"
+          >
+            <FileSpreadsheet className="w-3 h-3 text-emerald-400" />
+            Sheet Setup
           </button>
 
           <button
@@ -3236,6 +3255,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             Save
           </button>
 
+          {/* 1. GEOLOGICAL MAPPING */}
           <button
             onClick={() => {
               if (showSetTableDrawer && geologyDrawerTab === 'geology_tables') {
@@ -3246,18 +3266,33 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 setShowAILearningDrawer(false);
               }
             }}
-            title="Geological Joint Set Summary & Rock Mass Tables"
-            className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap ${
+            title="Step 1: Geological Mapping & Discontinuity Tables"
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
               showSetTableDrawer && geologyDrawerTab === 'geology_tables'
                 ? 'bg-cyan-700 text-white border-cyan-500'
-                : 'bg-slate-800/80 text-slate-300 border-slate-700/80 hover:bg-slate-800'
+                : 'bg-slate-800/80 text-cyan-200 border-cyan-700/60 hover:bg-slate-800'
             }`}
           >
             <FileSpreadsheet className="w-3 h-3 text-cyan-400" />
-            Tables ({jointSets.length})
+            1. Geological Mapping ({jointSets.length})
           </button>
 
-          <div className="flex items-center bg-slate-900/90 border border-slate-700/80 rounded overflow-hidden">
+          {/* 2. KINEMATICS (STEREONET, PLANAR / WEDGE / TOPPLING & 3D WEDGES) */}
+          <button
+            onClick={() => setShowPhotogrammetryModal(true)}
+            title="Step 2: Kinematics — Lower-Hemisphere Stereonet, Planar/Wedge/Toppling & 3D Wedge Stability"
+            className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
+              showPhotogrammetryModal
+                ? 'bg-amber-600 text-white border-amber-400'
+                : 'bg-amber-950/60 text-amber-200 border-amber-700/60 hover:bg-amber-900/70'
+            }`}
+          >
+            <Compass className="w-3 h-3 text-amber-400" />
+            2. Kinematics
+          </button>
+
+          {/* 3. ROCK MASS CLASSIFICATION */}
+          <div className="flex items-center bg-slate-900/90 border border-indigo-600/60 rounded overflow-hidden">
             <select
               value={selectedClassificationMethod}
               onChange={(e) => {
@@ -3286,14 +3321,15 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   setShowAILearningDrawer(false);
                 }
               }}
-              className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono transition-colors whitespace-nowrap ${
+              className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono transition-colors whitespace-nowrap cursor-pointer ${
                 showSetTableDrawer && geologyDrawerTab === 'q_index'
                   ? 'bg-indigo-600 text-white'
                   : 'bg-slate-800/80 text-slate-200 hover:bg-slate-800'
               }`}
-              title="Open Rock Mass Classification & Calculation Drawer (RMR / Q-System / GSI)"
+              title="Step 3: Rock Mass Classification & Calculation Drawer (RMR / Q-System / GSI)"
             >
               <Calculator className="w-3 h-3 text-emerald-400" />
+              <span>3. Classification:</span>
               {(() => {
                 const rmrEval = calculateBieniawskiRmr(rmrParams);
                 const qEval = evaluateQSystemWithValidation(
@@ -3305,10 +3341,10 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 if (selectedClassificationMethod === 'RMR') {
                   return rmrEval.isComplete && rmrEval.finalRmr !== null
                     ? `RMR=${rmrEval.finalRmr}`
-                    : 'RMR=N/A';
+                    : 'RMR';
                 }
                 if (selectedClassificationMethod === 'Q_SYSTEM') {
-                  return qEval.isComplete ? `Q=${qEval.qValue.toFixed(1)}` : 'Q=N/A';
+                  return qEval.isComplete ? `Q=${qEval.qValue.toFixed(1)}` : 'Q-System';
                 }
                 if (selectedClassificationMethod === 'BOTH_RMR_AND_Q') {
                   return `RMR=${rmrEval.finalRmr ?? 'N/A'} | Q=${
@@ -3399,16 +3435,34 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             AI ({sessionMemory.correctionsLearnedCount ?? 0})
           </button>
 
+          {/* 4. ENGINEERING OUTPUT */}
           <button
-            onClick={onOpenExportSheet}
-            className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded border border-emerald-400/40 transition-colors whitespace-nowrap"
+            onClick={() =>
+              onOpenExportSheet(
+                activeTool === 'overbreak'
+                  ? 'ENGINEERING_QUANTITY_SHEET'
+                  : 'FINAL_ENGINEERING_SHEET'
+              )
+            }
+            title={
+              activeTool === 'overbreak'
+                ? 'Open Overbreak & Engineering Quantity Sheet (As-Built vs Design)'
+                : 'Step 4: Final Geological Mapping Sheet & CAD/PDF Export'
+            }
+            className={`flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white rounded border transition-colors whitespace-nowrap cursor-pointer ${
+              activeTool === 'overbreak'
+                ? 'bg-rose-600 hover:bg-rose-500 border-rose-400/50'
+                : 'bg-emerald-600 hover:bg-emerald-500 border-emerald-400/40'
+            }`}
           >
             {qcReport.issues.length > 0 ? (
               <AlertTriangle className="w-3 h-3 text-amber-200" />
             ) : (
               <CheckCircle2 className="w-3 h-3 text-emerald-100" />
             )}
-            Export
+            {activeTool === 'overbreak'
+              ? '4. Overbreak Quantity Sheet'
+              : '4. Engineering Output'}
           </button>
 
           <ThemeToggleButton compact />
@@ -3927,8 +3981,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                               width="92"
                               height="15"
                               rx="2"
-                              fill="#0B0E14"
-                              fillOpacity="0.88"
+                              fill={isLight ? '#FFF1F2' : '#0B0E14'}
+                              fillOpacity="0.92"
                               stroke="#F43F5E"
                               strokeWidth="0.9"
                             />
@@ -3939,7 +3993,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                               fontSize="8.5"
                               fontWeight="700"
                               fontFamily="IBM Plex Mono, monospace"
-                              fill="#FDA4AF"
+                              fill={isLight ? '#BE123C' : '#FDA4AF'}
                             >
                               {reg.id}: +{reg.areaSqMeters.toFixed(2)}m² (Max +{reg.maxRadialMeters.toFixed(2)}m)
                             </text>
@@ -3978,8 +4032,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                               width="92"
                               height="15"
                               rx="2"
-                              fill="#0B0E14"
-                              fillOpacity="0.88"
+                              fill={isLight ? '#FFFBEB' : '#0B0E14'}
+                              fillOpacity="0.92"
                               stroke="#F59E0B"
                               strokeWidth="0.9"
                             />
@@ -3990,7 +4044,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                               fontSize="8.5"
                               fontWeight="700"
                               fontFamily="IBM Plex Mono, monospace"
-                              fill="#FDE68A"
+                              fill={isLight ? '#B45309' : '#FDE68A'}
                             >
                               {reg.id}: -{reg.areaSqMeters.toFixed(2)}m² (Max -{reg.maxRadialMeters.toFixed(2)}m)
                             </text>
@@ -4803,9 +4857,9 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                           width={sBoxW}
                           height={sBoxH}
                           rx="2"
-                          fill="#0B0E14"
-                          fillOpacity="0.88"
-                          stroke={isSelSym ? '#22D3EE' : symColor}
+                          fill={isLight ? '#FFFFFF' : '#0B0E14'}
+                          fillOpacity="0.92"
+                          stroke={isSelSym ? '#0284C7' : symColor}
                           strokeWidth={isSelSym ? '1.2' : '0.8'}
                         />
                         <text
@@ -4814,7 +4868,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                           fontSize="9"
                           fontWeight="600"
                           fontFamily="IBM Plex Mono, monospace"
-                          fill="#E2E8F0"
+                          fill={isLight ? '#0F172A' : '#E2E8F0'}
                         >
                           {symLabelText}
                         </text>
@@ -4904,8 +4958,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       cx={cx}
                       cy={cy}
                       r={isSelCp ? '8' : '6.5'}
-                      fill={isSelCp ? 'rgba(16, 185, 129, 0.32)' : 'rgba(15, 23, 42, 0.8)'}
-                      stroke={cp.locked ? '#F59E0B' : isSelCp ? '#10B981' : '#34D399'}
+                      fill={isSelCp ? 'rgba(16, 185, 129, 0.32)' : isLight ? 'rgba(255, 255, 255, 0.9)' : 'rgba(15, 23, 42, 0.8)'}
+                      stroke={cp.locked ? '#F59E0B' : isSelCp ? '#10B981' : '#059669'}
                       strokeWidth={isSelCp ? '2.2' : '1.6'}
                     />
                     <line
@@ -4932,8 +4986,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       width={cpBoxW}
                       height={cpBoxH}
                       rx="2.5"
-                      fill="#0B0E14"
-                      fillOpacity="0.92"
+                      fill={isLight ? '#FFFFFF' : '#0B0E14'}
+                      fillOpacity="0.94"
                       stroke={isSelCp ? '#10B981' : '#059669'}
                       strokeWidth={isSelCp ? '1.3' : '0.85'}
                       className="pointer-events-none"
@@ -4944,7 +4998,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       fontSize="9"
                       fontWeight="700"
                       fontFamily="IBM Plex Mono, monospace"
-                      fill="#6EE7B7"
+                      fill={isLight ? '#047857' : '#6EE7B7'}
                       className="pointer-events-none"
                     >
                       {cp.label} {cp.locked ? '[LOCK]' : ''}
@@ -4954,7 +5008,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       y={cpPlacement.boxY + 20.5}
                       fontSize="8.5"
                       fontFamily="IBM Plex Mono, monospace"
-                      fill="#E2E8F0"
+                      fill={isLight ? '#0F172A' : '#E2E8F0'}
                       className="pointer-events-none"
                     >
                       X: {cp.point.x.toFixed(2)} m
@@ -4964,7 +5018,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       y={cpPlacement.boxY + 30}
                       fontSize="8.5"
                       fontFamily="IBM Plex Mono, monospace"
-                      fill="#E2E8F0"
+                      fill={isLight ? '#0F172A' : '#E2E8F0'}
                       className="pointer-events-none"
                     >
                       Y: {cp.point.y.toFixed(2)} m
@@ -6401,6 +6455,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             onUpdateSurveyProfile={onUpdateSurveyProfile}
             onGenerateSampleAsBuiltProfile={onGenerateSampleAsBuiltProfile}
             onOpenProjectMemoryModal={() => onOpenProjectMemoryModal('volumes')}
+            onOpenExportSheet={onOpenExportSheet}
             onClose={() => setActiveTool('select')}
             onStatusMessage={onUpdateStatusMessage}
           />
@@ -7297,6 +7352,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           rockMassSummary={rockMassSummary}
           onUpdateRockMassSummary={onUpdateRockMassSummary}
           onOpenExportSheet={onOpenExportSheet}
+          onOpenKinematics={() => setShowPhotogrammetryModal(true)}
+          savedProjects={savedProjects}
         />
       )}
 
@@ -7315,6 +7372,40 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           onSelectSurface(surf);
           setSelectedJointId(jId);
           setShowPhotogrammetryModal(false);
+        }}
+        onProceedToClassification={() => {
+          setGeologyDrawerTab('q_index');
+          setShowSetTableDrawer(true);
+          setShowAILearningDrawer(false);
+        }}
+        onUpdateJoints={onUpdateJointsWithHistory}
+        onApplyGroundwaterToClassification={(jw, jwDesc, rmrRating, inflowLMin, rmrDesc) => {
+          onUpdateQIndexParams({
+            ...qIndexParams,
+            jw,
+            jwDescription: jwDesc,
+          });
+          onUpdateQParamStatus({
+            ...qParamStatus,
+            jw: 'USER_ENTERED',
+          });
+          onUpdateRmrParams({
+            ...rmrParams,
+            groundwaterInflowLPerMin10m: inflowLMin,
+            groundwaterRating: rmrRating,
+            groundwaterDescription: rmrDesc,
+            paramStatus: {
+              ...rmrParams.paramStatus,
+              groundwater: 'USER_ENTERED',
+            },
+          });
+          onUpdateRockMassSummary({
+            ...rockMassSummary,
+            groundwaterCondition: `${rmrDesc} (~${inflowLMin.toFixed(1)} L/min, Jw=${jw})`,
+          });
+          onUpdateStatusMessage?.(
+            `Applied Seepage Zone Groundwater to Classification: Q-System Jw = ${jw} & RMR89 Groundwater Rating = ${rmrRating}/15 (~${inflowLMin.toFixed(1)} L/min).`
+          );
         }}
       />
     </div>

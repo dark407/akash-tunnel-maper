@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import {
   ConnectedSurveyProfile,
   MappingWorkspaceMode,
+  OutputSheetMode,
   OverbreakReasonCategory,
   OverbreakUndercutAnalysis,
   PlaneSurfaceConfig,
@@ -18,8 +19,11 @@ import {
 } from '../engine/overbreakEngine';
 import {
   computeSectionToSectionVolumes,
+  exportProjectHierarchyRegisterToCSV,
   filterSavedProjects,
+  groupSavedProjectsByHierarchy,
 } from '../engine/projectMemoryEngine';
+import { SheetSettingsAndStorageEditor } from './SheetSettingsAndStorageEditor';
 import {
   AlertTriangle,
   ArrowDown,
@@ -45,6 +49,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import { ThemeToggleButton } from '../context/ThemeContext';
 
 interface OverbreakAnalysisPanelProps {
   activeSurface: SurfaceType;
@@ -59,6 +64,7 @@ interface OverbreakAnalysisPanelProps {
   onUpdateSurveyProfile: (updater: (prev: ConnectedSurveyProfile) => ConnectedSurveyProfile) => void;
   onGenerateSampleAsBuiltProfile: () => void;
   onOpenProjectMemoryModal: () => void;
+  onOpenExportSheet?: (mode?: OutputSheetMode) => void;
   onClose: () => void;
   onStatusMessage?: (msg: string) => void;
 }
@@ -76,6 +82,7 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
   onUpdateSurveyProfile,
   onGenerateSampleAsBuiltProfile,
   onOpenProjectMemoryModal,
+  onOpenExportSheet,
   onClose,
   onStatusMessage,
 }) => {
@@ -638,6 +645,18 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
               </div>
             </div>
 
+            {/* Direct Button to Open Overbreak & Engineering Quantity Sheet */}
+            {onOpenExportSheet && (
+              <button
+                type="button"
+                onClick={() => onOpenExportSheet('ENGINEERING_QUANTITY_SHEET')}
+                className="w-full py-2 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded flex items-center justify-center gap-2 text-[11px] font-bold shadow cursor-pointer"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                Open Overbreak &amp; Engineering Quantity Sheet →
+              </button>
+            )}
+
             {/* Multi-Section Volume & Project File Memory Shortcut */}
             <button
               type="button"
@@ -1046,7 +1065,7 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
 interface ProjectMemoryModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialTab?: 'projects' | 'volumes' | 'geometries';
+  initialTab?: 'projects' | 'sheet_settings' | 'volumes' | 'geometries';
   geometry: TunnelGeometry;
   settings: TunnelSettings;
   onUpdateSettings: React.Dispatch<React.SetStateAction<TunnelSettings>>;
@@ -1082,11 +1101,12 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
   onDeleteDesignGeometry,
   onCreateCompanionSectionForVolumeTest,
 }) => {
-  const [tab, setTab] = useState<'projects' | 'volumes' | 'geometries'>(
+  const [tab, setTab] = useState<'projects' | 'sheet_settings' | 'volumes' | 'geometries'>(
     initialTab
   );
 
-  // Search filters by Tunnel + Location + Chainage + Date
+  // Search filters by Project + Tunnel + Location + Chainage + Date
+  const [projectFilter, setProjectFilter] = useState<string>('');
   const [tunnelFilter, setTunnelFilter] = useState<string>('');
   const [locationFilter, setLocationFilter] = useState<string>('');
   const [chainageFilter, setChainageFilter] = useState<string>('');
@@ -1101,18 +1121,37 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
   const filteredProjects = useMemo(
     () =>
       filterSavedProjects(savedProjects, {
+        projectQuery: projectFilter,
         tunnelQuery: tunnelFilter,
         locationQuery: locationFilter,
         chainageQuery: chainageFilter,
         dateQuery: dateFilter,
       }),
-    [savedProjects, tunnelFilter, locationFilter, chainageFilter, dateFilter]
+    [savedProjects, projectFilter, tunnelFilter, locationFilter, chainageFilter, dateFilter]
+  );
+
+  const groupedHierarchy = useMemo(
+    () => groupSavedProjectsByHierarchy(filteredProjects),
+    [filteredProjects]
   );
 
   const sectionVolumeRows = useMemo(
     () => computeSectionToSectionVolumes(savedProjects),
     [savedProjects]
   );
+
+  const handleDownloadChainageCSV = () => {
+    const csv = exportProjectHierarchyRegisterToCSV(savedProjects);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(settings.projectName || settings.tunnelName).replace(/\s+/g, '_')}_Chainage_Face_Ledger.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   if (!isOpen) return null;
 
@@ -1124,16 +1163,19 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
           <div className="flex items-center gap-2.5">
             <Database className="w-4 h-4 text-cyan-400" />
             <span className="font-display font-bold text-sm tracking-wide text-white">
-              PROJECT FILE MEMORY, SAVED GEOMETRIES &amp; SECTION VOLUMES
+              PROJECT &amp; CHAINAGE FACE STORAGE, SHEET SETTINGS &amp; LOGOS
             </span>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <ThemeToggleButton compact />
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Navigation Tabs */}
@@ -1147,7 +1189,18 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                 : 'bg-slate-800 text-slate-300 hover:text-white'
             }`}
           >
-            1. Project File Memory ({savedProjects.length})
+            1. Project &amp; Chainage Face Storage ({savedProjects.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('sheet_settings')}
+            className={`px-3 py-1.5 rounded font-semibold transition-colors whitespace-nowrap ${
+              tab === 'sheet_settings'
+                ? 'bg-emerald-600 text-white'
+                : 'bg-slate-800 text-slate-300 hover:text-white'
+            }`}
+          >
+            2. Engineering Sheet Settings, Placement &amp; Logos
           </button>
           <button
             type="button"
@@ -1158,7 +1211,7 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                 : 'bg-slate-800 text-slate-300 hover:text-white'
             }`}
           >
-            2. Section-to-Section Volumes ({sectionVolumeRows.length})
+            3. Section-to-Section Volumes ({sectionVolumeRows.length})
           </button>
           <button
             type="button"
@@ -1169,28 +1222,54 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                 : 'bg-slate-800 text-slate-300 hover:text-white'
             }`}
           >
-            3. Saved Design Geometries ({savedGeometries.length})
+            4. Saved Design Geometries ({savedGeometries.length})
           </button>
         </div>
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {tab === 'sheet_settings' && (
+            <div className="border border-slate-800 rounded overflow-hidden">
+              <SheetSettingsAndStorageEditor
+                settings={settings}
+                onUpdateSettings={onUpdateSettings}
+                savedProjects={savedProjects}
+                onSaveCurrentProject={onSaveCurrentProject}
+                onLoadProjectRecord={(rec) => {
+                  onLoadProjectRecord(rec);
+                  onClose();
+                }}
+                onDeleteProjectRecord={onDeleteProjectRecord}
+                onCreateNextChainageSection={onCreateCompanionSectionForVolumeTest}
+              />
+            </div>
+          )}
+
           {tab === 'projects' && (
             <>
-              {/* Current Active Project Index Key: Tunnel + Location + Chainage + Date */}
+              {/* Current Active Project Index Key: Project + Location + Tunnel + Chainage + Date */}
               <div className="p-4 bg-slate-900/90 border border-cyan-500/40 rounded space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
                   <span className="font-bold text-cyan-300">
-                    CURRENT ACTIVE SECTION INDEX (TUNNEL + LOCATION + CHAINAGE + DATE)
+                    CURRENT ACTIVE FACE INDEX (PROJECT → LOCATION → TUNNEL → CHAINAGE RD)
                   </span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <button
                       type="button"
                       onClick={onSaveCurrentProject}
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded"
                     >
                       <Save className="w-3.5 h-3.5" />
-                      Save Section to Project Memory
+                      Save Current Face by Chainage
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloadChainageCSV}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 rounded"
+                      title="Export all stored chainage face records to CSV"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Chainage CSV
                     </button>
                     <button
                       type="button"
@@ -1222,9 +1301,46 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
                   <label className="space-y-1">
-                    <span className="text-[10px] text-slate-400">1. Tunnel Name</span>
+                    <span className="text-[10px] text-slate-400">1. Project Name</span>
+                    <input
+                      type="text"
+                      value={
+                        settings.projectName ||
+                        settings.sheetConfig?.projectName ||
+                        'Underground Tunnel Project'
+                      }
+                      onChange={(e) =>
+                        onUpdateSettings((p) => ({
+                          ...p,
+                          projectName: e.target.value,
+                          sheetConfig: p.sheetConfig
+                            ? { ...p.sheetConfig, projectName: e.target.value }
+                            : undefined,
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-400">2. Location / Adit / Heading</span>
+                    <input
+                      type="text"
+                      value={settings.locationName || settings.location || ''}
+                      placeholder="e.g. Package-II Main Drive"
+                      onChange={(e) =>
+                        onUpdateSettings((p) => ({
+                          ...p,
+                          location: e.target.value,
+                          locationName: e.target.value,
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-400">3. Tunnel Name</span>
                     <input
                       type="text"
                       value={settings.tunnelName}
@@ -1235,30 +1351,18 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                     />
                   </label>
                   <label className="space-y-1">
-                    <span className="text-[10px] text-slate-400">2. Location / Adit / Heading</span>
-                    <input
-                      type="text"
-                      value={settings.location || ''}
-                      placeholder="e.g. Package-II Main Drive"
-                      onChange={(e) =>
-                        onUpdateSettings((p) => ({ ...p, location: e.target.value }))
-                      }
-                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
-                    />
-                  </label>
-                  <label className="space-y-1">
-                    <span className="text-[10px] text-slate-400">3. Face Chainage / RD</span>
+                    <span className="text-[10px] text-slate-400">4. Face Chainage / RD</span>
                     <input
                       type="text"
                       value={settings.faceChainage}
                       onChange={(e) =>
                         onUpdateSettings((p) => ({ ...p, faceChainage: e.target.value }))
                       }
-                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-emerald-300 font-bold"
                     />
                   </label>
                   <label className="space-y-1">
-                    <span className="text-[10px] text-slate-400">4. Mapping Date</span>
+                    <span className="text-[10px] text-slate-400">5. Mapping Date</span>
                     <input
                       type="date"
                       value={settings.date}
@@ -1271,17 +1375,18 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                 </div>
               </div>
 
-              {/* Search & Recall Filter by Tunnel + Location + Chainage + Date */}
+              {/* Search & Recall Filter by Project + Location + Tunnel + Chainage + Date */}
               <div className="p-3.5 bg-slate-900 border border-slate-800 rounded space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold text-slate-200 flex items-center gap-1.5">
                     <Search className="w-3.5 h-3.5 text-cyan-400" />
-                    SEARCH &amp; REOPEN SAVED PROJECT SECTIONS (TUNNEL + LOCATION + CHAINAGE + DATE)
+                    FILTER STORED FACES BY PROJECT, LOCATION, TUNNEL, CHAINAGE (RD) &amp; DATE
                   </span>
-                  {(tunnelFilter || locationFilter || chainageFilter || dateFilter) && (
+                  {(projectFilter || tunnelFilter || locationFilter || chainageFilter || dateFilter) && (
                     <button
                       type="button"
                       onClick={() => {
+                        setProjectFilter('');
                         setTunnelFilter('');
                         setLocationFilter('');
                         setChainageFilter('');
@@ -1294,12 +1399,12 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
                   <input
                     type="text"
-                    placeholder="Filter by Tunnel Name..."
-                    value={tunnelFilter}
-                    onChange={(e) => setTunnelFilter(e.target.value)}
+                    placeholder="Filter by Project..."
+                    value={projectFilter}
+                    onChange={(e) => setProjectFilter(e.target.value)}
                     className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
                   />
                   <input
@@ -1311,6 +1416,13 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                   />
                   <input
                     type="text"
+                    placeholder="Filter by Tunnel Name..."
+                    value={tunnelFilter}
+                    onChange={(e) => setTunnelFilter(e.target.value)}
+                    className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                  />
+                  <input
+                    type="text"
                     placeholder="Filter by Chainage / RD..."
                     value={chainageFilter}
                     onChange={(e) => setChainageFilter(e.target.value)}
@@ -1318,7 +1430,7 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                   />
                   <input
                     type="text"
-                    placeholder="Filter by Date (YYYY-MM-DD)..."
+                    placeholder="Filter by Date..."
                     value={dateFilter}
                     onChange={(e) => setDateFilter(e.target.value)}
                     className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
@@ -1326,78 +1438,115 @@ export const ProjectMemoryModal: React.FC<ProjectMemoryModalProps> = ({
                 </div>
               </div>
 
-              {/* Saved Project Records Table */}
-              <div className="space-y-2">
-                {filteredProjects.length === 0 ? (
-                  <div className="p-6 bg-slate-900/50 border border-slate-800 rounded text-center text-slate-400">
-                    No saved project sections match your filter. Click{' '}
-                    <strong className="text-emerald-300">
-                      &quot;Save Section to Project Memory&quot;
-                    </strong>{' '}
-                    above to store the current mapping section.
-                  </div>
-                ) : (
-                  filteredProjects.map((rec) => (
+              {/* Hierarchical Project -> Location -> Tunnel -> Chainage Summary Groups */}
+              {groupedHierarchy.length > 0 && (
+                <div className="space-y-3">
+                  {groupedHierarchy.map((grp) => (
                     <div
-                      key={rec.id}
-                      className="p-3 bg-slate-900/90 hover:bg-slate-900 border border-slate-800 hover:border-cyan-500/50 rounded flex flex-wrap items-center justify-between gap-3 transition-colors"
+                      key={grp.groupKey}
+                      className="p-3.5 bg-slate-900/90 border border-slate-800 rounded space-y-2.5"
                     >
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-cyan-300 text-xs">
-                            {rec.tunnelName}
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="px-2 py-0.5 bg-cyan-950 text-cyan-300 border border-cyan-700/60 rounded text-[10px] font-bold">
+                            PROJECT: {grp.projectName}
                           </span>
-                          <span className="px-2 py-0.5 bg-slate-800 text-slate-200 rounded border border-slate-700 text-[10px]">
-                            {rec.location || 'Main Heading'}
+                          <span className="px-2 py-0.5 bg-indigo-950 text-indigo-300 border border-indigo-700/60 rounded text-[10px] font-semibold">
+                            LOCATION: {grp.location}
                           </span>
-                          <span className="px-2 py-0.5 bg-emerald-950/80 text-emerald-300 rounded border border-emerald-700/60 text-[10px] font-bold">
-                            {rec.faceChainage || rec.chainage}
-                          </span>
-                          <span className="px-2 py-0.5 bg-slate-950 text-slate-300 rounded border border-slate-800 text-[10px]">
-                            {rec.date}
+                          <span className="font-bold text-white text-xs">
+                            TUNNEL: {grp.tunnelName}
                           </span>
                         </div>
-                        <div className="text-[11px] text-slate-400">
-                          Geometry: {rec.geometry.width.toFixed(2)}m ×{' '}
-                          {rec.geometry.height.toFixed(2)}m · Joints: {rec.joints.length} ·
-                          Lithology: {rec.lithologyRegions.length} · Control Pts:{' '}
-                          {rec.controlPoints.length} · Overbreak:{' '}
+                        <div className="text-[10px] text-slate-400">
+                          {grp.faces.length} Face(s) Stored · Total OB:{' '}
                           <strong className="text-rose-300">
-                            {rec.quantitySummary.overbreakAreaSqM.toFixed(2)} m² (
-                            {rec.quantitySummary.overbreakPct.toFixed(1)}%)
+                            +{grp.totalOverbreakAreaSqM.toFixed(2)} m²
                           </strong>{' '}
-                          · Undercut:{' '}
+                          · Total UC:{' '}
                           <strong className="text-amber-300">
-                            {rec.quantitySummary.undercutAreaSqM.toFixed(2)} m²
+                            -{grp.totalUndercutAreaSqM.toFixed(2)} m²
                           </strong>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onLoadProjectRecord(rec);
-                            onClose();
-                          }}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white font-semibold rounded"
-                        >
-                          <FolderOpen className="w-3.5 h-3.5" />
-                          Reopen Section
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onDeleteProjectRecord(rec.id)}
-                          className="p-1.5 bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-300 rounded border border-slate-700"
-                          title="Delete Saved Record"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                      <div className="space-y-2">
+                        {grp.faces.map((rec) => (
+                          <div
+                            key={rec.id}
+                            className="p-2.5 bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-cyan-500/50 rounded flex flex-wrap items-center justify-between gap-3 transition-colors"
+                          >
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="px-2 py-0.5 bg-emerald-950/90 text-emerald-300 rounded border border-emerald-700/60 text-[11px] font-bold">
+                                  CHAINAGE: {rec.faceChainage || rec.chainage}
+                                </span>
+                                <span className="text-[10px] text-slate-300">
+                                  Interval: {rec.chainage}
+                                </span>
+                                <span className="px-2 py-0.5 bg-slate-900 text-slate-300 rounded border border-slate-800 text-[10px]">
+                                  {rec.date}
+                                </span>
+                                {rec.settings?.mappedBy && (
+                                  <span className="text-[10px] text-slate-400">
+                                    By: {rec.settings.mappedBy}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-400">
+                                Geometry: {rec.geometry.width.toFixed(2)}m ×{' '}
+                                {rec.geometry.height.toFixed(2)}m · Joints: {rec.joints.length} ·
+                                Lithology: {rec.lithologyRegions.length} · Control Pts:{' '}
+                                {rec.controlPoints.length} · Overbreak:{' '}
+                                <strong className="text-rose-300">
+                                  +{rec.quantitySummary.overbreakAreaSqM.toFixed(2)} m² (
+                                  {rec.quantitySummary.overbreakPct.toFixed(1)}%)
+                                </strong>{' '}
+                                · Undercut:{' '}
+                                <strong className="text-amber-300">
+                                  -{rec.quantitySummary.undercutAreaSqM.toFixed(2)} m²
+                                </strong>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onLoadProjectRecord(rec);
+                                  onClose();
+                                }}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white font-semibold rounded"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                                Reopen Face
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onDeleteProjectRecord(rec.id)}
+                                className="p-1.5 bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-300 rounded border border-slate-700"
+                                title="Delete Saved Face Record"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                  ))
-                )}
-              </div>
+                  ))}
+                </div>
+              )}
+
+              {filteredProjects.length === 0 && (
+                <div className="p-6 bg-slate-900/50 border border-slate-800 rounded text-center text-slate-400">
+                  No saved project faces match your filter. Click{' '}
+                  <strong className="text-emerald-300">
+                    &quot;Save Current Face by Chainage&quot;
+                  </strong>{' '}
+                  above to store the current mapping section.
+                </div>
+              )}
             </>
           )}
 

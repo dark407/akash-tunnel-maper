@@ -1,10 +1,12 @@
 import {
+  EngineeringSheetConfig,
   Joint,
   JointSet,
   LithologyRegion,
   OutputSheetMode,
   PhotoSurface,
   Point2D,
+  SheetEngineeringBlockId,
   SurfaceTransform,
   SurfaceType,
   TunnelGeometry,
@@ -12,6 +14,95 @@ import {
 } from '../types/tunnel';
 
 export type SheetLayoutArrangement = 'AUTO_INTELLIGENT' | 'MAXIMIZE_FACE';
+
+const SHEET_CONFIG_STORAGE_KEY = 'akash_tunnel_engineering_sheet_config_v1';
+
+export function createDefaultEngineeringSheetConfig(
+  settings?: Partial<TunnelSettings>
+): EngineeringSheetConfig {
+  return {
+    projectName: settings?.projectName || 'Underground Hydroelectric & Tunneling Project',
+    location: settings?.locationName || settings?.location || 'Main Underground Heading',
+    clientName: 'Project Employer / Authority',
+    contractorName: 'Main Civil Works Contractor',
+    consultantName: 'Design & Geological Supervision Consultant',
+    contractNumber: 'PKG-01 / TUN-CW',
+    drawingNumber: 'DWG-TUN-SH-001',
+    revisionNumber: 'Rev 0',
+    geologySheetTitle: 'ENGINEERING GEOLOGICAL TUNNEL MAPPING SHEET',
+    quantitySheetTitle: 'ENGINEERING OVERBREAK, UNDERCUT & EXCAVATION QUANTITY SHEET',
+    clientLogoDataUrl: null,
+    contractorLogoDataUrl: null,
+    consultantLogoDataUrl: null,
+    logoPosition: 'HEADER_CORNERS',
+    logoSize: 'STANDARD',
+    headerPosition: 'TOP',
+    engineeringColumnPosition: 'RIGHT',
+    columnWidthMode: 'BALANCED',
+    blockOrder: [
+      'ORIENTATION_POLAR',
+      'LEGEND_SUMMARY',
+      'DATA_TABLE',
+      'Q_INDEX_AND_NOTES',
+    ],
+    showPerimeterPlan: true,
+    showOrientationPolarBlock: true,
+    showLegendBlock: true,
+    showDataTableBlock: true,
+    showSummaryNotesBlock: true,
+    showSignatureStrip: true,
+    showBackgroundGrid: true,
+    layoutMode: 'ADAPTIVE_LAYOUT',
+    adaptiveScaleMode: 'AUTO_CONTENT',
+    fontScaleMultiplier: 1.0,
+    manualTableRowHeight: 34,
+    manualTableBlockRatio: 0.38,
+    contractorSignTitle: 'CONTRACTOR GEOLOGIST / SURVEYOR',
+    contractorSignName: '',
+    clientSignTitle: 'CLIENT / AUTHORITY ENGINEER',
+    clientSignName: '',
+    consultantSignTitle: 'CONSULTANT QA GEOLOGIST',
+    consultantSignName: '',
+    leftSignatoryTitle: 'CONTRACTOR GEOLOGIST SIGN',
+    rightSignatoryTitle: 'CLIENT GEOLOGIST SIGN',
+    customFooterRemarks: '',
+  };
+}
+
+export function loadSavedEngineeringSheetConfig(
+  settings?: Partial<TunnelSettings>
+): EngineeringSheetConfig {
+  const defaults = createDefaultEngineeringSheetConfig(settings);
+  try {
+    const raw = localStorage.getItem(SHEET_CONFIG_STORAGE_KEY);
+    const stored = raw ? (JSON.parse(raw) as Partial<EngineeringSheetConfig>) : {};
+    const merged: EngineeringSheetConfig = {
+      ...defaults,
+      ...stored,
+      ...(settings?.sheetConfig || {}),
+    };
+    merged.layoutMode =
+      merged.layoutMode === 'FIXED_LAYOUT' ? 'FIXED_LAYOUT' : 'ADAPTIVE_LAYOUT';
+    merged.blockOrder =
+      Array.isArray(merged.blockOrder) && merged.blockOrder.length === 4
+        ? merged.blockOrder
+        : defaults.blockOrder;
+    return merged;
+  } catch {
+    return settings?.sheetConfig ? { ...defaults, ...settings.sheetConfig } : defaults;
+  }
+}
+
+export function saveEngineeringSheetConfigToStorage(config: EngineeringSheetConfig): void {
+  try {
+    localStorage.setItem(SHEET_CONFIG_STORAGE_KEY, JSON.stringify(config));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
+export const loadSavedSheetConfig = loadSavedEngineeringSheetConfig;
+export const saveSheetConfigToStorage = saveEngineeringSheetConfigToStorage;
 
 export interface SheetRect {
   x: number;
@@ -47,6 +138,7 @@ export interface SheetContentMetrics {
   legendRowSpacing: number;
   maxLegendLithologyRows: number;
   compactMode: boolean;
+  sparseContentBoost: number;
   discontinuityColumns: SheetTableColumnMetric[];
   overbreakColumns: SheetTableColumnMetric[];
 }
@@ -61,6 +153,7 @@ export interface SheetLayoutComputation {
   drawingArenaBox: SheetRect;
   rightColumnBox: SheetRect;
   contentMetrics: SheetContentMetrics;
+  effectiveSheetConfig: EngineeringSheetConfig;
 
   // Priority 1: Main Tunnel-Face Geological Mapping Viewport
   facePxPerMeter: number;
@@ -95,7 +188,7 @@ export interface SheetLayoutComputation {
   leftWallSpan: number;
   rightWallSpan: number;
 
-  // Right Column Non-Overlapping Blocks (Priorities 3, 4, 5, 7, 8)
+  // Right/Left Engineering Column Non-Overlapping Blocks
   orientationBlock: SheetRect;
   legendBlock: SheetRect;
   jointTableBlock: SheetRect;
@@ -158,8 +251,12 @@ export function wrapSheetTextLines(
  * Content-Aware & Space-Aware Final Engineering Sheet Auto-Layout Engine.
  *
  * Automatically calculates required page layout from actual content, resizes/positions
- * photos, geological drawings, tables, legends, dimensions, and text, and reduces font
- * size / row height when content is dense without ever shrinking the main geological drawing.
+ * photos, geological drawings, tables, legends, dimensions, and text:
+ * - When content is less/sparse, automatically increases font size, row height, and table visual density
+ *   to utilize empty white parts cleanly.
+ * - When content is large/dense, automatically reduces font size and row height so all rows fit cleanly.
+ * - Strictly isolates and protects the Main Tunnel-Face Drawing & Canvas Arena so tables/headers
+ *   NEVER collapse or overlap with the face drawing.
  */
 export function computeFinalSheetAutoLayout(params: {
   geometry: TunnelGeometry;
@@ -175,11 +272,11 @@ export function computeFinalSheetAutoLayout(params: {
   placedSymbolCount?: number;
   controlPointCount?: number;
   sectionVolumeRowCount?: number;
+  sheetConfig?: EngineeringSheetConfig;
 }): SheetLayoutComputation {
   const {
     geometry,
     settings,
-    photos,
     joints,
     jointSets,
     lithologyRegions,
@@ -190,7 +287,11 @@ export function computeFinalSheetAutoLayout(params: {
     placedSymbolCount = 0,
     controlPointCount = 0,
     sectionVolumeRowCount = 0,
+    sheetConfig: propSheetConfig,
   } = params;
+
+  const effectiveSheetConfig =
+    propSheetConfig || loadSavedEngineeringSheetConfig(settings);
 
   // Landscape A3 Engineering Sheet (1600 x 1130 high-resolution technical drawing space)
   const sheetW = 1600;
@@ -214,41 +315,101 @@ export function computeFinalSheetAutoLayout(params: {
 
   const totalContentLoad =
     activeRowCount * 1.45 +
-    Math.min(12, joints.length) * 0.22 +
-    Math.min(6, uniqueLithologyCount) * 0.35 +
-    (notesTextLength > 240 ? 2.4 : notesTextLength > 120 ? 1.4 : 0) +
-    (sectionVolumeRowCount > 2 ? 1.0 : 0);
+    Math.min(12, joints.length) * 0.2 +
+    Math.min(6, uniqueLithologyCount) * 0.3 +
+    (notesTextLength > 240 ? 2.2 : notesTextLength > 120 ? 1.2 : 0) +
+    (sectionVolumeRowCount > 2 ? 1.2 : 0);
 
-  const compactMode = totalContentLoad > 8.0 || activeRowCount > 5 || notesTextLength > 180;
-  const ultraDenseMode = totalContentLoad > 12.0 || activeRowCount > 8 || notesTextLength > 320;
+  const isSparseContent =
+    activeRowCount <= 3 && notesTextLength <= 140 && sectionVolumeRowCount <= 2;
+  const compactMode = totalContentLoad > 8.5 || activeRowCount > 6 || notesTextLength > 220;
+  const ultraDenseMode = totalContentLoad > 12.5 || activeRowCount > 9 || notesTextLength > 340;
 
-  const fontScale = ultraDenseMode
+  const isFixedLayout = effectiveSheetConfig.layoutMode === 'FIXED_LAYOUT';
+
+  // Base adaptive font scale based on content load (or fixed 1.0 baseline when Fixed Layout is selected)
+  let baseFontScale = isFixedLayout
+    ? 1.0
+    : ultraDenseMode
     ? 0.82
     : activeRowCount > 7
-    ? 0.86
-    : activeRowCount > 5 || notesTextLength > 220
-    ? 0.91
+    ? 0.87
     : compactMode
-    ? 0.95
-    : 1.0;
+    ? 0.93
+    : isSparseContent
+    ? 1.12
+    : 1.03;
 
-  // Header Block (Priority 6: Project Information - compact when content is dense)
-  const headerH = showTitleAndTables ? (ultraDenseMode ? 62 : compactMode ? 66 : 72) : 0;
+  if (!isFixedLayout) {
+    if (effectiveSheetConfig.adaptiveScaleMode === 'SPACIOUS_LARGE') {
+      baseFontScale = Math.min(1.26, baseFontScale * 1.12);
+    } else if (effectiveSheetConfig.adaptiveScaleMode === 'COMPACT_DENSE') {
+      baseFontScale = Math.max(0.8, baseFontScale * 0.9);
+    }
+  }
+
+  const userMult = Math.max(0.8, Math.min(1.35, effectiveSheetConfig.fontScaleMultiplier || 1.0));
+  const fontScale = Number(Math.max(0.8, Math.min(1.32, baseFontScale * userMult)).toFixed(3));
+  const sparseContentBoost = isFixedLayout ? 1.0 : isSparseContent ? 1.14 : compactMode ? 0.94 : 1.02;
+
+  // Header Block (Priority 6: Project Information - Supports TOP or BOTTOM placement)
+  const hasLogosInHeader =
+    effectiveSheetConfig.logoPosition !== 'HIDDEN' &&
+    effectiveSheetConfig.logoPosition !== 'BOTTOM_SIGN_BLOCK' &&
+    Boolean(
+      effectiveSheetConfig.clientLogoDataUrl ||
+        effectiveSheetConfig.contractorLogoDataUrl ||
+        effectiveSheetConfig.consultantLogoDataUrl
+    );
+
+  const headerH = showTitleAndTables
+    ? hasLogosInHeader
+      ? 78
+      : ultraDenseMode
+      ? 66
+      : compactMode
+      ? 70
+      : 76
+    : 0;
+
+  const isHeaderBottom = effectiveSheetConfig.headerPosition === 'BOTTOM';
   const headerBox: SheetRect = {
     x: margin + 4,
-    y: margin + 4,
+    y: isHeaderBottom ? sheetH - margin - 4 - headerH : margin + 4,
     width: sheetW - (margin + 4) * 2,
     height: headerH,
   };
 
-  const contentTopY = showTitleAndTables ? headerBox.y + headerBox.height + 8 : margin + 10;
-  const contentBottomY = sheetH - margin - 8;
-  const availHeight = contentBottomY - contentTopY;
+  const contentTopY = showTitleAndTables
+    ? isHeaderBottom
+      ? margin + 8
+      : headerBox.y + headerBox.height + 6
+    : margin + 8;
+  const contentBottomY = showTitleAndTables
+    ? isHeaderBottom
+      ? headerBox.y - 6
+      : sheetH - margin - 6
+    : sheetH - margin - 8;
+  const availHeight = Math.max(600, contentBottomY - contentTopY);
 
-  // Right Column (Priorities 3, 4, 5, 7, 8)
-  // Core Rule: Keep main geological drawing arena prominent while giving tables, legend, and stereonet generous space.
-  const rightColW = showTitleAndTables ? (compactMode ? 542 : 552) : 0;
-  const rightColX = sheetW - margin - 4 - rightColW;
+  // Engineering Column Width & Position (Supports RIGHT or LEFT, and BALANCED / WIDE_TABLES / MAX_DRAWING)
+  // Core Rule: Keep main geological drawing arena strictly protected and non-overlapping.
+  const baseRightColW =
+    effectiveSheetConfig.columnWidthMode === 'WIDE_TABLES'
+      ? 610
+      : effectiveSheetConfig.columnWidthMode === 'MAX_DRAWING'
+      ? 508
+      : compactMode
+      ? 556
+      : 568;
+
+  const rightColW = showTitleAndTables ? baseRightColW : 0;
+  const isColumnOnLeft = effectiveSheetConfig.engineeringColumnPosition === 'LEFT';
+
+  const rightColX = isColumnOnLeft
+    ? margin + 4
+    : sheetW - margin - 4 - rightColW;
+
   const rightColumnBox: SheetRect = {
     x: rightColX,
     y: contentTopY,
@@ -256,23 +417,31 @@ export function computeFinalSheetAutoLayout(params: {
     height: availHeight,
   };
 
-  // Left/Center Main Drawing Arena (Priorities 1 & 2)
-  const arenaLeftX = margin + 4;
-  const arenaRightX = showTitleAndTables ? rightColX - 10 : sheetW - margin - 4;
+  // Main Drawing Arena (Priorities 1 & 2 - Strictly separated from Engineering Column)
+  const arenaLeftX = showTitleAndTables
+    ? isColumnOnLeft
+      ? rightColX + rightColW + 8
+      : margin + 4
+    : margin + 4;
+  const arenaRightX = showTitleAndTables
+    ? isColumnOnLeft
+      ? sheetW - margin - 4
+      : rightColX - 8
+    : sheetW - margin - 4;
+
   const drawingArenaBox: SheetRect = {
     x: arenaLeftX,
     y: contentTopY,
-    width: arenaRightX - arenaLeftX,
+    width: Math.max(480, arenaRightX - arenaLeftX),
     height: availHeight,
   };
 
   const showPerimeterPlan =
+    effectiveSheetConfig.showPerimeterPlan !== false &&
     arrangement !== 'MAXIMIZE_FACE' &&
     outputMode !== 'EXPORT_PHOTO_ONLY';
 
   const roundLen = Math.max(1.5, settings.roundLength || 3.5);
-  // Strict Geometric Rule: The Developed Perimeter Crown length MUST equal the Tunnel Face Crown Arc Length (geometry.crownArcLength),
-  // and each Developed Perimeter Side Wall width MUST equal the actual Left/Right Wall curvilinear/vertical span.
   const crownSpan = Math.max(1.0, geometry.crownArcLength || geometry.width);
   const leftWallSpan = Math.max(
     0.5,
@@ -282,15 +451,21 @@ export function computeFinalSheetAutoLayout(params: {
     0.5,
     geometry.rightWallArcLength || geometry.rightWallHeight || geometry.wallHeight
   );
-  // Unfolded Left Wall + Crown Arc + Right Wall total horizontal span in meters (from actual vector geometry)
   const totalDevelopedWidthMeters = leftWallSpan + crownSpan + rightWallSpan;
 
-  // Reserve space for dimension lines & callout labels so nothing is ever clipped
-  const hasDenseCallouts = joints.length + placedSymbolCount + controlPointCount > 8;
-  const arenaPadW = hasDenseCallouts ? 102 : 90;
-  const arenaPadH = hasDenseCallouts ? 114 : 102;
+  // Minimize empty white space around the Tunnel Face while reserving safe room for dimension lines & callout labels
+  const calloutCount = joints.length + placedSymbolCount + controlPointCount;
+  const hasDenseCallouts = calloutCount > 10;
+  const arenaPadW = hasDenseCallouts ? 88 : calloutCount > 4 ? 76 : 64;
+  const arenaPadH = showPerimeterPlan
+    ? hasDenseCallouts
+      ? 98
+      : 86
+    : hasDenseCallouts
+    ? 76
+    : 64;
 
-  // UNIFIED TRUE ENGINEERING SCALE:
+  // UNIFIED TRUE ENGINEERING SCALE: Maximizes utilization of drawingArenaBox
   const totalHorizontalMeters = showPerimeterPlan
     ? Math.max(geometry.width, totalDevelopedWidthMeters)
     : geometry.width;
@@ -313,7 +488,6 @@ export function computeFinalSheetAutoLayout(params: {
   const faceWidthPx = Number((geometry.width * facePxPerMeter).toFixed(2));
   const faceHeightPx = Number((geometry.height * facePxPerMeter).toFixed(2));
 
-  // Exact 1:1 dimensional equality at unified engineering scale:
   const crownW_px = Number((crownSpan * perimeterPxPerMeter).toFixed(2));
   const leftWallW_px = Number((leftWallSpan * perimeterPxPerMeter).toFixed(2));
   const rightWallW_px = Number((rightWallSpan * perimeterPxPerMeter).toFixed(2));
@@ -321,11 +495,11 @@ export function computeFinalSheetAutoLayout(params: {
   const roundH_px = Number((roundLen * perimeterPxPerMeter).toFixed(2));
 
   // Vertically center the unified [Developed Perimeter + Projection Gap + Tunnel Face] assembly
-  const interViewGapPx = showPerimeterPlan ? 54 : 0;
+  const interViewGapPx = showPerimeterPlan ? 46 : 0;
   const totalAssemblyHeightPx = (showPerimeterPlan ? roundH_px + interViewGapPx : 0) + faceHeightPx;
   const assemblyTopY =
     drawingArenaBox.y +
-    Math.max(28, (drawingArenaBox.height - totalAssemblyHeightPx) / 2);
+    Math.max(22, (drawingArenaBox.height - totalAssemblyHeightPx) / 2);
 
   const planTopY = Number(assemblyTopY.toFixed(1));
   const crownLeftX = Number((planCenterX - crownW_px / 2).toFixed(2));
@@ -348,88 +522,185 @@ export function computeFinalSheetAutoLayout(params: {
   };
 
   // ============================================================================
-  // SPACE-AWARE & CONTENT-AWARE RIGHT COLUMN AUTO-EXPANSION:
-  // When vertical space is available in the 1010px right column, automatically
-  // increase the Stereographic Box, Legend Box, Table Box, and Q-Index/Notes Box
-  // and scale up their internal content (stereonet radius, legend swatches/text,
-  // table row height & cell fonts) so available space is utilized efficiently.
+  // DYNAMIC CONTENT-ADAPTIVE ENGINEERING COLUMN ALLOCATION & BLOCK ORDERING:
+  // Zero wasted white space: visible blocks automatically share 100% of availHeight!
   // ============================================================================
-  const gap = ultraDenseMode ? 6 : compactMode ? 7 : 8;
-  const totalUsableRightH = availHeight - gap * 3;
-
   const maxLegendLithologyRows = Math.min(6, Math.max(5, uniqueLithologyCount));
-  const maxVisibleJointSets = Math.min(12, Math.max(1, jointSets.length));
-  const maxVisibleOverbreakZones = Math.min(10, Math.max(1, overbreakZoneCount));
+  const maxVisibleJointSets = Math.min(14, Math.max(1, jointSets.length));
+  const maxVisibleOverbreakZones = Math.min(14, Math.max(1, overbreakZoneCount));
   const targetRows =
     outputMode === 'ENGINEERING_QUANTITY_SHEET'
-      ? maxVisibleOverbreakZones
-      : maxVisibleJointSets;
+      ? Math.max(2, maxVisibleOverbreakZones)
+      : Math.max(2, maxVisibleJointSets);
 
-  // Base minimum heights required by content
-  const minOrientationH = ultraDenseMode ? 146 : compactMode ? 162 : 178;
-  const minLegendH = ultraDenseMode ? 144 : compactMode ? 162 : 178;
-  const minQBlockH =
-    notesTextLength > 260
-      ? 258
-      : notesTextLength > 140
-      ? 244
-      : ultraDenseMode
-      ? 218
-      : compactMode
-      ? 232
-      : 246;
-  const minRowH = targetRows <= 3 ? 42 : targetRows <= 5 ? 36 : targetRows <= 7 ? 30 : 23;
-  const minTableH = Math.max(215, 44 + targetRows * minRowH);
+  const blockVisibility: Record<SheetEngineeringBlockId, boolean> = {
+    ORIENTATION_POLAR: effectiveSheetConfig.showOrientationPolarBlock !== false,
+    LEGEND_SUMMARY: effectiveSheetConfig.showLegendBlock !== false,
+    DATA_TABLE: effectiveSheetConfig.showDataTableBlock !== false,
+    Q_INDEX_AND_NOTES: effectiveSheetConfig.showSummaryNotesBlock !== false,
+  };
 
-  const baseSumH = minOrientationH + minLegendH + minTableH + minQBlockH;
-  const surplusH = Math.max(0, totalUsableRightH - baseSumH);
+  const orderedBlocks: SheetEngineeringBlockId[] =
+    Array.isArray(effectiveSheetConfig.blockOrder) && effectiveSheetConfig.blockOrder.length === 4
+      ? effectiveSheetConfig.blockOrder
+      : ['ORIENTATION_POLAR', 'LEGEND_SUMMARY', 'DATA_TABLE', 'Q_INDEX_AND_NOTES'];
 
-  // Distribute any available surplus height across Stereographic (22%), Legend (22%), Table (34%), and Q/Notes (22%)
-  const orientationH = Math.round(
-    Math.min(216, minOrientationH + surplusH * 0.22)
+  const activeBlockIds = orderedBlocks.filter((id) => blockVisibility[id]);
+  const gap = ultraDenseMode ? 5 : compactMode ? 6 : 7;
+  const totalGapsH = Math.max(0, activeBlockIds.length - 1) * gap;
+  const totalUsableRightH = Math.max(400, availHeight - totalGapsH);
+
+  // Ideal content-driven weights for each block (or manual proportions in FIXED_LAYOUT)
+  const manualTableShare = Math.max(
+    0.25,
+    Math.min(0.55, effectiveSheetConfig.manualTableBlockRatio ?? 0.38)
   );
-  const legendH = Math.round(
-    Math.min(216, minLegendH + surplusH * 0.22)
-  );
-  const desiredTableH = Math.round(
-    Math.min(
-      totalUsableRightH - orientationH - legendH - minQBlockH,
-      minTableH + surplusH * 0.34
-    )
-  );
-  const actualTableH = Math.max(195, desiredTableH);
-  const remainingForQ = Math.max(
-    minQBlockH,
-    totalUsableRightH - orientationH - legendH - actualTableH
-  );
+  const idealRowH = isFixedLayout
+    ? Math.max(20, Math.min(64, effectiveSheetConfig.manualTableRowHeight ?? 34))
+    : targetRows <= 2
+    ? 52
+    : targetRows <= 4
+    ? 44
+    : targetRows <= 6
+    ? 36
+    : targetRows <= 8
+    ? 29
+    : 23;
+
+  const idealHeights: Record<SheetEngineeringBlockId, number> = isFixedLayout
+    ? {
+        ORIENTATION_POLAR: blockVisibility.ORIENTATION_POLAR ? Math.round(totalUsableRightH * 0.19) : 0,
+        LEGEND_SUMMARY: blockVisibility.LEGEND_SUMMARY ? Math.round(totalUsableRightH * 0.18) : 0,
+        DATA_TABLE: blockVisibility.DATA_TABLE
+          ? Math.round(totalUsableRightH * manualTableShare)
+          : 0,
+        Q_INDEX_AND_NOTES: blockVisibility.Q_INDEX_AND_NOTES
+          ? Math.round(totalUsableRightH * Math.max(0.18, 0.63 - manualTableShare))
+          : 0,
+      }
+    : {
+        ORIENTATION_POLAR: blockVisibility.ORIENTATION_POLAR
+          ? isSparseContent
+            ? 200
+            : ultraDenseMode
+            ? 148
+            : compactMode
+            ? 162
+            : 180
+          : 0,
+        LEGEND_SUMMARY: blockVisibility.LEGEND_SUMMARY
+          ? isSparseContent
+            ? 196
+            : ultraDenseMode
+            ? 144
+            : compactMode
+            ? 160
+            : 176
+          : 0,
+        DATA_TABLE: blockVisibility.DATA_TABLE
+          ? Math.max(
+              isSparseContent ? 260 : 210,
+              Math.min(480, 46 + targetRows * idealRowH + (isSparseContent ? 64 : 12))
+            )
+          : 0,
+        Q_INDEX_AND_NOTES: blockVisibility.Q_INDEX_AND_NOTES
+          ? notesTextLength > 240 || sectionVolumeRowCount >= 2
+            ? 280
+            : isSparseContent
+            ? 268
+            : 245
+          : 0,
+      };
+
+  const idealSum = activeBlockIds.reduce((acc, id) => acc + idealHeights[id], 0) || 1;
+  const allocatedHeights: Record<SheetEngineeringBlockId, number> = {
+    ORIENTATION_POLAR: 0,
+    LEGEND_SUMMARY: 0,
+    DATA_TABLE: 0,
+    Q_INDEX_AND_NOTES: 0,
+  };
+
+  let runningAllocated = 0;
+  activeBlockIds.forEach((id, idx) => {
+    if (idx === activeBlockIds.length - 1) {
+      allocatedHeights[id] = Math.max(120, totalUsableRightH - runningAllocated);
+    } else {
+      const share = Math.round((idealHeights[id] / idealSum) * totalUsableRightH);
+      allocatedHeights[id] = Math.max(120, share);
+      runningAllocated += allocatedHeights[id];
+    }
+  });
+
+  // Assign Y positions according to user's custom `blockOrder`
+  const blockRects: Record<SheetEngineeringBlockId, SheetRect> = {
+    ORIENTATION_POLAR: { x: rightColX, y: contentTopY, width: rightColW, height: 0 },
+    LEGEND_SUMMARY: { x: rightColX, y: contentTopY, width: rightColW, height: 0 },
+    DATA_TABLE: { x: rightColX, y: contentTopY, width: rightColW, height: 0 },
+    Q_INDEX_AND_NOTES: { x: rightColX, y: contentTopY, width: rightColW, height: 0 },
+  };
+
+  let cursorY = contentTopY;
+  for (const id of orderedBlocks) {
+    if (!blockVisibility[id]) {
+      blockRects[id] = { x: rightColX, y: cursorY, width: rightColW, height: 0 };
+      continue;
+    }
+    const h = allocatedHeights[id];
+    blockRects[id] = {
+      x: rightColX,
+      y: cursorY,
+      width: rightColW,
+      height: h,
+    };
+    cursorY += h + gap;
+  }
+
+  const orientationBlock = blockRects.ORIENTATION_POLAR;
+  const legendBlock = blockRects.LEGEND_SUMMARY;
+  const jointTableBlock = blockRects.DATA_TABLE;
+  const qIndexAndNotesBlock = blockRects.Q_INDEX_AND_NOTES;
+
+  const legendH = Math.max(140, legendBlock.height || 170);
+  const actualTableH = Math.max(180, jointTableBlock.height || 240);
+  const remainingForQ = Math.max(180, qIndexAndNotesBlock.height || 240);
 
   // Dynamically scale Legend row spacing & font size based on expanded legendH
   const legendRowSpacing = Number(
-    Math.max(20, Math.min(30, (legendH - 38) / Math.max(5, maxLegendLithologyRows))).toFixed(1)
+    Math.max(20, Math.min(34, (legendH - 36) / Math.max(5, maxLegendLithologyRows))).toFixed(1)
   );
-  const legendExpansionBoost = Math.max(1.0, Math.min(1.22, legendH / 152));
+  const legendExpansionBoost = Math.max(0.95, Math.min(1.28, legendH / 150));
 
-  // Dynamically scale Table row height & font size based on expanded actualTableH
-  const computedRowH = Math.max(
-    19,
-    Math.min(54, Math.floor((actualTableH - 44) / Math.max(1, targetRows)))
-  );
-  const tableExpansionBoost =
-    computedRowH >= 42
-      ? 1.2
-      : computedRowH >= 34
-      ? 1.14
-      : computedRowH >= 28
-      ? 1.07
-      : computedRowH < 22
-      ? 0.86
-      : 1.0;
+  // Dynamically scale Table row height & font size based on actualTableH and row count (or manual row height in FIXED_LAYOUT)
+  const computedRowH = isFixedLayout
+    ? Math.max(
+        18,
+        Math.min(
+          64,
+          effectiveSheetConfig.manualTableRowHeight ?? 34,
+          Math.floor((actualTableH - 44) / Math.max(1, targetRows))
+        )
+      )
+    : Math.max(
+        18,
+        Math.min(62, Math.floor((actualTableH - 44) / Math.max(1, targetRows)))
+      );
+  const tableExpansionBoost = isFixedLayout
+    ? 1.0
+    : computedRowH >= 46
+    ? 1.26
+    : computedRowH >= 38
+    ? 1.18
+    : computedRowH >= 30
+    ? 1.1
+    : computedRowH < 22
+    ? 0.85
+    : 1.0;
   const effectiveTableFontScale = Number(
-    Math.max(0.84, Math.min(1.22, fontScale * tableExpansionBoost)).toFixed(3)
+    Math.max(0.82, Math.min(1.3, fontScale * tableExpansionBoost)).toFixed(3)
   );
 
   // Compute responsive column metrics for Discontinuity-Set Table
-  const colScale = rightColW / 506;
+  const colScale = Math.max(0.9, rightColW / 506);
   const discBoundaries = [
     0,
     Math.round(46 * colScale),
@@ -545,59 +816,32 @@ export function computeFinalSheetAutoLayout(params: {
     },
   ];
 
-  const qExpansionBoost = Math.max(1.0, Math.min(1.18, remainingForQ / 225));
-  const notesFontSize = Number((8.5 * fontScale * qExpansionBoost).toFixed(2));
-  const notesLineSpacing = Number((Math.max(12.0, 15.2 * fontScale * qExpansionBoost)).toFixed(1));
-  const notesMaxCharsPerLine = Math.floor((rightColW - 24) / (notesFontSize * 0.58));
+  const qExpansionBoost = Math.max(0.96, Math.min(1.26, remainingForQ / 220));
+  const notesFontSize = Number((8.7 * fontScale * qExpansionBoost).toFixed(2));
+  const notesLineSpacing = Number((Math.max(12.2, 15.6 * fontScale * qExpansionBoost)).toFixed(1));
+  const notesMaxCharsPerLine = Math.floor((rightColW - 24) / (notesFontSize * 0.57));
 
   const contentMetrics: SheetContentMetrics = {
     fontScale,
     headerTitleFontSize: Number((14.4 * Math.max(0.9, fontScale)).toFixed(2)),
     headerMetaFontSize: Number((10.2 * Math.max(0.9, fontScale)).toFixed(2)),
-    blockTitleFontSize: Number((10.6 * Math.max(0.9, fontScale * Math.min(1.12, legendExpansionBoost))).toFixed(2)),
-    tableHeaderFontSize: Number((8.5 * effectiveTableFontScale).toFixed(2)),
-    tableCellFontSize: Number((8.9 * effectiveTableFontScale).toFixed(2)),
-    tableSubCellFontSize: Number((7.8 * effectiveTableFontScale).toFixed(2)),
+    blockTitleFontSize: Number((10.8 * Math.max(0.92, fontScale * Math.min(1.15, legendExpansionBoost))).toFixed(2)),
+    tableHeaderFontSize: Number((8.7 * effectiveTableFontScale).toFixed(2)),
+    tableCellFontSize: Number((9.2 * effectiveTableFontScale).toFixed(2)),
+    tableSubCellFontSize: Number((8.0 * effectiveTableFontScale).toFixed(2)),
     tableRowHeight: computedRowH,
     maxVisibleJointSets,
     maxVisibleOverbreakZones,
     notesFontSize,
     notesLineSpacing,
     notesMaxCharsPerLine,
-    legendFontSize: Number((8.9 * Math.max(0.9, fontScale * legendExpansionBoost)).toFixed(2)),
+    legendFontSize: Number((9.1 * Math.max(0.9, fontScale * legendExpansionBoost)).toFixed(2)),
     legendRowSpacing,
     maxLegendLithologyRows,
     compactMode,
+    sparseContentBoost,
     discontinuityColumns,
     overbreakColumns,
-  };
-
-  const orientationBlock: SheetRect = {
-    x: rightColX,
-    y: contentTopY,
-    width: rightColW,
-    height: orientationH,
-  };
-
-  const legendBlock: SheetRect = {
-    x: rightColX,
-    y: orientationBlock.y + orientationBlock.height + gap,
-    width: rightColW,
-    height: legendH,
-  };
-
-  const jointTableBlock: SheetRect = {
-    x: rightColX,
-    y: legendBlock.y + legendBlock.height + gap,
-    width: rightColW,
-    height: actualTableH,
-  };
-
-  const qIndexAndNotesBlock: SheetRect = {
-    x: rightColX,
-    y: jointTableBlock.y + jointTableBlock.height + gap,
-    width: rightColW,
-    height: remainingForQ,
   };
 
   const getSurfaceSheetRect = (surface: SurfaceType) => {
@@ -640,7 +884,6 @@ export function computeFinalSheetAutoLayout(params: {
     };
   };
 
-  // Exact same world/canvas coordinate registration for photo transform on the sheet
   const getSheetPhotoSvgTransform = (
     surface: SurfaceType,
     transform: SurfaceTransform
@@ -670,7 +913,6 @@ export function computeFinalSheetAutoLayout(params: {
       ? geometry.minY
       : 0;
 
-  // Convert real-world tunnel meters on any surface to sheet SVG (x, y)
   const surfacePointToSheetXY = (
     pt: Point2D,
     surface: SurfaceType
@@ -713,6 +955,7 @@ export function computeFinalSheetAutoLayout(params: {
     drawingArenaBox,
     rightColumnBox,
     contentMetrics,
+    effectiveSheetConfig,
     facePxPerMeter,
     faceCenterX,
     faceTopY,
