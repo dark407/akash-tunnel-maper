@@ -159,6 +159,7 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
   const [isThinking, setIsThinking] = useState<boolean>(false);
   const [selectedTemplate, setSelectedTemplate] =
     useState<EngineeringExportTemplateId>('AUTO_BEST_TEMPLATE');
+  const [expandedExtractMsgId, setExpandedExtractMsgId] = useState<string | null>(null);
   const [previewSheetPkg, setPreviewSheetPkg] = useState<{
     msgText: string;
     pkg: EswaAiExtractedDataPackage;
@@ -296,16 +297,7 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
     };
   };
 
-  const [messages, setMessages] = useState<EswaAiChatMessage[]>(() => [
-    {
-      id: 'welcome-eswa-ai',
-      role: 'model',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      engineLabel: 'ESWA AI',
-      text: `**ESWA AI Active.**\n\nI am connected directly to your live **ESWA Tunnel Mapper & ESWACAD** workspace:\n- **Active Tunnel**: \`${settings.tunnelName}\` at \`${settings.faceChainage || settings.chainage}\` (\`${fmtNum(geometry.width)}m W × ${fmtNum(geometry.height)}m H\`, Design Area \`${fmtNum(overbreakAnalysis.designAreaSqMeters)} m²\`)\n- **Rock Mass & Discontinuities**: \`${joints.length}\` mapped face/wall joints across \`${jointSets.length}\` sets · **Q-Index** = \`${computedQValue}\` · **RMR₈₉** = \`${computedRmrTotal}\`\n- **3D Continuous Strip Logger**: \`${stripDatasets.length}\` tunnel datasets · \`${activeStripDs?.pulls.length || 0}\` pull intervals · \`${activeStripDs?.traces.length || 0}\` continuous 3D traces\n\nAsk me anything about your data, command me to modify tunnel geometry, add pulls/joints, or **extract any answer into CSV/Excel, Word (.DOC), ESWACAD (.DXF), PDF Template Sheet, JSON, or Markdown** below.`,
-      extractedData: buildDefaultAuditPackage(),
-    },
-  ]);
+  const [messages, setMessages] = useState<EswaAiChatMessage[]>([]);
 
   useEffect(() => {
     if (isOpen) {
@@ -659,22 +651,30 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
     }
   };
 
-  // Local Deterministic Geotechnical Executive Engine (instant fallback & command parser)
+  // Local Intelligent Question & Command Engine (answers the exact question asked)
   const runLocalExecutiveEngine = (
     userQuery: string
   ): {
     reply: string;
     executedActions: EswaAiExecutedAction[];
-    extractedDataPackage: EswaAiExtractedDataPackage;
+    extractedDataPackage?: EswaAiExtractedDataPackage;
   } => {
-    const qLower = userQuery.toLowerCase();
+    const qLower = userQuery.trim().toLowerCase();
     const executedActions: EswaAiExecutedAction[] = [];
 
-    // Check for navigation or software control commands
+    // 1. Check for conversational greetings
+    if (/^(hi|hello|hey|good morning|good afternoon|good evening|namaste|vanakkam)\b/i.test(qLower) && qLower.length < 28) {
+      return {
+        reply: `Hello! How can I help you today? You can ask me specific questions about your tunnel geometry, joints, RMR/Q-system, overbreak, or 3D continuous strip logging, or ask me to open any tool.`,
+        executedActions: [],
+      };
+    }
+
+    // 2. Check for navigation or software control commands
     if (
       qLower.includes('open 3d') ||
       qLower.includes('continuous logging') ||
-      qLower.includes('strip log')
+      qLower.includes('open strip')
     ) {
       executedActions.push({
         actionType: 'OPEN_3D_CONTINUOUS_LOGGING',
@@ -724,18 +724,18 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
     // Check for adding a 3D strip pull interval
     if (qLower.includes('add pull') || qLower.includes('new pull') || qLower.includes('log pull')) {
       const pulls = activeStripDs?.pulls || [];
-      const lastTo = pulls.length > 0 ? pulls[pulls.length - 1].toRd : 300;
+      const lastTo = pulls.length > 0 ? pulls[pulls.length - 1].toRd : 0;
       executedActions.push({
         actionType: 'ADD_STRIP_PULL',
-        description: `Added 5m Pull Interval (RD ${lastTo}m to ${lastTo + 5}m) + JS1 Trace to 3D Continuous Strip Logger`,
+        description: `Added 5m Pull Interval (RD ${lastTo}m to ${lastTo + 5}m) to 3D Continuous Strip Logger`,
         payloadJson: JSON.stringify({
           fromRd: lastTo,
           toRd: lastTo + 5,
-          azimuth: 161,
-          rockType: 'Qtz - Quartzite',
+          azimuth: settings.driveDirection || 0,
+          rockType: settings.lithology || 'Rock Mass',
           rockClass: 'II',
-          rmr: 62,
-          rqd: 75,
+          rmr: computedRmrTotal,
+          rqd: qIndexParams.rqd,
         }),
       });
     }
@@ -744,25 +744,32 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
     if (qLower.includes('add joint') || qLower.includes('insert joint')) {
       executedActions.push({
         actionType: 'ADD_JOINT',
-        description: 'Added Structural Discontinuity Joint (065/52, Set J1) to Active Tunnel Surface',
+        description: 'Added Structural Discontinuity Joint (065/52, Set J1) to Active Surface',
         payloadJson: JSON.stringify({ dipDirection: 65, dip: 52, set: 'J1' }),
       });
     }
 
-    // Choose best template based on query or user preference
-    let chosenTemplate: EngineeringExportTemplateId =
-      selectedTemplate !== 'AUTO_BEST_TEMPLATE'
-        ? selectedTemplate
-        : qLower.includes('pull') || qLower.includes('strip') || qLower.includes('chainage')
-        ? 'STRIP_PULL_LOG_TEMPLATE'
-        : qLower.includes('joint') || qLower.includes('dip') || qLower.includes('strike') || qLower.includes('fracture')
-        ? 'JOINT_DISCONTINUITY_TEMPLATE'
-        : qLower.includes('overbreak') || qLower.includes('undercut') || qLower.includes('support') || qLower.includes('bolt') || qLower.includes('boq')
-        ? 'OVERBREAK_SUPPORT_BOQ_TEMPLATE'
-        : 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE';
+    if (executedActions.length > 0 && !qLower.includes('show') && !qLower.includes('data') && !qLower.includes('table')) {
+      return {
+        reply: executedActions.map((a) => `Done: ${a.description}.`).join('\n'),
+        executedActions,
+      };
+    }
 
-    const pkg = buildDataPackageForCategory(chosenTemplate);
+    // 3. Determine whether user is asking for specific topic or table/extraction
+    const wantsTableOrExtract =
+      qLower.includes('table') ||
+      qLower.includes('schedule') ||
+      qLower.includes('extract') ||
+      qLower.includes('export') ||
+      qLower.includes('download') ||
+      qLower.includes('report') ||
+      qLower.includes('all data') ||
+      qLower.includes('summary') ||
+      qLower.includes('audit');
+
     const pulls = activeStripDs?.pulls || [];
+    const stripTraces = activeStripDs?.traces || [];
     const roundLen = settings.roundLength || 3.5;
     const obVol =
       overbreakAnalysis.overbreakVolumeCubicMeters ??
@@ -771,26 +778,128 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
       overbreakAnalysis.undercutVolumeCubicMeters ??
       overbreakAnalysis.undercutAreaSqMeters * roundLen;
 
-    const reply = [
-      `### ESWA AI Executive Analysis (${TEMPLATE_LABELS[chosenTemplate]})`,
-      executedActions.length > 0
-        ? `\n**Executed Software Authority Actions (${executedActions.length}):**\n${executedActions
-            .map((a) => `- ✅ **${a.actionType}**: ${a.description}`)
-            .join('\n')}\n`
-        : '',
-      `Based on your live project database for **${settings.tunnelName}** (\`${settings.faceChainage || settings.chainage}\`):`,
-      `- **Excavation Geometry & Quantities**: Master profile \`${fmtNum(geometry.width)}m W × ${fmtNum(geometry.height)}m H\` (Wall \`${fmtNum(geometry.wallHeight)}m\`, Arch \`${fmtNum(geometry.crownArcLength)}m\`). Design Area = \`${fmtNum(overbreakAnalysis.designAreaSqMeters)} m²\`, Overbreak = \`${fmtNum(obVol)} m³ (${fmtNum(overbreakAnalysis.overbreakPercentage, 1)}%)\`, Undercut = \`${fmtNum(ucVol)} m³\`.`,
-      `- **Rock Mass Quality & Discontinuities**: **Q-System** = \`${computedQValue}\` (\`RQD = ${qIndexParams.rqd}%\`, \`Jn = ${qIndexParams.jn}\`, \`Jr = ${qIndexParams.jr}\`, \`Ja = ${qIndexParams.ja}\`), **Bieniawski RMR₈₉** = \`${computedRmrTotal}\`. Total \`${joints.length}\` face/wall joints across \`${jointSets.length}\` sets.`,
-      `- **3D Continuous Strip Logger**: \`${pulls.length}\` sequential pull intervals logged from \`RD ${pulls[0]?.fromRd ?? 250}m\` to \`RD ${pulls[pulls.length - 1]?.toRd ?? 300}m\` with \`${activeStripDs?.traces.length || 0}\` continuous 3D structural traces.`,
-      `\nUse the **Extract Answer & Template** buttons below to download this analysis in **Excel/CSV (.csv)**, **Official Word Report (.doc)**, **ESWACAD Drawing (.dxf)**, **Printable PDF Sheet**, **JSON**, or **Markdown**.`,
-    ]
-      .filter(Boolean)
-      .join('\n');
+    // Topic A: Geometry / Width / Height / Shape
+    if (
+      qLower.includes('width') ||
+      qLower.includes('height') ||
+      qLower.includes('geometry') ||
+      qLower.includes('dimension') ||
+      qLower.includes('profile') ||
+      qLower.includes('shape')
+    ) {
+      return {
+        reply: `**Current Tunnel Geometry:**\n- **Shape**: ${geometry.crownGeometry}\n- **Width**: ${fmtNum(geometry.width)} m\n- **Total Height**: ${fmtNum(geometry.height)} m\n- **Wall Height**: ${fmtNum(geometry.wallHeight)} m\n- **Crown Arc Length**: ${fmtNum(geometry.crownArcLength)} m\n- **Design Cross-Section Area**: ${fmtNum(overbreakAnalysis.designAreaSqMeters)} m²`,
+        executedActions,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('OVERBREAK_SUPPORT_BOQ_TEMPLATE')
+          : undefined,
+      };
+    }
+
+    // Topic B: Joints / Discontinuities / Dip / Strike
+    if (
+      qLower.includes('joint') ||
+      qLower.includes('dip') ||
+      qLower.includes('strike') ||
+      qLower.includes('fracture') ||
+      qLower.includes('discontinuity')
+    ) {
+      const jointReply =
+        joints.length === 0 && stripTraces.length === 0
+          ? `There are currently **0 mapped joints** on the face/walls and **0 traces** in the 3D Continuous Strip Logger. You can trace joints on the mapping canvas or draw traces in 3D Continuous Logging.`
+          : `**Mapped Discontinuities:**\n- **Face/Wall Joints**: ${joints.length} joints across ${jointSets.length} sets${
+              jointSets.length > 0
+                ? ` (${jointSets
+                    .map(
+                      (s) =>
+                        `${s.id}: ${Math.round(s.avgDipDirection ?? 0)}°/${Math.round(s.avgDip ?? 0)}°`
+                    )
+                    .join(', ')})`
+                : ''
+            }\n- **3D Strip Traces**: ${stripTraces.length} continuous traces`;
+      return {
+        reply: jointReply,
+        executedActions,
+        extractedDataPackage:
+          wantsTableOrExtract || joints.length > 0 || stripTraces.length > 0
+            ? buildDataPackageForCategory('JOINT_DISCONTINUITY_TEMPLATE')
+            : undefined,
+      };
+    }
+
+    // Topic C: Q-System / RMR / Rock Mass Classification
+    if (
+      qLower.includes('rmr') ||
+      qLower.includes('q-system') ||
+      qLower.includes('q value') ||
+      qLower.includes('q index') ||
+      qLower.includes('rqd') ||
+      qLower.includes('classification') ||
+      qLower.includes('rock mass')
+    ) {
+      return {
+        reply: `**Rock Mass Classification:**\n- **Barton Q-Value**: \`Q = ${computedQValue}\` (\`RQD = ${qIndexParams.rqd}%\`, \`Jn = ${qIndexParams.jn}\`, \`Jr = ${qIndexParams.jr}\`, \`Ja = ${qIndexParams.ja}\`, \`Jw = ${qIndexParams.jw}\`, \`SRF = ${qIndexParams.srf}\`)\n- **Bieniawski RMR₈₉**: \`${computedRmrTotal} / 100\``,
+        executedActions,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('EXECUTIVE_PROJECT_AUDIT_TEMPLATE')
+          : undefined,
+      };
+    }
+
+    // Topic D: Overbreak / Undercut / Volume / Support / BOQ
+    if (
+      qLower.includes('overbreak') ||
+      qLower.includes('undercut') ||
+      qLower.includes('volume') ||
+      qLower.includes('support') ||
+      qLower.includes('bolt') ||
+      qLower.includes('shotcrete') ||
+      qLower.includes('boq')
+    ) {
+      return {
+        reply: `**Excavation & Support Quantities (Round = ${roundLen}m):**\n- **Design Area**: ${fmtNum(overbreakAnalysis.designAreaSqMeters)} m²\n- **Surveyed Area**: ${fmtNum(overbreakAnalysis.surveyedAreaSqMeters)} m²\n- **Overbreak**: ${fmtNum(overbreakAnalysis.overbreakAreaSqMeters)} m² (${fmtNum(overbreakAnalysis.overbreakPercentage, 1)}%) · Volume = ${fmtNum(obVol)} m³\n- **Undercut**: ${fmtNum(overbreakAnalysis.undercutAreaSqMeters)} m² (${fmtNum(overbreakAnalysis.undercutPercentage, 1)}%) · Volume = ${fmtNum(ucVol)} m³`,
+        executedActions,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('OVERBREAK_SUPPORT_BOQ_TEMPLATE')
+          : undefined,
+      };
+    }
+
+    // Topic E: 3D Continuous Strip Logging / Pulls / Chainage
+    if (
+      qLower.includes('pull') ||
+      qLower.includes('strip') ||
+      qLower.includes('chainage') ||
+      qLower.includes('3d')
+    ) {
+      const pullReply =
+        pulls.length === 0
+          ? `**3D Continuous Strip Logger (${activeStripDs?.tunnelLocationName || 'Main Heading'}):**\nCurrently **0 pull intervals** and **${stripTraces.length} traces** are logged. You can add pull intervals or draw traces in the 3D Continuous Logging workspace.`
+          : `**3D Continuous Strip Logger (${activeStripDs?.tunnelLocationName}):**\n- **Logged Pulls**: ${pulls.length} intervals (RD ${pulls[0]?.fromRd ?? 0}m to ${pulls[pulls.length - 1]?.toRd ?? 0}m)\n- **3D Structural Traces**: ${stripTraces.length}\n- **Lithology Zones**: ${activeStripDs?.lithologyZones.length || 0}`;
+      return {
+        reply: pullReply,
+        executedActions,
+        extractedDataPackage:
+          wantsTableOrExtract || pulls.length > 0
+            ? buildDataPackageForCategory('STRIP_PULL_LOG_TEMPLATE')
+            : undefined,
+      };
+    }
+
+    // Default: Concise live status answer (only attaches table if user asked for data/report/extract)
+    const chosenTemplate: EngineeringExportTemplateId =
+      selectedTemplate !== 'AUTO_BEST_TEMPLATE'
+        ? selectedTemplate
+        : 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE';
+
+    const reply = `**Current Workspace Status:**\n- **TunnelProfile**: ${fmtNum(geometry.width)}m W × ${fmtNum(geometry.height)}m H (${fmtNum(overbreakAnalysis.designAreaSqMeters)} m²)\n- **Rock Mass**: Q = ${computedQValue} · RMR = ${computedRmrTotal}\n- **Mapped Data**: ${joints.length} face/wall joints · ${pulls.length} 3D strip pulls · ${stripTraces.length} 3D traces\n\nLet me know what specific data you want to inspect, or click **Extract as File** below if you want to export a report.`;
 
     return {
       reply,
       executedActions,
-      extractedDataPackage: pkg,
+      extractedDataPackage: wantsTableOrExtract
+        ? buildDataPackageForCategory(chosenTemplate)
+        : undefined,
     };
   };
 
@@ -807,13 +916,97 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
 
     setMessages((prev) => [...prev, userMsg]);
     if (!customPrompt) setInputPrompt('');
+
+    // Check if user directly typed a Step-2 file extraction command (e.g. "extract csv", "export dxf", "download word")
+    const qLower = textToSend.toLowerCase();
+    const lastModelMsg = [...messages].reverse().find((m) => m.role === 'model');
+    if (
+      qLower.includes('extract') ||
+      qLower.includes('export') ||
+      qLower.includes('download')
+    ) {
+      const targetPkg =
+        lastModelMsg?.extractedData ||
+        buildDataPackageForCategory(
+          qLower.includes('pull') || qLower.includes('strip')
+            ? 'STRIP_PULL_LOG_TEMPLATE'
+            : qLower.includes('joint')
+            ? 'JOINT_DISCONTINUITY_TEMPLATE'
+            : qLower.includes('overbreak') || qLower.includes('boq')
+            ? 'OVERBREAK_SUPPORT_BOQ_TEMPLATE'
+            : 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE'
+        );
+      const targetText = lastModelMsg?.text || textToSend;
+
+      if (qLower.includes('csv') || qLower.includes('excel')) {
+        handleExportFormat('CSV', targetText, targetPkg);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-${Date.now()}`,
+            role: 'model',
+            text: `Extracted and downloaded **${targetPkg.title}** as **Excel / .CSV**.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            engineLabel: 'ESWA AI',
+            extractedData: targetPkg,
+          },
+        ]);
+        return;
+      }
+      if (qLower.includes('doc') || qLower.includes('word')) {
+        handleExportFormat('DOC', targetText, targetPkg);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-${Date.now()}`,
+            role: 'model',
+            text: `Extracted and downloaded **${targetPkg.title}** as **Word Report (.DOC)**.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            engineLabel: 'ESWA AI',
+            extractedData: targetPkg,
+          },
+        ]);
+        return;
+      }
+      if (qLower.includes('dxf') || qLower.includes('cad')) {
+        handleExportFormat('DXF', targetText, targetPkg);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-${Date.now()}`,
+            role: 'model',
+            text: `Extracted and downloaded **${targetPkg.title}** as **ESWACAD Drawing (.DXF)**.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            engineLabel: 'ESWA AI',
+            extractedData: targetPkg,
+          },
+        ]);
+        return;
+      }
+      if (qLower.includes('pdf') || qLower.includes('sheet') || qLower.includes('print')) {
+        handleExportFormat('PRINT_SHEET', targetText, targetPkg);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ai-${Date.now()}`,
+            role: 'model',
+            text: `Opened the printable **Engineering Sheet / PDF** view for **${targetPkg.title}**.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            engineLabel: 'ESWA AI',
+            extractedData: targetPkg,
+          },
+        ]);
+        return;
+      }
+    }
+
     setIsThinking(true);
 
     // Prepare compact live software context snapshot for Gemini API
     const softwareContext = {
       activeTunnel: {
-        tunnelName: settings.tunnelName,
-        locationName: settings.locationName,
+        tunnelName: settings.tunnelName || 'Unassigned',
+        locationName: settings.locationName || 'Unassigned',
         chainage: settings.chainage,
         faceChainage: settings.faceChainage,
         driveDirectionDeg: settings.driveDirection,
@@ -851,16 +1044,6 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
           meanDip: Math.round(s.avgDip ?? 50),
           count: joints.filter((j) => j.set === s.id).length,
         })),
-        sampleJoints: joints.slice(0, 12).map((j) => ({
-          id: j.id,
-          set: j.set,
-          surface: j.surface,
-          dipDir: Math.round(j.dipDirection),
-          dip: Math.round(j.dip),
-          lengthM: j.persistenceMeters,
-          roughness: j.roughness,
-          infilling: j.infilling,
-        })),
       },
       continuous3DStripLogger: {
         datasetCount: stripDatasets.length,
@@ -868,24 +1051,10 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
         activeTunnelLocation: activeStripDs?.tunnelLocationName,
         viewFromRd: activeStripDs?.viewFromRd,
         viewToRd: activeStripDs?.viewToRd,
-        pulls: (activeStripDs?.pulls || []).slice(0, 12).map((p) => ({
-          fromRd: p.fromRd,
-          toRd: p.toRd,
-          azimuthDeg: p.driveAzimuthDeg,
-          rockType: p.rockType,
-          rockClass: p.rockClass,
-          rmr: p.rmrValue,
-          rqd: p.rqdValue,
-          overbreakM3: p.overbreakVolumeM3,
-          support: p.supportDescription,
-        })),
-        traces: (activeStripDs?.traces || []).slice(0, 12).map((t) => ({
-          id: t.id,
-          setId: t.setId,
-          structureType: t.structureType,
-          orientation: t.orientationLabel,
-          filling: t.fillingThickness,
-        })),
+        pullsCount: (activeStripDs?.pulls || []).length,
+        tracesCount: (activeStripDs?.traces || []).length,
+        pulls: (activeStripDs?.pulls || []).slice(0, 12),
+        traces: (activeStripDs?.traces || []).slice(0, 12),
       },
       savedProjectsCount: savedProjects.length,
       lithologyRegionsCount: lithologyRegions.length,
@@ -914,19 +1083,17 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
           executeSoftwareAuthorityActions(actions);
         }
 
-        const pkg: EswaAiExtractedDataPackage =
-          data.extractedDataPackage &&
-          Array.isArray(data.extractedDataPackage.columns) &&
-          data.extractedDataPackage.columns.length > 0
-            ? data.extractedDataPackage
-            : runLocalExecutiveEngine(textToSend).extractedDataPackage;
+        const cat = (data.dataCategory as EngineeringExportTemplateId) || 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE';
+        const pkg: EswaAiExtractedDataPackage | undefined = data.includeDataSchedule
+          ? buildDataPackageForCategory(cat)
+          : undefined;
 
         const aiMsg: EswaAiChatMessage = {
           id: `ai-${Date.now()}`,
           role: 'model',
           text: data.reply,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          engineLabel: `ESWA AI (${data.engine || 'Gemini 3.8 Flash'})`,
+          engineLabel: 'ESWA AI',
           executedActions: actions,
           extractedData: pkg,
         };
@@ -1313,11 +1480,24 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
             </div>
 
             <div className="flex items-center gap-1 shrink-0">
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMessages([]);
+                    setExpandedExtractMsgId(null);
+                  }}
+                  className="px-2 py-1 rounded-lg hover:bg-white/10 text-[10px] text-slate-300 hover:text-white cursor-pointer"
+                  title="Clear Chat"
+                >
+                  Clear
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setIsMaximized((v) => !v)}
                 className="p-1.5 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white cursor-pointer"
-                title={isMaximized ? 'Restore Window Size' : 'Maximize ESWA AI Studio'}
+                title={isMaximized ? 'Restore Window Size' : 'Maximize ESWA AI'}
               >
                 {isMaximized ? (
                   <Minimize2 className="w-3.5 h-3.5" />
@@ -1329,435 +1509,233 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
                 type="button"
                 onClick={() => setIsOpen(false)}
                 className="p-1.5 rounded-lg hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 cursor-pointer"
-                title="Minimize ESWA AI"
+                title="Close ESWA AI"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
           </div>
 
-          {/* Template Selection & Instant Global Multi-Format Extraction Bar */}
-          <div
-            className={`px-3.5 py-2 border-b flex flex-wrap items-center justify-between gap-2 text-[11px] shrink-0 ${
-              isLight
-                ? 'bg-slate-50 border-slate-200 text-slate-700'
-                : 'bg-[#0F172A] border-slate-800 text-slate-200'
-            }`}
-          >
-            <div className="flex items-center gap-1.5 flex-1 min-w-[200px]">
-              <Layers className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
-              <span className="font-semibold text-[10px] uppercase tracking-wider text-slate-400">
-                Template:
-              </span>
-              <select
-                value={selectedTemplate}
-                onChange={(e) =>
-                  setSelectedTemplate(e.target.value as EngineeringExportTemplateId)
-                }
-                className={`flex-1 px-2 py-1 rounded-lg border text-[11px] font-semibold outline-none cursor-pointer ${
-                  isLight
-                    ? 'bg-white border-slate-300 text-slate-800'
-                    : 'bg-[#090D16] border-slate-700 text-cyan-200'
-                }`}
-              >
-                {Object.entries(TEMPLATE_LABELS).map(([k, label]) => (
-                  <option key={k} value={k}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() =>
-                  handleExportFormat(
-                    'CSV',
-                    messages[messages.length - 1]?.text || '',
-                    selectedTemplate === 'AUTO_BEST_TEMPLATE'
-                      ? messages[messages.length - 1]?.extractedData
-                      : buildDataPackageForCategory(selectedTemplate)
-                  )
-                }
-                className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                  isLight
-                    ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
-                    : 'bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border-emerald-500/40'
-                }`}
-                title="Extract Live Data in Excel / CSV Template"
-              >
-                <FileSpreadsheet className="w-3 h-3" />
-                .CSV
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  handleExportFormat(
-                    'DOC',
-                    messages[messages.length - 1]?.text || '',
-                    selectedTemplate === 'AUTO_BEST_TEMPLATE'
-                      ? messages[messages.length - 1]?.extractedData
-                      : buildDataPackageForCategory(selectedTemplate)
-                  )
-                }
-                className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                  isLight
-                    ? 'bg-sky-50 hover:bg-sky-100 text-sky-800 border-sky-300'
-                    : 'bg-sky-950/60 hover:bg-sky-900/70 text-sky-300 border-sky-500/40'
-                }`}
-                title="Extract Official Word Report Template (.DOC)"
-              >
-                <FileText className="w-3 h-3" />
-                .DOC
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  handleExportFormat(
-                    'DXF',
-                    messages[messages.length - 1]?.text || '',
-                    selectedTemplate === 'AUTO_BEST_TEMPLATE'
-                      ? messages[messages.length - 1]?.extractedData
-                      : buildDataPackageForCategory(selectedTemplate)
-                  )
-                }
-                className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                  isLight
-                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
-                    : 'bg-amber-950/60 hover:bg-amber-900/70 text-amber-300 border-amber-500/40'
-                }`}
-                title="Extract ESWACAD Drawing + Schedule Template (.DXF)"
-              >
-                <FileCode2 className="w-3 h-3" />
-                .DXF
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  handleExportFormat(
-                    'PRINT_SHEET',
-                    messages[messages.length - 1]?.text || '',
-                    selectedTemplate === 'AUTO_BEST_TEMPLATE'
-                      ? messages[messages.length - 1]?.extractedData
-                      : buildDataPackageForCategory(selectedTemplate)
-                  )
-                }
-                className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                  isLight
-                    ? 'bg-purple-50 hover:bg-purple-100 text-purple-800 border-purple-300'
-                    : 'bg-purple-950/60 hover:bg-purple-900/70 text-purple-300 border-purple-500/40'
-                }`}
-                title="Open Printable PDF / As-Built Engineering Sheet Template"
-              >
-                <Printer className="w-3 h-3" />
-                Sheet / PDF
-              </button>
-            </div>
-          </div>
-
-          {/* Quick Executive Authority Commands Strip */}
-          <div
-            className={`px-3.5 py-1.5 border-b flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0 ${
-              isLight ? 'bg-slate-100/80 border-slate-200' : 'bg-[#080C16] border-slate-800/80'
-            }`}
-          >
-            <span className="text-[9px] font-mono uppercase tracking-wider text-cyan-500 font-bold shrink-0 flex items-center gap-1">
-              <Zap className="w-2.5 h-2.5" />
-              Authority Actions:
-            </span>
-            {[
-              {
-                label: 'Audit All Tunnel & 3D Strip Data',
-                prompt:
-                  'Give me a full executive audit of our active tunnel geometry, RMR/Q-system ratings, mapped joints, and 3D continuous strip pull intervals with an extracted schedule.',
-              },
-              {
-                label: 'Extract 3D Strip Pull Log',
-                prompt:
-                  'Extract the complete 3D Continuous Strip Pull & Chainage Schedule with azimuth, rock class, RMR, RQD, and support installed.',
-              },
-              {
-                label: 'Extract Joint Set Schedule',
-                prompt:
-                  'Analyze all mapped discontinuities and joint sets (dip direction, dip, spacing, roughness, infilling) and extract the ISRM Joint Schedule template.',
-              },
-              {
-                label: 'Overbreak & Support BOQ',
-                prompt:
-                  'Calculate our excavation overbreak, undercut, rock bolt quantities, and shotcrete volume BOQ per round and extract the BOQ template.',
-              },
-              {
-                label: '+ Log 5m Pull in 3D Strip',
-                prompt:
-                  'Use your executive authority to add a new 5m pull interval and foliation trace to the 3D Continuous Strip Logger and show the updated pull schedule.',
-              },
-              {
-                label: 'Open 3D Continuous Logging',
-                prompt: 'Open 3D Continuous Strip Logging workspace now.',
-              },
-            ].map((q, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => handleSendMessage(q.prompt)}
-                className={`px-2 py-0.5 rounded-full border text-[10px] font-medium whitespace-nowrap transition-colors cursor-pointer shrink-0 ${
-                  isLight
-                    ? 'bg-white hover:bg-sky-50 text-slate-700 hover:text-sky-800 border-slate-300'
-                    : 'bg-[#121B2E] hover:bg-cyan-950/80 text-slate-300 hover:text-cyan-200 border-slate-700/80'
-                }`}
-              >
-                {q.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Chat Messages Stream */}
-          <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-4 text-xs">
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex flex-col ${
-                  msg.role === 'user' ? 'items-end' : 'items-start'
-                }`}
-              >
-                <div
-                  className={`max-w-[94%] rounded-2xl p-3.5 space-y-2.5 border ${
-                    msg.role === 'user'
-                      ? isLight
-                        ? 'bg-sky-600 text-white border-sky-500 rounded-br-xs'
-                        : 'bg-cyan-700 text-white border-cyan-500/60 rounded-br-xs'
-                      : isLight
-                      ? 'bg-slate-50 text-slate-800 border-slate-200/90 rounded-bl-xs shadow-2xs'
-                      : 'bg-[#11192C] text-slate-100 border-slate-800 rounded-bl-xs shadow-md'
-                  }`}
-                >
-                  {/* Message Header */}
-                  <div className="flex items-center justify-between gap-3 text-[10px] opacity-80">
-                    <span className="font-mono font-bold flex items-center gap-1">
-                      {msg.role === 'user' ? (
-                        'YOU (ENGINEER)'
-                      ) : (
-                        <>
-                          <Sparkles className="w-3 h-3 text-cyan-400" />
-                          {msg.engineLabel || 'ESWA AI Executive'}
-                        </>
-                      )}
-                    </span>
-                    <span className="font-mono">{msg.timestamp}</span>
-                  </div>
-
-                  {/* Executed Software Authority Badges */}
-                  {msg.executedActions && msg.executedActions.length > 0 && (
+          {/* Chat Messages Stream (Clean & Uncluttered) */}
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3.5 text-xs">
+            {messages.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3 opacity-80">
+                <EswaTunnelLogo size="md" showBadge={false} />
+                <div className="space-y-1 max-w-xs">
+                  <div className="font-display font-bold text-sm">ESWA AI</div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Ask anything about your tunnel data, control software tools, or request a data table to extract as a file.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              messages.map((msg) => {
+                const isExtractExpanded = expandedExtractMsgId === msg.id;
+                return (
+                  <div
+                    key={msg.id}
+                    className={`flex flex-col ${
+                      msg.role === 'user' ? 'items-end' : 'items-start'
+                    }`}
+                  >
                     <div
-                      className={`p-2 rounded-xl border space-y-1 ${
-                        isLight
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                          : 'bg-emerald-950/50 border-emerald-500/40 text-emerald-200'
+                      className={`max-w-[92%] rounded-2xl p-3 space-y-2 border ${
+                        msg.role === 'user'
+                          ? isLight
+                            ? 'bg-sky-600 text-white border-sky-500 rounded-br-xs'
+                            : 'bg-cyan-700 text-white border-cyan-500/60 rounded-br-xs'
+                          : isLight
+                          ? 'bg-slate-50 text-slate-800 border-slate-200/90 rounded-bl-xs shadow-2xs'
+                          : 'bg-[#11192C] text-slate-100 border-slate-800 rounded-bl-xs shadow-md'
                       }`}
                     >
-                      <div className="text-[10px] font-mono font-bold uppercase flex items-center gap-1 text-emerald-500">
-                        <CheckCircle2 className="w-3 h-3" />
-                        Executed Software Authority Commands:
-                      </div>
-                      {msg.executedActions.map((act, i) => (
-                        <div key={i} className="text-[11px] font-medium flex items-center gap-1.5">
-                          <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 font-bold">
-                            {act.actionType}
-                          </span>
-                          <span>{act.description}</span>
+                      {/* Executed Actions (if any) */}
+                      {msg.executedActions && msg.executedActions.length > 0 && (
+                        <div
+                          className={`px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center gap-1.5 ${
+                            isLight
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                              : 'bg-emerald-950/50 border-emerald-500/40 text-emerald-200'
+                          }`}
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                          <span>{msg.executedActions.map((a) => a.description).join(' · ')}</span>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      )}
 
-                  {/* Message Body Text */}
-                  <div className="whitespace-pre-wrap leading-relaxed text-xs">{msg.text}</div>
+                      {/* Message Body Text */}
+                      <div className="whitespace-pre-wrap leading-relaxed text-xs">{msg.text}</div>
 
-                  {/* Extracted Engineering Data Table Preview & Multi-Format Template Exporter */}
-                  {msg.role === 'model' && msg.extractedData && (
-                    <div
-                      className={`mt-2 pt-2.5 border-t space-y-2 ${
-                        isLight ? 'border-slate-200' : 'border-slate-800'
-                      }`}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div>
+                      {/* Data Table (Shown ONLY if the query asked for data/table/schedule) */}
+                      {msg.role === 'model' &&
+                        msg.extractedData &&
+                        msg.extractedData.rows.length > 0 && (
                           <div
-                            className={`font-bold text-[11px] ${
-                              isLight ? 'text-sky-800' : 'text-cyan-300'
+                            className={`mt-2 pt-2 border-t space-y-1.5 ${
+                              isLight ? 'border-slate-200' : 'border-slate-800'
                             }`}
                           >
-                            {msg.extractedData.title}
-                          </div>
-                          <div className="text-[10px] text-slate-400 font-mono">
-                            Template: {TEMPLATE_LABELS[msg.extractedData.templateType]} (
-                            {msg.extractedData.rows.length} rows)
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* KPI Summary Pills */}
-                      {msg.extractedData.summaryMetrics &&
-                        msg.extractedData.summaryMetrics.length > 0 && (
-                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                            {msg.extractedData.summaryMetrics.map((m, mIdx) => (
-                              <div
-                                key={mIdx}
-                                className={`px-2 py-1 rounded-lg border ${
-                                  isLight
-                                    ? 'bg-white border-slate-200'
-                                    : 'bg-[#090E1A] border-slate-800'
-                                }`}
-                              >
-                                <div className="text-[9px] text-slate-400 uppercase font-mono truncate">
-                                  {m.label}
-                                </div>
-                                <div className="text-[10.5px] font-bold font-mono truncate">
-                                  {m.value}
-                                </div>
-                              </div>
-                            ))}
+                            <div
+                              className={`font-bold text-[11px] ${
+                                isLight ? 'text-sky-800' : 'text-cyan-300'
+                              }`}
+                            >
+                              {msg.extractedData.title}
+                            </div>
+                            <div
+                              className={`max-h-40 overflow-auto rounded-lg border ${
+                                isLight
+                                  ? 'border-slate-200 bg-white'
+                                  : 'border-slate-800 bg-[#080C16]'
+                              }`}
+                            >
+                              <table className="w-full text-left border-collapse text-[10px]">
+                                <thead>
+                                  <tr
+                                    className={
+                                      isLight
+                                        ? 'bg-slate-100 text-slate-800 border-b border-slate-200'
+                                        : 'bg-[#141E33] text-cyan-300 border-b border-slate-800'
+                                    }
+                                  >
+                                    {msg.extractedData.columns.map((col, cIdx) => (
+                                      <th
+                                        key={cIdx}
+                                        className="py-1.5 px-2 font-bold whitespace-nowrap"
+                                      >
+                                        {col}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-500/15">
+                                  {msg.extractedData.rows.slice(0, 6).map((row, rIdx) => (
+                                    <tr key={rIdx}>
+                                      {row.map((cell, cIdx) => (
+                                        <td
+                                          key={cIdx}
+                                          className="py-1 px-2 whitespace-nowrap font-mono"
+                                        >
+                                          {cell}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
                           </div>
                         )}
 
-                      {/* Compact Scrollable Data Table Preview */}
-                      <div
-                        className={`max-h-44 overflow-auto rounded-lg border ${
-                          isLight ? 'border-slate-200 bg-white' : 'border-slate-800 bg-[#080C16]'
-                        }`}
-                      >
-                        <table className="w-full text-left border-collapse text-[10px]">
-                          <thead>
-                            <tr
-                              className={
-                                isLight
-                                  ? 'bg-slate-100 text-slate-800 border-b border-slate-200'
-                                  : 'bg-[#141E33] text-cyan-300 border-b border-slate-800'
+                      {/* STEP 2: On-Demand "Extract as File" Toggle */}
+                      {msg.role === 'model' && (
+                        <div className="pt-1 flex flex-col gap-2">
+                          <div className="flex items-center justify-between">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedExtractMsgId(isExtractExpanded ? null : msg.id)
                               }
+                              className={`px-2.5 py-1 rounded-lg border text-[10px] font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                                isExtractExpanded
+                                  ? 'bg-cyan-600 text-white border-cyan-500'
+                                  : isLight
+                                  ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                                  : 'bg-[#0B1220] hover:bg-slate-800 text-slate-300 border-slate-700/80'
+                              }`}
                             >
-                              {msg.extractedData.columns.map((col, cIdx) => (
-                                <th key={cIdx} className="py-1.5 px-2 font-bold whitespace-nowrap">
-                                  {col}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-500/15">
-                            {msg.extractedData.rows.slice(0, 6).map((row, rIdx) => (
-                              <tr key={rIdx} className="hover:bg-cyan-500/5">
-                                {row.map((cell, cIdx) => (
-                                  <td
-                                    key={cIdx}
-                                    className="py-1 px-2 whitespace-nowrap font-mono"
-                                  >
-                                    {cell}
-                                  </td>
-                                ))}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                              <Download className="w-3 h-3" />
+                              <span>Extract as File</span>
+                            </button>
+                            <span className="text-[9px] font-mono opacity-50">
+                              {msg.timestamp}
+                            </span>
+                          </div>
 
-                      {/* Per-Message Multi-Format Template Extraction Buttons */}
-                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                        <span className="text-[9.5px] font-mono uppercase tracking-wider text-slate-400 font-bold mr-1">
-                          Extract With Template:
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleExportFormat('CSV', msg.text, msg.extractedData)
-                          }
-                          className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                            isLight
-                              ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
-                              : 'bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border-emerald-500/40'
-                          }`}
-                        >
-                          <Download className="w-2.5 h-2.5" />
-                          Excel / .CSV
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleExportFormat('DOC', msg.text, msg.extractedData)
-                          }
-                          className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                            isLight
-                              ? 'bg-sky-50 hover:bg-sky-100 text-sky-800 border-sky-300'
-                              : 'bg-sky-950/60 hover:bg-sky-900 text-sky-300 border-sky-500/40'
-                          }`}
-                        >
-                          <Download className="w-2.5 h-2.5" />
-                          Word / .DOC
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleExportFormat('DXF', msg.text, msg.extractedData)
-                          }
-                          className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                            isLight
-                              ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
-                              : 'bg-amber-950/60 hover:bg-amber-900 text-amber-300 border-amber-500/40'
-                          }`}
-                        >
-                          <Download className="w-2.5 h-2.5" />
-                          ESWACAD .DXF
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleExportFormat('PRINT_SHEET', msg.text, msg.extractedData)
-                          }
-                          className={`px-2 py-1 rounded-md border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
-                            isLight
-                              ? 'bg-purple-50 hover:bg-purple-100 text-purple-800 border-purple-300'
-                              : 'bg-purple-950/60 hover:bg-purple-900 text-purple-300 border-purple-500/40'
-                          }`}
-                        >
-                          <Printer className="w-2.5 h-2.5" />
-                          Template Sheet / PDF
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleExportFormat('JSON', msg.text, msg.extractedData)
-                          }
-                          className={`px-2 py-1 rounded-md border text-[10px] font-bold cursor-pointer ${
-                            isLight
-                              ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
-                              : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
-                          }`}
-                        >
-                          .JSON
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleExportFormat('MD', msg.text, msg.extractedData)
-                          }
-                          className={`px-2 py-1 rounded-md border text-[10px] font-bold cursor-pointer ${
-                            isLight
-                              ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300'
-                              : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
-                          }`}
-                        >
-                          .MD
-                        </button>
-                      </div>
+                          {/* Step 2 Expanded File Format & Template Options */}
+                          {isExtractExpanded && (
+                            <div
+                              className={`p-2.5 rounded-xl border space-y-2 ${
+                                isLight
+                                  ? 'bg-white border-slate-200'
+                                  : 'bg-[#080C16] border-slate-800'
+                              }`}
+                            >
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] font-semibold text-slate-400">
+                                  Template:
+                                </span>
+                                <select
+                                  value={selectedTemplate}
+                                  onChange={(e) =>
+                                    setSelectedTemplate(
+                                      e.target.value as EngineeringExportTemplateId
+                                    )
+                                  }
+                                  className={`flex-1 px-2 py-1 rounded-md border text-[10px] font-semibold outline-none cursor-pointer ${
+                                    isLight
+                                      ? 'bg-slate-50 border-slate-300 text-slate-800'
+                                      : 'bg-[#0E1628] border-slate-700 text-cyan-200'
+                                  }`}
+                                >
+                                  {Object.entries(TEMPLATE_LABELS).map(([k, label]) => (
+                                    <option key={k} value={k}>
+                                      {label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {(
+                                  [
+                                    { fmt: 'CSV', label: 'Excel (.CSV)' },
+                                    { fmt: 'DOC', label: 'Word (.DOC)' },
+                                    { fmt: 'DXF', label: 'CAD (.DXF)' },
+                                    { fmt: 'PRINT_SHEET', label: 'Sheet / PDF' },
+                                    { fmt: 'JSON', label: '.JSON' },
+                                    { fmt: 'MD', label: '.MD' },
+                                  ] as const
+                                ).map((item) => (
+                                  <button
+                                    key={item.fmt}
+                                    type="button"
+                                    onClick={() => {
+                                      const pkgToExport =
+                                        selectedTemplate === 'AUTO_BEST_TEMPLATE' &&
+                                        msg.extractedData
+                                          ? msg.extractedData
+                                          : buildDataPackageForCategory(
+                                              selectedTemplate === 'AUTO_BEST_TEMPLATE'
+                                                ? 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE'
+                                                : selectedTemplate
+                                            );
+                                      handleExportFormat(item.fmt, msg.text, pkgToExport);
+                                    }}
+                                    className={`px-2 py-1 rounded-md border text-[10px] font-bold cursor-pointer ${
+                                      isLight
+                                        ? 'bg-slate-50 hover:bg-sky-50 text-slate-800 hover:text-sky-700 border-slate-300'
+                                        : 'bg-[#131E36] hover:bg-cyan-950 text-slate-200 hover:text-cyan-300 border-slate-700'
+                                    }`}
+                                  >
+                                    {item.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              </div>
-            ))}
+                  </div>
+                );
+              })
+            )}
 
             {isThinking && (
               <div className="flex items-center gap-2 text-xs text-cyan-400 font-mono px-2">
-                <Cpu className="w-4 h-4 animate-spin" />
-                <span>ESWA AI is analyzing live tunnel data &amp; compiling engineering template...</span>
+                <Cpu className="w-3.5 h-3.5 animate-spin" />
+                <span>Thinking...</span>
               </div>
             )}
             <div ref={chatEndRef} />

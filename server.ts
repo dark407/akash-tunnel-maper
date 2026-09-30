@@ -333,18 +333,20 @@ CRITICAL GEOLOGICAL REALISM & MAIN PHOTO RULES:
       const ai = getGeminiClient();
 
       if (ai) {
-        const systemInstruction = `You are ESWA AI — the Master Geotechnical & Tunnel Engineering Executive Intelligence embedded inside ESWA Tunnel Mapper & ESWACAD.
-You have FULL AUTHORITY AND ROOT RIGHTS over the entire software, all workspaces, all tunnel geometries, face/wall joint mappings, 3D continuous strip logging datasets, rock support BOQ, overbreak/undercut calculations, and multi-format template exports.
+        const systemInstruction = `You are ESWA AI — the intelligent assistant embedded in ESWA Tunnel Mapper & ESWACAD.
+You have full access to the live software state and can control workspaces, tunnel geometry, settings, joints, 3D continuous strip logging, and file exports.
 
 LIVE SOFTWARE DATA SNAPSHOT:
 ${JSON.stringify(softwareContext, null, 2)}
 
-SELECTED EXPORT TEMPLATE PREFERENCE: ${selectedTemplate}
-
-YOUR RESPONSIBILITIES:
-1. Answer the user's question with high geotechnical precision using the exact numbers, chainages, pull intervals, joint sets (dip/dipDirection, spacing, roughness, infilling), RMR/Q-system values, and dimensions from the LIVE SOFTWARE DATA SNAPSHOT above.
-2. If the user asks you to perform ANY action in the software (e.g., open 3D Continuous Logging, open Face Mapping, open Custom Profile Editor, open Project Database, open Export Sheet, change tunnel width/height/wallHeight, update tunnel name/chainage/drive azimuth/round length, add a joint, add a 3D strip pull interval, switch theme to light/dark, or save current section), include the appropriate command object in "executedActions".
-3. Always populate "extractedDataPackage" with a rich, structured engineering dataset (title, subtitle, templateType, summaryMetrics, columns, rows) tailored to the user's query so the user can immediately download/extract the answer in CSV/Excel, Word (.DOC), ESWACAD (.DXF), Printable PDF Sheet, JSON, or Markdown format with the related engineering template.`;
+CRITICAL RULES FOR YOUR RESPONSE:
+1. Answer ONLY what the user is asking! Do NOT dump unsolicited audit reports or repeat the same generic summary on every message.
+   - If the user says "hi", "hello", or asks a general question, reply naturally, briefly, and conversationally.
+   - If the user asks a specific question about their tunnel (e.g. width, Q-value, RMR, joints, pulls, overbreak), answer that specific question directly and concisely using the live snapshot.
+   - If the user asks a general geotechnical/tunneling engineering question, answer it directly with expert knowledge.
+2. Only set "includeDataSchedule" to true if the user explicitly asks to see a data table/schedule/report or asks to extract/export data into a file. Otherwise set "includeDataSchedule" to false.
+3. Choose "dataCategory" based on what data the user asked for: "STRIP_PULL_LOG_TEMPLATE", "JOINT_DISCONTINUITY_TEMPLATE", "OVERBREAK_SUPPORT_BOQ_TEMPLATE", or "EXECUTIVE_PROJECT_AUDIT_TEMPLATE".
+4. If the user asks you to perform a software action (e.g. open 3D Continuous Logging, open Face Mapping, change width/height, add a pull, add a joint, switch theme, save section), include it in "executedActions".`;
 
         const historyContents = Array.isArray(history)
           ? history.slice(-8).map((h: { role?: string; text?: string }) => ({
@@ -354,8 +356,8 @@ YOUR RESPONSIBILITIES:
           : [];
 
         const candidateModels = [
-          'gemini-3.8-flash',
-          'gemini-3.1-flash-lite',
+          'gemini-3-flash-preview',
+          'gemini-2.5-flash',
           'gemini-flash-latest',
         ];
 
@@ -372,7 +374,7 @@ YOUR RESPONSIBILITIES:
               ],
               config: {
                 systemInstruction,
-                temperature: 0.25,
+                temperature: 0.35,
                 responseMimeType: 'application/json',
                 responseSchema: {
                   type: Type.OBJECT,
@@ -380,12 +382,20 @@ YOUR RESPONSIBILITIES:
                     reply: {
                       type: Type.STRING,
                       description:
-                        'Comprehensive, clear geotechnical engineering answer grounded in the live software data.',
+                        'Direct, helpful, and natural answer to the user prompt.',
+                    },
+                    includeDataSchedule: {
+                      type: Type.BOOLEAN,
+                      description:
+                        'True ONLY if the user asked for a data table, schedule, summary report, or file export.',
+                    },
+                    dataCategory: {
+                      type: Type.STRING,
+                      description:
+                        'One of: STRIP_PULL_LOG_TEMPLATE, JOINT_DISCONTINUITY_TEMPLATE, OVERBREAK_SUPPORT_BOQ_TEMPLATE, EXECUTIVE_PROJECT_AUDIT_TEMPLATE',
                     },
                     executedActions: {
                       type: Type.ARRAY,
-                      description:
-                        'List of software control commands executed by ESWA AI with full authority.',
                       items: {
                         type: Type.OBJECT,
                         properties: {
@@ -399,52 +409,13 @@ YOUR RESPONSIBILITIES:
                           },
                           payloadJson: {
                             type: Type.STRING,
-                            description:
-                              'JSON string of parameters for the action (e.g. {"width":9.0,"height":7.5} or {"fromRd":300,"toRd":305,"rockType":"Quartzite"} or {"theme":"light"}).',
                           },
                         },
                         required: ['actionType', 'description'],
                       },
                     },
-                    extractedDataPackage: {
-                      type: Type.OBJECT,
-                      description:
-                        'Structured engineering table & metrics extracted from the answer and project data for multi-format template export.',
-                      properties: {
-                        title: { type: Type.STRING },
-                        subtitle: { type: Type.STRING },
-                        templateType: {
-                          type: Type.STRING,
-                          description:
-                            'One of: STRIP_PULL_LOG_TEMPLATE, JOINT_DISCONTINUITY_TEMPLATE, OVERBREAK_SUPPORT_BOQ_TEMPLATE, EXECUTIVE_PROJECT_AUDIT_TEMPLATE',
-                        },
-                        summaryMetrics: {
-                          type: Type.ARRAY,
-                          items: {
-                            type: Type.OBJECT,
-                            properties: {
-                              label: { type: Type.STRING },
-                              value: { type: Type.STRING },
-                            },
-                            required: ['label', 'value'],
-                          },
-                        },
-                        columns: {
-                          type: Type.ARRAY,
-                          items: { type: Type.STRING },
-                        },
-                        rows: {
-                          type: Type.ARRAY,
-                          items: {
-                            type: Type.ARRAY,
-                            items: { type: Type.STRING },
-                          },
-                        },
-                      },
-                      required: ['title', 'templateType', 'columns', 'rows'],
-                    },
                   },
-                  required: ['reply', 'executedActions', 'extractedDataPackage'],
+                  required: ['reply', 'includeDataSchedule', 'dataCategory', 'executedActions'],
                 },
               },
             });

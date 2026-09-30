@@ -25,7 +25,17 @@ import {
   TunnelSettings,
 } from '../types/tunnel';
 import { getDisplayedJointGeometry } from '../engine/geometryEngine';
-import { JOINT_SET_PALETTE, runQualityControlValidation } from '../engine/orientationEngine';
+import {
+  clusterJointsIntoSets,
+  JOINT_SET_PALETTE,
+  runQualityControlValidation,
+} from '../engine/orientationEngine';
+import { analyzeOverbreakAndUndercut } from '../engine/overbreakEngine';
+import {
+  computeSectionToSectionVolumes,
+  parseNumericChainageMeters,
+  saveProjectRecordToMemory,
+} from '../engine/projectMemoryEngine';
 import {
   calculateBartonQSystem,
   createDefaultQIndexParameters,
@@ -66,6 +76,7 @@ import {
   Download,
   FileCode,
   Image as ImageIcon,
+  Layers,
   Maximize2,
   PanelLeft,
   PanelRight,
@@ -74,6 +85,11 @@ import {
   X,
 } from 'lucide-react';
 import { SheetSettingsAndStorageEditor } from './SheetSettingsAndStorageEditor';
+import {
+  BatchQueueItem,
+  BatchSheetProcessorPanel,
+  BatchStandardizedConfig,
+} from './BatchSheetProcessorPanel';
 
 interface EngineeringSheetModalProps {
   isOpen: boolean;
@@ -109,25 +125,25 @@ interface EngineeringSheetModalProps {
 export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   isOpen,
   onClose,
-  geometry,
+  geometry: propGeometry,
   settings: propSettings,
-  photos,
-  joints,
-  jointSets,
+  photos: propPhotos,
+  joints: propJoints,
+  jointSets: propJointSets,
   traceFitMode,
   onConfirmAllOrientations,
   qIndexParams: propQIndex,
   qParamStatus: propQParamStatus,
-  selectedClassificationMethod = 'Q_SYSTEM',
+  selectedClassificationMethod: propSelectedClassificationMethod = 'Q_SYSTEM',
   onChangeSelectedClassificationMethod,
   rmrParams: propRmrParams,
   gsiParams: propGsiParams,
   rockMassSummary: propRockMass,
-  lithologyRegions = [],
-  controlPoints = [],
-  placedSymbols = [],
-  overbreakAnalysis,
-  sectionVolumeRows = [],
+  lithologyRegions: propLithologyRegions = [],
+  controlPoints: propControlPoints = [],
+  placedSymbols: propPlacedSymbols = [],
+  overbreakAnalysis: propOverbreakAnalysis,
+  sectionVolumeRows: propSectionVolumeRows = [],
   initialOutputMode = 'FINAL_ENGINEERING_SHEET',
   onUpdateSettings: propOnUpdateSettings,
   savedProjects = [],
@@ -143,17 +159,41 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     setLocalSettings(propSettings);
   }, [propSettings]);
 
-  const settings = propOnUpdateSettings ? propSettings : localSettings;
+  const baseSettings = propOnUpdateSettings ? propSettings : localSettings;
   const handleUpdateSettings: React.Dispatch<React.SetStateAction<TunnelSettings>> =
     propOnUpdateSettings || setLocalSettings;
 
   const [isSettingsDrawerOpen, setIsSettingsDrawerOpen] = useState<boolean>(false);
+  const [drawerActiveMode, setDrawerActiveMode] = useState<'settings' | 'batch'>('settings');
   const [drawerDockSide, setDrawerDockSide] = useState<'left' | 'right'>('left');
-  const [drawerWidthPx, setDrawerWidthPx] = useState<number>(420);
+  const [drawerWidthPx, setDrawerWidthPx] = useState<number>(430);
   const [resizingDrawer, setResizingDrawer] = useState<{
     startX: number;
     startWidth: number;
   } | null>(null);
+
+  // Batch Queue & Standardized Sequential Processing State
+  const [batchQueue, setBatchQueue] = useState<BatchQueueItem[]>([]);
+  const [batchConfig, setBatchConfig] = useState<BatchStandardizedConfig>({
+    outputMode: initialOutputMode,
+    arrangement: 'AUTO_INTELLIGENT',
+    classificationOverride: 'KEEP_RECORD',
+    standardizeHeaderAndLogos: true,
+    confirmAllOrientations: true,
+    overlayOverbreakOnGeology: false,
+    overlayJointsOnQuantity: false,
+    autoDownloadFormat: {
+      svg: false,
+      png: false,
+      dxf: false,
+      csv: false,
+    },
+  });
+  const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
+  const [isBatchPaused, setIsBatchPaused] = useState<boolean>(false);
+  const [activeBatchIndex, setActiveBatchIndex] = useState<number | null>(null);
+  const [previewQueueId, setPreviewQueueId] = useState<string | null>(null);
+  const [isPrintingBatchBook, setIsPrintingBatchBook] = useState<boolean>(false);
 
   useEffect(() => {
     if (!resizingDrawer) return;
@@ -172,16 +212,129 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
       window.removeEventListener('mouseup', onUp);
     };
   }, [resizingDrawer, drawerDockSide]);
-  const [outputMode, setOutputMode] = useState<OutputSheetMode>(initialOutputMode);
-  const [overlayOverbreakOnGeology, setOverlayOverbreakOnGeology] = useState<boolean>(false);
-  const [overlayJointsOnQuantity, setOverlayJointsOnQuantity] = useState<boolean>(false);
-  const [arrangement, setArrangement] = useState<SheetLayoutArrangement>('AUTO_INTELLIGENT');
+  const [userOutputMode, setOutputMode] = useState<OutputSheetMode>(initialOutputMode);
+  const [userOverlayOverbreakOnGeology, setOverlayOverbreakOnGeology] = useState<boolean>(false);
+  const [userOverlayJointsOnQuantity, setOverlayJointsOnQuantity] = useState<boolean>(false);
+  const [userArrangement, setArrangement] = useState<SheetLayoutArrangement>('AUTO_INTELLIGENT');
   const [showConfidenceLabels, setShowConfidenceLabels] = useState<boolean>(false);
   const [sheetZoomMode, setSheetZoomMode] = useState<'auto_fit' | '100' | '125' | '150'>('auto_fit');
   const svgRef = useRef<SVGSVGElement | null>(null);
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
   const responsive = useResponsiveLayout();
   const previewBounds = useContainerResizeObserver(previewContainerRef, 1280, 820, isOpen);
+
+  // Determine if a queued batch item is currently being processed or previewed
+  const activeBatchItem = useMemo<BatchQueueItem | null>(() => {
+    if (isBatchRunning && activeBatchIndex !== null && batchQueue[activeBatchIndex]) {
+      return batchQueue[activeBatchIndex];
+    }
+    if (previewQueueId) {
+      return batchQueue.find((item) => item.queueId === previewQueueId) || null;
+    }
+    return null;
+  }, [isBatchRunning, activeBatchIndex, previewQueueId, batchQueue]);
+
+  const activeRecord = activeBatchItem?.record || null;
+  const isUsingBatchContext = Boolean(activeRecord);
+
+  const outputMode: OutputSheetMode = isUsingBatchContext
+    ? batchConfig.outputMode
+    : userOutputMode;
+  const arrangement: SheetLayoutArrangement = isUsingBatchContext
+    ? batchConfig.arrangement
+    : userArrangement;
+  const overlayOverbreakOnGeology: boolean = isUsingBatchContext
+    ? batchConfig.overlayOverbreakOnGeology
+    : userOverlayOverbreakOnGeology;
+  const overlayJointsOnQuantity: boolean = isUsingBatchContext
+    ? batchConfig.overlayJointsOnQuantity
+    : userOverlayJointsOnQuantity;
+
+  const geometry = activeRecord ? activeRecord.geometry : propGeometry;
+
+  const settings = useMemo<TunnelSettings>(() => {
+    if (!activeRecord) return baseSettings;
+    const recSettings = activeRecord.settings;
+    if (!batchConfig.standardizeHeaderAndLogos) {
+      return {
+        ...recSettings,
+        sheetConfig: activeRecord.sheetConfig || recSettings.sheetConfig,
+      };
+    }
+    const masterSheetCfg = baseSettings.sheetConfig;
+    const recordSheetCfg = activeRecord.sheetConfig || recSettings.sheetConfig;
+    return {
+      ...recSettings,
+      projectName:
+        baseSettings.projectName ||
+        masterSheetCfg?.projectName ||
+        activeRecord.projectName ||
+        recSettings.projectName,
+      sheetConfig: masterSheetCfg
+        ? {
+            ...recordSheetCfg,
+            ...masterSheetCfg,
+            location:
+              activeRecord.location ||
+              recSettings.locationName ||
+              recSettings.location ||
+              masterSheetCfg.location,
+          }
+        : recordSheetCfg,
+    };
+  }, [activeRecord, baseSettings, batchConfig.standardizeHeaderAndLogos]);
+
+  const photos = activeRecord ? activeRecord.photos : propPhotos;
+
+  const { joints, jointSets } = useMemo(() => {
+    if (!activeRecord) {
+      return { joints: propJoints, jointSets: propJointSets };
+    }
+    const rawJoints = (activeRecord.joints || []).map((j) =>
+      batchConfig.confirmAllOrientations
+        ? { ...j, orientationStatus: 'CONFIRMED' as const }
+        : j
+    );
+    const clustered = clusterJointsIntoSets(rawJoints);
+    const overrides = activeRecord.customJointSetOverrides || {};
+    return {
+      joints: clustered.clusteredJoints,
+      jointSets: clustered.jointSets.map((s) => ({
+        ...s,
+        ...(overrides[s.id] || {}),
+      })),
+    };
+  }, [activeRecord, propJoints, propJointSets, batchConfig.confirmAllOrientations]);
+
+  const selectedClassificationMethod: RockMassClassificationMethodId = useMemo(() => {
+    if (!activeRecord) return propSelectedClassificationMethod;
+    if (batchConfig.classificationOverride !== 'KEEP_RECORD') {
+      return batchConfig.classificationOverride;
+    }
+    return activeRecord.selectedClassificationMethod || propSelectedClassificationMethod;
+  }, [activeRecord, propSelectedClassificationMethod, batchConfig.classificationOverride]);
+
+  const lithologyRegions = activeRecord ? activeRecord.lithologyRegions || [] : propLithologyRegions;
+  const controlPoints = activeRecord ? activeRecord.controlPoints || [] : propControlPoints;
+  const placedSymbols = activeRecord ? activeRecord.placedSymbols || [] : propPlacedSymbols;
+
+  const overbreakAnalysis = useMemo(() => {
+    if (!activeRecord) return propOverbreakAnalysis;
+    return analyzeOverbreakAndUndercut(
+      geometry,
+      settings,
+      controlPoints,
+      activeRecord.surveyProfile,
+      joints
+    );
+  }, [activeRecord, propOverbreakAnalysis, geometry, settings, controlPoints, joints]);
+
+  const sectionVolumeRows = useMemo(() => {
+    if (batchQueue.length >= 2) {
+      return computeSectionToSectionVolumes(batchQueue.map((q) => q.record));
+    }
+    return propSectionVolumeRows;
+  }, [batchQueue, propSectionVolumeRows]);
 
   useEffect(() => {
     if (isOpen && initialOutputMode) {
@@ -203,22 +356,37 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     previewBounds.recalculate,
   ]);
 
-  const qIndex = useMemo(() => propQIndex || createDefaultQIndexParameters(), [propQIndex]);
+  const effectivePropQIndex = activeRecord ? activeRecord.qIndexParams : propQIndex;
+  const effectivePropQStatus = activeRecord ? activeRecord.qParamStatus : propQParamStatus;
+  const effectivePropRmr = activeRecord ? activeRecord.rmrParams : propRmrParams;
+  const effectivePropGsi = activeRecord ? activeRecord.gsiParams : propGsiParams;
+  const effectivePropRockMass = activeRecord ? activeRecord.rockMassSummary : propRockMass;
+
+  const qIndex = useMemo(
+    () => effectivePropQIndex || createDefaultQIndexParameters(),
+    [effectivePropQIndex]
+  );
   const qStatus = useMemo(
-    () => propQParamStatus || createDefaultQParamStatus(),
-    [propQParamStatus]
+    () => effectivePropQStatus || createDefaultQParamStatus(),
+    [effectivePropQStatus]
   );
   const qResult = useMemo(
     () => evaluateQSystemWithValidation(qIndex, geometry.width, qStatus),
     [qIndex, geometry.width, qStatus]
   );
-  const rmr = useMemo(() => propRmrParams || createDefaultRmrParameters(), [propRmrParams]);
+  const rmr = useMemo(
+    () => effectivePropRmr || createDefaultRmrParameters(),
+    [effectivePropRmr]
+  );
   const rmrResult = useMemo(() => calculateBieniawskiRmr(rmr), [rmr]);
-  const gsi = useMemo(() => propGsiParams || createDefaultGsiParameters(), [propGsiParams]);
+  const gsi = useMemo(
+    () => effectivePropGsi || createDefaultGsiParameters(),
+    [effectivePropGsi]
+  );
   const gsiResult = useMemo(() => calculateHoekGsi(gsi), [gsi]);
   const rockMass = useMemo(
-    () => propRockMass || createDefaultRockMassSummary(settings.lithology),
-    [propRockMass, settings.lithology]
+    () => effectivePropRockMass || createDefaultRockMassSummary(settings.lithology),
+    [effectivePropRockMass, settings.lithology]
   );
 
   const uploadedSurfaceCount = useMemo(
@@ -545,16 +713,6 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     showConfidenceLabels,
   ]);
 
-  if (!isOpen) return null;
-
-  const showPhotos =
-    outputMode === 'PHOTO_AND_AI_TRACING' ||
-    outputMode === 'EXPORT_PHOTO_ONLY' ||
-    (outputMode === 'FINAL_ENGINEERING_SHEET' &&
-      Object.values(photos).some((p) => p.opacity > 0 && p.image));
-
-  const showVectors = outputMode !== 'EXPORT_PHOTO_ONLY';
-
   // Approximate engineering drawing scale ratio (1 : N) for A3 420mm width = 1600px (~3.81 px/mm)
   const engineeringScaleDenominator = Math.max(
     10,
@@ -574,6 +732,681 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     const serializer = new XMLSerializer();
     return serializer.serializeToString(clone);
   };
+
+  const renderSvgToPngDataUrl = (svgStr: string, w: number, h: number): Promise<string> =>
+    new Promise((resolve) => {
+      if (!svgStr) {
+        resolve('');
+        return;
+      }
+      const svgBlob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = w * 2;
+        canvas.height = h * 2;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        }
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve('');
+      };
+      img.src = url;
+    });
+
+  const triggerTextFileDownload = (content: string, fileName: string, mimeType: string) => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const triggerDataUrlDownload = (dataUrl: string, fileName: string) => {
+    if (!dataUrl) return;
+    const link = document.createElement('a');
+    link.href = dataUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Sequential Batch Processing Engine Step Effect
+  useEffect(() => {
+    if (!isOpen || !isBatchRunning || isBatchPaused || activeBatchIndex === null) {
+      return;
+    }
+
+    if (activeBatchIndex >= batchQueue.length) {
+      setIsBatchRunning(false);
+      setIsBatchPaused(false);
+      setActiveBatchIndex(null);
+      return;
+    }
+
+    const currentItem = batchQueue[activeBatchIndex];
+    if (!currentItem) {
+      setIsBatchRunning(false);
+      setActiveBatchIndex(null);
+      return;
+    }
+
+    if (currentItem.status !== 'PROCESSING') {
+      setBatchQueue((prev) =>
+        prev.map((it, i) =>
+          i === activeBatchIndex ? { ...it, status: 'PROCESSING' } : it
+        )
+      );
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(async () => {
+          if (cancelled) return;
+          try {
+            const svgString = getExportReadySvgString();
+            const pngDataUrl = await renderSvgToPngDataUrl(svgString, sheetW, sheetH);
+            const dxfString = exportMappedGeologicalSheetToDXF({
+              geometry,
+              settings,
+              joints,
+              jointSets,
+              selectedMethod: selectedClassificationMethod,
+              qIndexParams: qIndex,
+              rmrParams: rmr,
+              gsiParams: gsi,
+              qValue: qResult.isComplete ? qResult.qValue : null,
+              rmrValue: rmrResult.finalRmr,
+            });
+            const csvString = exportGeologyAndQIndexToCSV(
+              geometry,
+              settings,
+              joints,
+              jointSets,
+              qIndex,
+              rockMass,
+              overbreakAnalysis,
+              controlPoints,
+              sectionVolumeRows
+            );
+
+            const seqNum = activeBatchIndex + 1;
+            const safeTunnel = (settings.tunnelName || 'Tunnel').replace(/\s+/g, '_');
+            const safeCh = (settings.faceChainage || settings.chainage || `Sec_${seqNum}`).replace(
+              /\s+/g,
+              '_'
+            );
+            const fileBaseName = `${String(seqNum).padStart(2, '0')}_${safeTunnel}_${safeCh}`;
+
+            const summaryMetrics = {
+              sequenceNumber: seqNum,
+              projectName:
+                settings.projectName ||
+                effectiveSheetConfig.projectName ||
+                currentItem.record.projectName ||
+                'Tunnel Project',
+              location:
+                settings.locationName ||
+                settings.location ||
+                currentItem.record.location ||
+                'Main Heading',
+              tunnelName: settings.tunnelName || currentItem.record.tunnelName,
+              chainage: settings.chainage || currentItem.record.chainage,
+              faceChainage: settings.faceChainage || currentItem.record.faceChainage,
+              numericRdMeters:
+                currentItem.record.numericChainageMeters ??
+                parseNumericChainageMeters(settings.faceChainage, settings.chainage),
+              date: settings.date || currentItem.record.date,
+              outputMode,
+              classificationMethod: selectedClassificationMethod,
+              widthM: geometry.width,
+              heightM: geometry.height,
+              driveDirectionDeg: settings.driveDirection,
+              lithology: settings.lithology || rockMass.rockType || 'Unmapped',
+              jointCount: joints.length,
+              jointSetCount: jointSets.length,
+              qValue: qResult.isComplete ? qResult.qValue.toFixed(3) : 'N/A',
+              rmrValue: rmrResult.isComplete ? `${rmrResult.finalRmr}` : 'N/A',
+              gsiValue:
+                gsiResult.isComplete && gsiResult.gsiValue !== null
+                  ? `${gsiResult.gsiValue}`
+                  : 'N/A',
+              designAreaSqM: overbreakAnalysis?.designAreaSqMeters ?? 0,
+              surveyedAreaSqM: overbreakAnalysis?.surveyedAreaSqMeters ?? 0,
+              overbreakAreaSqM: overbreakAnalysis?.overbreakAreaSqMeters ?? 0,
+              overbreakPct: overbreakAnalysis?.overbreakPercentage ?? 0,
+              undercutAreaSqM: overbreakAnalysis?.undercutAreaSqMeters ?? 0,
+              undercutPct: overbreakAnalysis?.undercutPercentage ?? 0,
+              overbreakVolM3:
+                overbreakAnalysis?.overbreakVolumeCubicMeters !== null &&
+                overbreakAnalysis?.overbreakVolumeCubicMeters !== undefined
+                  ? overbreakAnalysis.overbreakVolumeCubicMeters.toFixed(2)
+                  : 'N/A',
+              qcStatus: qcReport.passed
+                ? 'PASSED'
+                : `${qcReport.issues.length} Flag(s)`,
+            };
+
+            if (batchConfig.autoDownloadFormat.svg && svgString) {
+              triggerTextFileDownload(
+                svgString,
+                `${fileBaseName}_sheet.svg`,
+                'image/svg+xml;charset=utf-8'
+              );
+            }
+            if (batchConfig.autoDownloadFormat.png && pngDataUrl) {
+              triggerDataUrlDownload(pngDataUrl, `${fileBaseName}_sheet.png`);
+            }
+            if (batchConfig.autoDownloadFormat.dxf && dxfString) {
+              triggerDownloadDXFSheet(`${fileBaseName}_sheet.dxf`, dxfString);
+            }
+            if (batchConfig.autoDownloadFormat.csv && csvString) {
+              triggerTextFileDownload(
+                csvString,
+                `${fileBaseName}_geology_qindex.csv`,
+                'text/csv;charset=utf-8'
+              );
+            }
+
+            if (cancelled) return;
+
+            setBatchQueue((prev) =>
+              prev.map((it, i) =>
+                i === activeBatchIndex
+                  ? {
+                      ...it,
+                      status: 'COMPLETED',
+                      processedAt: new Date().toISOString(),
+                      outputs: {
+                        svgString,
+                        pngDataUrl,
+                        dxfString,
+                        csvString,
+                        fileBaseName,
+                        summaryMetrics,
+                      },
+                    }
+                  : it
+              )
+            );
+            setActiveBatchIndex((prevIdx) => (prevIdx !== null ? prevIdx + 1 : null));
+          } catch (err: unknown) {
+            if (cancelled) return;
+            const msg = err instanceof Error ? err.message : 'Processing failed';
+            setBatchQueue((prev) =>
+              prev.map((it, i) =>
+                i === activeBatchIndex
+                  ? { ...it, status: 'ERROR', errorMessage: msg }
+                  : it
+              )
+            );
+            setActiveBatchIndex((prevIdx) => (prevIdx !== null ? prevIdx + 1 : null));
+          }
+        });
+      });
+    }, 240);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    isOpen,
+    isBatchRunning,
+    isBatchPaused,
+    activeBatchIndex,
+    batchQueue,
+    batchConfig.autoDownloadFormat,
+    geometry,
+    settings,
+    joints,
+    jointSets,
+    selectedClassificationMethod,
+    qIndex,
+    rmr,
+    gsi,
+    qResult,
+    rmrResult,
+    gsiResult,
+    rockMass,
+    overbreakAnalysis,
+    controlPoints,
+    sectionVolumeRows,
+    outputMode,
+    effectiveSheetConfig.projectName,
+    qcReport.passed,
+    qcReport.issues.length,
+    sheetW,
+    sheetH,
+  ]);
+
+  useEffect(() => {
+    if (!isPrintingBatchBook) return;
+    const onAfterPrint = () => setIsPrintingBatchBook(false);
+    window.addEventListener('afterprint', onAfterPrint);
+    const t = window.setTimeout(() => {
+      window.print();
+    }, 150);
+    return () => {
+      window.removeEventListener('afterprint', onAfterPrint);
+      window.clearTimeout(t);
+    };
+  }, [isPrintingBatchBook]);
+
+  if (!isOpen) return null;
+
+  // Batch Queue Management Handlers
+  const handleAddRecordToQueue = (record: SavedProjectRecord) => {
+    const newItem: BatchQueueItem = {
+      queueId: `bq-${record.id}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      record,
+      status: 'QUEUED',
+    };
+    setBatchQueue((prev) => [...prev, newItem]);
+  };
+
+  const handleAddAllSavedToQueue = () => {
+    if (savedProjects.length === 0) return;
+    const existingIds = new Set(batchQueue.map((q) => q.record.id));
+    const toAdd = savedProjects.filter((r) => !existingIds.has(r.id));
+    const sourceList = toAdd.length > 0 ? toAdd : savedProjects;
+    const newItems: BatchQueueItem[] = sourceList.map((rec, idx) => ({
+      queueId: `bq-${rec.id}-${Date.now()}-${idx}`,
+      record: rec,
+      status: 'QUEUED',
+    }));
+    setBatchQueue((prev) => [...prev, ...newItems]);
+  };
+
+  const handleAddCurrentWorkspaceToQueue = () => {
+    const chMeters = parseNumericChainageMeters(
+      baseSettings.faceChainage,
+      baseSettings.chainage
+    );
+    const projName =
+      baseSettings.projectName ||
+      baseSettings.sheetConfig?.projectName ||
+      'Tunnel Engineering Project';
+    const locName =
+      baseSettings.locationName ||
+      baseSettings.location ||
+      baseSettings.sheetConfig?.location ||
+      'Main Heading';
+    const snapshotRecord: SavedProjectRecord = {
+      id: `live-snap-${Date.now()}`,
+      projectName: projName,
+      tunnelName: baseSettings.tunnelName || 'Main Tunnel',
+      location: locName,
+      chainage: baseSettings.chainage || 'RD 0.00m',
+      faceChainage: baseSettings.faceChainage || baseSettings.chainage || 'RD 0.00m',
+      numericChainageMeters: chMeters,
+      date: baseSettings.date || new Date().toISOString().slice(0, 10),
+      savedAt: new Date().toISOString(),
+      mappingMode: 'TUNNEL_PROFILE',
+      geometry: propGeometry,
+      settings: baseSettings,
+      sheetConfig: baseSettings.sheetConfig,
+      photos: propPhotos,
+      joints: propJoints,
+      customJointSetOverrides: {},
+      qIndexParams: propQIndex || createDefaultQIndexParameters(),
+      selectedClassificationMethod: propSelectedClassificationMethod,
+      rmrParams: propRmrParams,
+      gsiParams: propGsiParams,
+      qParamStatus: propQParamStatus,
+      rockMassSummary:
+        propRockMass || createDefaultRockMassSummary(baseSettings.lithology),
+      lithologyRegions: propLithologyRegions,
+      controlPoints: propControlPoints,
+      surveyProfile: {
+        surface: 'face',
+        orderedControlPointIds: propControlPoints
+          .filter((c) => c.surface === 'face')
+          .map((c) => c.id),
+        isClosed: true,
+        visible: true,
+        locked: false,
+        pullIntervalMeters: baseSettings.roundLength || 3.5,
+        useValidPullInterval: true,
+        zoneReasonOverrides: {},
+        overallOverbreakCategory: 'GEOLOGICAL',
+        overallOverbreakReason: 'Wedge release along joint planes',
+        overallUndercutCategory: 'MECHANICAL_EXCAVATION',
+        overallUndercutReason: 'Perimeter drill hole lookout',
+      },
+      placedSymbols: propPlacedSymbols,
+      quantitySummary: {
+        designAreaSqM: propOverbreakAnalysis?.designAreaSqMeters ?? 0,
+        surveyedAreaSqM: propOverbreakAnalysis?.surveyedAreaSqMeters ?? 0,
+        overbreakAreaSqM: propOverbreakAnalysis?.overbreakAreaSqMeters ?? 0,
+        undercutAreaSqM: propOverbreakAnalysis?.undercutAreaSqMeters ?? 0,
+        overbreakPct: propOverbreakAnalysis?.overbreakPercentage ?? 0,
+        undercutPct: propOverbreakAnalysis?.undercutPercentage ?? 0,
+        maxOverbreakM: propOverbreakAnalysis?.maxRadialOverbreakMeters ?? 0,
+        maxUndercutM: propOverbreakAnalysis?.maxRadialUndercutMeters ?? 0,
+        pullIntervalM: propOverbreakAnalysis?.effectivePullIntervalMeters ?? null,
+        overbreakVolumeM3: propOverbreakAnalysis?.overbreakVolumeCubicMeters ?? null,
+        undercutVolumeM3: propOverbreakAnalysis?.undercutVolumeCubicMeters ?? null,
+      },
+    };
+    handleAddRecordToQueue(snapshotRecord);
+  };
+
+  const handleImportJsonFilesToQueue = async (files: FileList) => {
+    const added: BatchQueueItem[] = [];
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const text = await files[i].text();
+        const parsed = JSON.parse(text);
+        const records: SavedProjectRecord[] = Array.isArray(parsed)
+          ? parsed
+          : parsed && Array.isArray(parsed.records)
+          ? parsed.records
+          : parsed && parsed.geometry && parsed.settings
+          ? [parsed as SavedProjectRecord]
+          : [];
+        for (const rec of records) {
+          if (rec && rec.geometry && rec.settings) {
+            saveProjectRecordToMemory(rec);
+            added.push({
+              queueId: `bq-imp-${rec.id || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              record: rec,
+              status: 'QUEUED',
+            });
+          }
+        }
+      } catch {
+        // Ignore invalid files
+      }
+    }
+    if (added.length > 0) {
+      setBatchQueue((prev) => [...prev, ...added]);
+    }
+  };
+
+  const handleRemoveQueueItem = (queueId: string) => {
+    setBatchQueue((prev) => prev.filter((item) => item.queueId !== queueId));
+    if (previewQueueId === queueId) {
+      setPreviewQueueId(null);
+    }
+  };
+
+  const handleMoveQueueItem = (queueId: string, dir: -1 | 1) => {
+    setBatchQueue((prev) => {
+      const next = [...prev];
+      const idx = next.findIndex((i) => i.queueId === queueId);
+      if (idx === -1) return prev;
+      const target = idx + dir;
+      if (target < 0 || target >= next.length) return prev;
+      const [item] = next.splice(idx, 1);
+      next.splice(target, 0, item);
+      return next;
+    });
+  };
+
+  const handleSortQueue = (by: 'chainage_asc' | 'chainage_desc' | 'date_asc') => {
+    setBatchQueue((prev) => {
+      const next = [...prev];
+      next.sort((a, b) => {
+        if (by === 'date_asc') {
+          return (a.record.date || '').localeCompare(b.record.date || '');
+        }
+        const rdA =
+          a.record.numericChainageMeters ??
+          parseNumericChainageMeters(a.record.faceChainage, a.record.chainage) ??
+          0;
+        const rdB =
+          b.record.numericChainageMeters ??
+          parseNumericChainageMeters(b.record.faceChainage, b.record.chainage) ??
+          0;
+        return by === 'chainage_asc' ? rdA - rdB : rdB - rdA;
+      });
+      return next;
+    });
+  };
+
+  const handleClearQueue = () => {
+    setIsBatchRunning(false);
+    setIsBatchPaused(false);
+    setActiveBatchIndex(null);
+    setPreviewQueueId(null);
+    setBatchQueue([]);
+  };
+
+  const handleStartBatch = () => {
+    if (batchQueue.length === 0) return;
+    setPreviewQueueId(null);
+    setBatchQueue((prev) =>
+      prev.map((item) => ({
+        ...item,
+        status: 'QUEUED',
+        processedAt: undefined,
+        errorMessage: undefined,
+      }))
+    );
+    setIsBatchPaused(false);
+    setActiveBatchIndex(0);
+    setIsBatchRunning(true);
+  };
+
+  const handlePauseResumeBatch = () => {
+    setIsBatchPaused((prev) => !prev);
+  };
+
+  const handleStopResetBatch = () => {
+    setIsBatchRunning(false);
+    setIsBatchPaused(false);
+    setActiveBatchIndex(null);
+    setBatchQueue((prev) =>
+      prev.map((item) => ({
+        ...item,
+        status: item.outputs ? 'COMPLETED' : 'QUEUED',
+      }))
+    );
+  };
+
+  const handleDownloadSingleBatchOutput = (
+    item: BatchQueueItem,
+    format: 'svg' | 'png' | 'dxf' | 'csv'
+  ) => {
+    if (!item.outputs) return;
+    const base = item.outputs.fileBaseName;
+    if (format === 'svg') {
+      triggerTextFileDownload(
+        item.outputs.svgString,
+        `${base}_sheet.svg`,
+        'image/svg+xml;charset=utf-8'
+      );
+    } else if (format === 'png') {
+      triggerDataUrlDownload(item.outputs.pngDataUrl, `${base}_sheet.png`);
+    } else if (format === 'dxf') {
+      triggerDownloadDXFSheet(`${base}_sheet.dxf`, item.outputs.dxfString);
+    } else if (format === 'csv') {
+      triggerTextFileDownload(
+        item.outputs.csvString,
+        `${base}_geology_qindex.csv`,
+        'text/csv;charset=utf-8'
+      );
+    }
+  };
+
+  const handleDownloadConsolidatedCSV = () => {
+    const completed = batchQueue.filter((i) => i.status === 'COMPLETED' && i.outputs);
+    if (completed.length === 0) return;
+    const headers = [
+      'Seq_No',
+      'Project_Name',
+      'Location',
+      'Tunnel_Name',
+      'Chainage_Interval',
+      'Face_Chainage',
+      'Numeric_RD_m',
+      'Date',
+      'Sheet_Output_Mode',
+      'Classification_Method',
+      'Width_m',
+      'Height_m',
+      'Drive_Azimuth_Deg',
+      'Lithology',
+      'Mapped_Traces',
+      'Joint_Sets',
+      'Q_Value',
+      'RMR_Value',
+      'GSI_Value',
+      'Design_Area_m2',
+      'Surveyed_Area_m2',
+      'Overbreak_Area_m2',
+      'Overbreak_Pct',
+      'Undercut_Area_m2',
+      'Undercut_Pct',
+      'Overbreak_Volume_m3',
+      'QC_Status',
+    ];
+    const escapeCsv = (val: unknown) => {
+      const s = String(val ?? '');
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? `"${s.replace(/"/g, '""')}"`
+        : s;
+    };
+    const rows = completed.map((item) => {
+      const m = item.outputs!.summaryMetrics;
+      return [
+        m.sequenceNumber,
+        m.projectName,
+        m.location,
+        m.tunnelName,
+        m.chainage,
+        m.faceChainage,
+        m.numericRdMeters ?? '',
+        m.date,
+        m.outputMode,
+        m.classificationMethod,
+        m.widthM.toFixed(2),
+        m.heightM.toFixed(2),
+        m.driveDirectionDeg,
+        m.lithology,
+        m.jointCount,
+        m.jointSetCount,
+        m.qValue,
+        m.rmrValue,
+        m.gsiValue,
+        m.designAreaSqM.toFixed(2),
+        m.surveyedAreaSqM.toFixed(2),
+        m.overbreakAreaSqM.toFixed(2),
+        m.overbreakPct.toFixed(2),
+        m.undercutAreaSqM.toFixed(2),
+        m.undercutPct.toFixed(2),
+        m.overbreakVolM3,
+        m.qcStatus,
+      ]
+        .map(escapeCsv)
+        .join(',');
+    });
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    triggerTextFileDownload(
+      csvContent,
+      `ESWA_Batch_Engineering_Register_${completed.length}_Sections.csv`,
+      'text/csv;charset=utf-8'
+    );
+  };
+
+  const handleDownloadConsolidatedJSON = () => {
+    const completed = batchQueue.filter((i) => i.status === 'COMPLETED' && i.outputs);
+    if (completed.length === 0) return;
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      standardizedConfig: batchConfig,
+      totalProcessed: completed.length,
+      summarySchedule: completed.map((c) => c.outputs!.summaryMetrics),
+      records: completed.map((c) => c.record),
+    };
+    triggerTextFileDownload(
+      JSON.stringify(payload, null, 2),
+      `ESWA_Batch_Standardized_Package_${completed.length}_Sections.json`,
+      'application/json;charset=utf-8'
+    );
+  };
+
+  const handleDownloadMultiSheetHtmlBook = () => {
+    const completed = batchQueue.filter((i) => i.status === 'COMPLETED' && i.outputs);
+    if (completed.length === 0) return;
+    const pagesHtml = completed
+      .map((item, idx) => {
+        const m = item.outputs!.summaryMetrics;
+        return `<section class="sheet-page">
+          <div class="sheet-meta no-print">
+            <span>Sheet ${idx + 1} of ${completed.length}: ${m.tunnelName} · ${m.faceChainage} (${m.location})</span>
+            <span>Q: ${m.qValue} · RMR: ${m.rmrValue} · Overbreak: ${m.overbreakAreaSqM.toFixed(2)} m² (${m.overbreakPct.toFixed(1)}%)</span>
+          </div>
+          <div class="svg-wrap">${item.outputs!.svgString}</div>
+        </section>`;
+      })
+      .join('\n');
+
+    const htmlDoc = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Standardized Batch Engineering Drawing Book (${completed.length} Sheets)</title>
+<style>
+  @page { size: A3 landscape; margin: 0mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; background: #0f172a; font-family: 'IBM Plex Mono', monospace; color: #f8fafc; }
+  .top-bar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: #090d16; border-bottom: 1px solid #1e293b; }
+  .print-btn { background: #0284c7; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-family: inherit; font-weight: 700; cursor: pointer; }
+  .sheet-page { width: 100%; max-width: 1600px; margin: 20px auto; background: #ffffff; color: #000000; box-shadow: 0 12px 32px rgba(0,0,0,0.45); page-break-after: always; break-after: page; }
+  .sheet-meta { display: flex; justify-content: space-between; padding: 8px 14px; background: #1e293b; color: #e2e8f0; font-size: 12px; }
+  .svg-wrap svg { display: block; width: 100%; height: auto; }
+  @media print {
+    body { background: #ffffff; }
+    .no-print { display: none !important; }
+    .sheet-page { margin: 0; max-width: none; box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="top-bar no-print">
+    <div><strong>ESWA STANDARDIZED ENGINEERING SHEET BOOK</strong> · ${completed.length} Queued Sections Processed</div>
+    <button class="print-btn" onclick="window.print()">Print / Save All as Multi-Page A3 PDF</button>
+  </div>
+  ${pagesHtml}
+</body>
+</html>`;
+
+    triggerTextFileDownload(
+      htmlDoc,
+      `ESWA_Standardized_Engineering_Book_${completed.length}_Sheets.html`,
+      'text/html;charset=utf-8'
+    );
+  };
+
+  const handlePrintMultiSheetPdfBook = () => {
+    const completed = batchQueue.filter((i) => i.status === 'COMPLETED' && i.outputs);
+    if (completed.length === 0) return;
+    setIsPrintingBatchBook(true);
+  };
+
+  const showPhotos =
+    outputMode === 'PHOTO_AND_AI_TRACING' ||
+    outputMode === 'EXPORT_PHOTO_ONLY' ||
+    (outputMode === 'FINAL_ENGINEERING_SHEET' &&
+      Object.values(photos).some((p) => p.opacity > 0 && p.image));
+
+  const showVectors = outputMode !== 'EXPORT_PHOTO_ONLY';
 
   const handleDownloadSVG = () => {
     const svgString = getExportReadySvgString();
@@ -851,16 +1684,45 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setIsSettingsDrawerOpen((prev) => !prev)}
+            onClick={() => {
+              if (isSettingsDrawerOpen && drawerActiveMode === 'batch') {
+                setIsSettingsDrawerOpen(false);
+              } else {
+                setDrawerActiveMode('batch');
+                setIsSettingsDrawerOpen(true);
+              }
+            }}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold rounded border transition-colors whitespace-nowrap cursor-pointer ${
-              isSettingsDrawerOpen
+              isSettingsDrawerOpen && drawerActiveMode === 'batch'
+                ? 'bg-cyan-600 text-white border-cyan-400 shadow-md'
+                : 'bg-cyan-950/90 hover:bg-cyan-900 text-cyan-200 border-cyan-600/70'
+            }`}
+            title="Queue and process multiple saved project records in sequence for standardized engineering output"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            Batch Queue ({batchQueue.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (isSettingsDrawerOpen && drawerActiveMode === 'settings') {
+                setIsSettingsDrawerOpen(false);
+              } else {
+                setDrawerActiveMode('settings');
+                setIsSettingsDrawerOpen(true);
+              }
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold rounded border transition-colors whitespace-nowrap cursor-pointer ${
+              isSettingsDrawerOpen && drawerActiveMode === 'settings'
                 ? 'bg-emerald-600 text-white border-emerald-400 shadow-md'
                 : 'bg-emerald-950/90 hover:bg-emerald-900 text-emerald-200 border-emerald-600/70'
             }`}
             title="Edit Project Details, Location, Client/Contractor Logos, Block Placement & Chainage Storage"
           >
             <Sliders className="w-3.5 h-3.5" />
-            {isSettingsDrawerOpen ? 'Hide Sheet Settings & Storage' : 'Sheet Settings, Logos & Storage'}
+            {isSettingsDrawerOpen && drawerActiveMode === 'settings'
+              ? 'Hide Settings & Storage'
+              : 'Sheet Settings & Storage'}
           </button>
           <button
             onClick={handleDownloadDXF}
@@ -969,14 +1831,30 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
               <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-emerald-400 transition-colors" />
             </div>
 
-            <div className="flex items-center justify-between px-3 py-2.5 bg-[#0D121B] border-b border-slate-800 gap-1">
-              <div className="min-w-0">
-                <div className="font-display font-bold text-xs text-emerald-300 tracking-wide truncate">
-                  SHEET SETTINGS, LOGOS &amp; CHAINAGE STORAGE
-                </div>
-                <div className="text-[10px] text-slate-400 font-mono truncate">
-                  Live-edit project details, logos, placement &amp; face records
-                </div>
+            <div className="flex items-center justify-between px-3 py-2 bg-[#0D121B] border-b border-slate-800 gap-1">
+              <div className="flex items-center gap-1 bg-slate-900 p-1 rounded border border-slate-800 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setDrawerActiveMode('settings')}
+                  className={`px-2 py-1 rounded text-[11px] font-mono font-semibold transition-colors cursor-pointer truncate ${
+                    drawerActiveMode === 'settings'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Settings &amp; Storage
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawerActiveMode('batch')}
+                  className={`px-2 py-1 rounded text-[11px] font-mono font-semibold transition-colors cursor-pointer truncate ${
+                    drawerActiveMode === 'batch'
+                      ? 'bg-cyan-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Batch Processor ({batchQueue.length})
+                </button>
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 <button
@@ -1011,30 +1889,62 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   type="button"
                   onClick={() => setIsSettingsDrawerOpen(false)}
                   className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
-                  title="Close Settings Drawer"
+                  title="Close Drawer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
-              <SheetSettingsAndStorageEditor
-                settings={settings}
-                onUpdateSettings={handleUpdateSettings}
-                savedProjects={savedProjects}
-                onSaveCurrentProject={() => onSaveCurrentProject?.()}
-                onLoadProjectRecord={onLoadProjectRecord}
-                onDeleteProjectRecord={onDeleteProjectRecord}
-                onCreateNextChainageSection={onCreateNextChainageSection}
-                compactDrawerMode={true}
-              />
+              {drawerActiveMode === 'batch' ? (
+                <BatchSheetProcessorPanel
+                  savedProjects={savedProjects}
+                  queue={batchQueue}
+                  config={batchConfig}
+                  onUpdateConfig={setBatchConfig}
+                  isRunning={isBatchRunning}
+                  isPaused={isBatchPaused}
+                  activeQueueIndex={activeBatchIndex}
+                  previewQueueId={previewQueueId}
+                  onAddRecordToQueue={handleAddRecordToQueue}
+                  onAddAllSavedToQueue={handleAddAllSavedToQueue}
+                  onAddCurrentWorkspaceToQueue={handleAddCurrentWorkspaceToQueue}
+                  onImportJsonFilesToQueue={handleImportJsonFilesToQueue}
+                  onRemoveQueueItem={handleRemoveQueueItem}
+                  onMoveQueueItem={handleMoveQueueItem}
+                  onSortQueue={handleSortQueue}
+                  onClearQueue={handleClearQueue}
+                  onSelectPreviewItem={setPreviewQueueId}
+                  onStartBatch={handleStartBatch}
+                  onPauseResumeBatch={handlePauseResumeBatch}
+                  onStopResetBatch={handleStopResetBatch}
+                  onDownloadSingleOutput={handleDownloadSingleBatchOutput}
+                  onDownloadConsolidatedCSV={handleDownloadConsolidatedCSV}
+                  onDownloadConsolidatedJSON={handleDownloadConsolidatedJSON}
+                  onDownloadMultiSheetHtmlBook={handleDownloadMultiSheetHtmlBook}
+                  onPrintMultiSheetPdfBook={handlePrintMultiSheetPdfBook}
+                />
+              ) : (
+                <SheetSettingsAndStorageEditor
+                  settings={settings}
+                  onUpdateSettings={handleUpdateSettings}
+                  savedProjects={savedProjects}
+                  onSaveCurrentProject={() => onSaveCurrentProject?.()}
+                  onLoadProjectRecord={onLoadProjectRecord}
+                  onDeleteProjectRecord={onDeleteProjectRecord}
+                  onCreateNextChainageSection={onCreateNextChainageSection}
+                  compactDrawerMode={true}
+                />
+              )}
             </div>
           </aside>
         )}
 
       <div
         ref={previewContainerRef}
-        className={`flex-1 flex items-center justify-center print:p-0 print:bg-white ${
+        className={`flex-1 flex items-center justify-center ${
+          isPrintingBatchBook ? 'no-print' : 'print:p-0 print:bg-white'
+        } ${
           isLight ? 'bg-slate-200' : 'bg-[#0B0E14]'
         } ${
           sheetZoomMode === 'auto_fit' ? 'overflow-hidden p-2' : 'overflow-auto p-4 items-start'
@@ -4161,6 +5071,22 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
         </div>
       </div>
       </div>
+
+      {/* Multi-Sheet Batch Print Container (Rendered when exporting/printing Multi-Sheet PDF Book) */}
+      {isPrintingBatchBook && (
+        <div className="hidden print:block w-full bg-white text-black">
+          {batchQueue
+            .filter((item) => item.status === 'COMPLETED' && item.outputs?.svgString)
+            .map((item) => (
+              <div
+                key={`print-book-${item.queueId}`}
+                className="w-full page-break-after"
+                style={{ pageBreakAfter: 'always', breakAfter: 'page' }}
+                dangerouslySetInnerHTML={{ __html: item.outputs!.svgString }}
+              />
+            ))}
+        </div>
+      )}
     </div>
   );
 };
