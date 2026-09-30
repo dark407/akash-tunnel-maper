@@ -69,9 +69,18 @@ export function computeCanvasStageMetrics(
   const surfaceBounds = getSurfaceBoundsMeters(surface, geometry, settings);
   const availW = viewW - padPx * 2;
   const availH = viewH - padPx * 2;
+  const roundLen = Math.max(1.0, settings.roundLength || 3.5);
+  const refW = Math.max(
+    surfaceBounds.width,
+    Math.min(surfaceBounds.width * 1.4, Math.max(geometry.width, roundLen))
+  );
+  const refH = Math.max(
+    surfaceBounds.height,
+    Math.min(surfaceBounds.height * 1.4, Math.max(geometry.height, geometry.wallHeight, roundLen))
+  );
   const pxPerMeter = Math.min(
-    availW / Math.max(0.1, surfaceBounds.width),
-    availH / Math.max(0.1, surfaceBounds.height)
+    availW / Math.max(0.1, refW),
+    availH / Math.max(0.1, refH)
   );
 
   const centerX_m = (surfaceBounds.minX + surfaceBounds.maxX) / 2;

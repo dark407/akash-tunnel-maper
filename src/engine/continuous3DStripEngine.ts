@@ -196,7 +196,7 @@ export interface ContinuousTunnelStripDataset {
   updatedAt: string;
 }
 
-const STORAGE_KEY = 'eswa_continuous_3d_strip_datasets_v3_fresh';
+const STORAGE_KEY = 'eswa_continuous_3d_strip_datasets_v5_clean';
 
 export function getDefaultSheetConfig(
   dataset?: Partial<ContinuousTunnelStripDataset>
@@ -1652,23 +1652,44 @@ export function parsePullIntervalFromRecord(
 export function syncSavedProjectsIntoStripDatasets(
   existingDatasets: ContinuousTunnelStripDataset[],
   savedProjects: SavedProjectRecord[],
-  _activeSettings?: TunnelSettings,
-  _activeGeometry?: TunnelGeometry,
+  activeSettings?: TunnelSettings,
+  activeGeometry?: TunnelGeometry,
   _activeJoints?: Joint[],
   _activeLithology?: LithologyRegion[],
   _activeSymbols?: PlacedGeologicalSymbol[]
 ): ContinuousTunnelStripDataset[] {
-  const list =
+  let list =
     existingDatasets.length > 0
       ? [...existingDatasets]
       : [createFreshDefaultStripDataset()];
+
+  // If only the blank default workspace exists and the user entered a project/location name in setup, sync those names
+  if (
+    list.length === 1 &&
+    list[0].id === 'dataset-fresh-workspace' &&
+    list[0].pulls.length === 0 &&
+    list[0].traces.length === 0
+  ) {
+    const activeProj = activeSettings?.projectName?.trim();
+    const activeLoc =
+      activeSettings?.locationName?.trim() || activeSettings?.tunnelName?.trim();
+    if (activeProj || activeLoc) {
+      list[0] = {
+        ...list[0],
+        projectName: activeProj || list[0].projectName,
+        tunnelLocationName: activeLoc || list[0].tunnelLocationName,
+        tunnelDiameterWidthM: activeGeometry?.width || list[0].tunnelDiameterWidthM,
+        tunnelArchHeightM: activeGeometry?.height || list[0].tunnelArchHeightM,
+      };
+    }
+  }
 
   const allRecords: SavedProjectRecord[] = [...savedProjects];
 
   const groups = new Map<string, SavedProjectRecord[]>();
   for (const rec of allRecords) {
     const pName = (rec.projectName || rec.settings?.projectName || 'Underground Project').trim();
-    const tName = (rec.tunnelName || 'Main Tunnel').trim();
+    const tName = (rec.tunnelName || rec.location || 'Main Tunnel').trim();
     const key = `${pName}:::${tName}`;
     const arr = groups.get(key) || [];
     arr.push(rec);
@@ -1693,22 +1714,22 @@ export function syncSavedProjectsIntoStripDatasets(
     const totalPerimM = upperW + lowerW;
 
     if (!dataset) {
-      const driveDeg = Math.round(records[0]?.settings?.driveDirection ?? 160);
+      const driveDeg = Math.round(records[0]?.settings?.driveDirection ?? 0);
       const oppDeg = (driveDeg + 180) % 360;
       dataset = {
         id: `ds-${projectName.replace(/\s+/g, '_')}-${tunnelLocationName.replace(/\s+/g, '_')}`,
         projectName,
         tunnelLocationName,
-        clientName: records[0]?.settings?.sheetConfig?.clientName || 'Nepal Electricity Authority',
-        contractorName: records[0]?.settings?.sheetConfig?.contractorName || 'Joint Venture Contractors',
-        geologistContractor: 'Project Geologist',
-        geologistClient: 'Client / Engineer Geologist',
+        clientName: records[0]?.settings?.sheetConfig?.clientName || '',
+        contractorName: records[0]?.settings?.sheetConfig?.contractorName || '',
+        geologistContractor: records[0]?.settings?.mappedBy || '',
+        geologistClient: '',
         upperZoneLabel: 'LEFT WALL TO CROWN (SPRING LINE)',
         lowerZoneLabel: 'CROWN TO RIGHT WALL (SPRING LINE)',
         upperZoneWidthM: upperW,
         lowerZoneWidthM: lowerW,
-        tunnelDiameterWidthM: firstGeom?.width || 6.4,
-        tunnelArchHeightM: firstGeom?.height || 6.4,
+        tunnelDiameterWidthM: firstGeom?.width || 8.4,
+        tunnelArchHeightM: firstGeom?.height || 7.2,
         viewFromRd: 0,
         viewToRd: 30,
         leftCornerAzimuthLabel: `${String(oppDeg).padStart(3, '0')}°N`,
@@ -1717,11 +1738,7 @@ export function syncSavedProjectsIntoStripDatasets(
         traces: [],
         lithologyZones: [],
         waterSymbols: [],
-        narrativeBullets: [
-          'REPRESENTATIVE JOINTS ARE SHOWN IN THE MAP, THEIR NUMBERS BEING LIMITED BY THE SCALE OF MAP.',
-          'INFORMATION FROM DAILY TUNNEL MAPPING/DOCUMENTATION (INCLUDING FACE MAPS) HAS BEEN USED AS THE BASIS FOR THIS DOCUMENT.',
-          'PROJECTION OF THE TUNNEL MAP IS DONE AS VIEWED FROM INSIDE THE TUNNEL.',
-        ],
+        narrativeBullets: [],
         sheetConfig: getDefaultSheetConfig({
           projectName,
           tunnelLocationName,
@@ -1735,12 +1752,12 @@ export function syncSavedProjectsIntoStripDatasets(
       const interval = parsePullIntervalFromRecord(
         rec.chainage,
         rec.faceChainage,
-        rec.settings?.roundLength || 5.0
+        rec.settings?.roundLength || 3.5
       );
       const existingPullIdx = dataset.pulls.findIndex(
         (p) => Math.abs(p.fromRd - interval.fromRd) < 0.2 && Math.abs(p.toRd - interval.toRd) < 0.2
       );
-      const driveAz = Number((rec.settings?.driveDirection ?? 160).toFixed(1));
+      const driveAz = Number((rec.settings?.driveDirection ?? 0).toFixed(1));
       const oppAz = Number(((driveAz + 180) % 360).toFixed(1));
 
       const pullObj: ContinuousPullRecord = {
@@ -1748,34 +1765,29 @@ export function syncSavedProjectsIntoStripDatasets(
         fromRd: interval.fromRd,
         toRd: interval.toRd,
         driveAzimuthDeg: driveAz,
-        gradientPct: 0.166,
+        gradientPct: 0,
         leftBoundaryAzimuthDeg: oppAz,
         convergenceMm: '0 mm',
-        rockType: rec.rockMassSummary?.rockType || rec.settings?.lithology || 'Qtz - Quartzite',
-        rockDescription: `${rec.rockMassSummary?.rockType || 'Quartzite'}, ${rec.rockMassSummary?.weatheringGrade || 'W2'}, ${rec.rockMassSummary?.strengthGrade || 'Very Strong'}.`,
-        rockClass: rec.rockMassSummary?.rockUnit || 'II',
-        supportDescription:
-          rec.rockMassSummary?.installedSupport ||
-          '10cm Wet Shotcrete, 1 Layer Wire Mesh, 40/3m Rock Bolts',
-        shotcreteInstalled: '10cm WET',
-        wireMeshInstalled: '3.01 (kg/m²) 1 Layer',
-        rockBoltsInstalled: '40/3m',
+        rockType: rec.rockMassSummary?.rockType || rec.settings?.lithology || '-',
+        rockDescription: rec.rockMassSummary?.geologistRemarks || '',
+        rockClass: rec.rockMassSummary?.rockUnit || '-',
+        supportDescription: rec.rockMassSummary?.installedSupport || '-',
+        shotcreteInstalled: '-',
+        wireMeshInstalled: '-',
+        rockBoltsInstalled: '-',
         steelRibsInstalled: '-',
         forepolingInstalled: '-',
-        seepageCondition: rec.rockMassSummary?.groundwaterCondition || 'DRY',
-        weatheringCondition: rec.rockMassSummary?.weatheringGrade || 'W2',
-        ucsRangeMpa: rec.rockMassSummary?.strengthGrade || '150 MPa (VERY STRONG)',
-        rmrValue: 60,
-        rqdValue: 70,
-        overbreakVolumeM3: rec.quantitySummary?.overbreakVolumeM3 || 0.45,
-        excavationDefiningNo: '2',
+        seepageCondition: rec.rockMassSummary?.groundwaterCondition || '-',
+        weatheringCondition: rec.rockMassSummary?.weatheringGrade || '-',
+        ucsRangeMpa: rec.rockMassSummary?.strengthGrade || '-',
+        rmrValue: rec.rmrParams?.intactStrengthRating ? 60 : undefined,
+        rqdValue: rec.qIndexParams?.rqd,
+        overbreakVolumeM3: rec.quantitySummary?.overbreakVolumeM3 || 0,
+        excavationDefiningNo: '-',
         excavationDate: rec.date,
-        supportClass: '2/3a',
-        structureDescription:
-          rec.rockMassSummary?.geologistRemarks ||
-          'ROCKMASS IS JOINTED & FRACTURED. SLABS ARE FORMED ON THE CROWN. JS1, JS2 & SECONDARY JOINTS ARE PROMINENT.',
-        foliationCharacteristics:
-          'FOLIATION JOINTS ARE VERY CLOSELY TO MEDIUM SPACED, CONTINUOUS, SLIGHTLY ROUGH TO SMOOTH WITH SILT AND CLAY FILLINGS.',
+        supportClass: '-',
+        structureDescription: rec.rockMassSummary?.geologistRemarks || '',
+        foliationCharacteristics: '',
         status: 'MAPPED',
         linkedSavedProjectId: rec.id,
         dateMapped: rec.date,

@@ -69,6 +69,7 @@ interface GeologyAndQIndexDrawerProps {
   activeTab: 'geology_tables' | 'q_index';
   onChangeTab: (tab: 'geology_tables' | 'q_index') => void;
   onClose: () => void;
+  fullPage?: boolean;
   geometry: TunnelGeometry;
   settings: TunnelSettings;
   activeSurface?: SurfaceType;
@@ -153,6 +154,7 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   activeTab,
   onChangeTab,
   onClose,
+  fullPage = false,
   geometry,
   settings,
   activeSurface = 'face',
@@ -1842,7 +1844,11 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   );
 
   return (
-    <div className="h-[375px] bg-[#0E131D] border-t border-slate-700/90 flex flex-col shrink-0 z-30 shadow-2xl">
+    <div
+      className={`${
+        fullPage ? 'flex-1 min-h-0 h-full' : 'h-[375px] border-t border-slate-700/90'
+      } bg-[#0E131D] flex flex-col shrink-0 z-30 shadow-2xl overflow-hidden`}
+    >
       {/* Top Drawer Header & Method Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-[#131A28] border-b border-slate-800 shrink-0">
         <div className="flex flex-wrap items-center gap-2">
@@ -1855,19 +1861,8 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             }`}
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
-            1. GEOLOGICAL MAPPING TABLES ({jointSets.length} Sets · {joints.length} Traces)
+            1. DISCONTINUITY &amp; GEOLOGICAL TABLES ({jointSets.length} Sets · {joints.length} Traces)
           </button>
-
-          {onOpenKinematics && (
-            <button
-              type="button"
-              onClick={onOpenKinematics}
-              className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-semibold bg-amber-950/70 hover:bg-amber-900/80 text-amber-200 border border-amber-600/50 transition-colors cursor-pointer"
-              title="Open Step 2: Kinematics (Stereonet, Planar/Wedge/Toppling & 3D Wedge Stability)"
-            >
-              2. KINEMATICS (STEREONET &amp; WEDGES)
-            </button>
-          )}
 
           <button
             onClick={() => {
@@ -1881,39 +1876,7 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             }`}
           >
             <Calculator className="w-3.5 h-3.5" />
-            3. ROCK MASS CLASSIFICATION ({getMethodSummaryBadge()})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              onChangeTab('q_index');
-              setClassificationSubView('support_chart');
-            }}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-semibold transition-colors cursor-pointer ${
-              activeTab === 'q_index' && classificationSubView === 'support_chart'
-                ? 'bg-emerald-600 text-white'
-                : 'bg-slate-800/80 text-emerald-300 hover:text-white border border-emerald-700/50'
-            }`}
-            title="Empirical Support Recommendation Chart (Barton Q & RMR89: Bolt Spacing, Bolt Length & Shotcrete Thickness)"
-          >
-            Support Chart (Q &amp; RMR89)
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              onChangeTab('q_index');
-              setClassificationSubView('chainage_log');
-            }}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-semibold transition-colors cursor-pointer ${
-              activeTab === 'q_index' && classificationSubView === 'chainage_log'
-                ? 'bg-cyan-600 text-white'
-                : 'bg-slate-800/80 text-cyan-300 hover:text-white border border-cyan-700/50'
-            }`}
-            title="Chainage Log Strip (Longitudinal Summary comparing RMR, Q, RQD & Support Class across stations)"
-          >
-            Chainage Log Strip
+            2. ROCK MASS CLASSIFICATION ({getMethodSummaryBadge()})
           </button>
 
           {/* Method Selection Switcher (Always accessible, never deletes geological mapping) */}
@@ -1943,11 +1906,6 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="hidden 2xl:inline-block text-[10px] font-mono text-slate-400 bg-slate-900/90 border border-slate-800 px-2 py-0.5 rounded">
-            Station: <strong className="text-slate-200">{settings.faceChainage}</strong> · Surface:{' '}
-            <strong className="text-cyan-300 uppercase">{activeSurface}</strong>
-          </span>
-
           <button
             onClick={handleDownloadCSV}
             className="flex items-center gap-1 px-2.5 py-1 text-xs font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded transition-colors cursor-pointer"
@@ -1979,7 +1937,7 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             title="One-Click DXF Export of Custom Tunnel Profile + Mapped Joint Traces + Station Classification for AutoCAD / Civil 3D"
           >
             <Download className="w-3.5 h-3.5" />
-            Export .DXF (AutoCAD)
+            Export .DXF
           </button>
 
           <button
@@ -1987,17 +1945,17 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             className="flex items-center gap-1 px-3 py-1 text-xs font-mono font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded transition-colors cursor-pointer"
           >
             <CheckCircle2 className="w-3.5 h-3.5" />
-            4. Engineering Output →
+            3. Final Output Sheet →
           </button>
 
-          <ThemeToggleButton compact />
-
-          <button
-            onClick={onClose}
-            className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {!fullPage && (
+            <button
+              onClick={onClose}
+              className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
 

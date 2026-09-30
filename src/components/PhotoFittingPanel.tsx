@@ -93,19 +93,19 @@ export const PhotoFittingPanel: React.FC<PhotoFittingPanelProps> = ({
   const customMaskPts = t.customMaskPoints || [];
 
   return (
-    <div className="absolute top-3 left-3 w-96 max-h-[calc(100%-24px)] flex flex-col bg-slate-900/95 border border-cyan-500/50 rounded shadow-2xl text-xs z-30 overflow-hidden">
+    <div className="w-full flex flex-col bg-white border border-slate-200 rounded-xl shadow-xs text-xs overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 bg-[#131A28] border-b border-slate-800 shrink-0">
-        <span className="font-mono font-bold text-cyan-300 flex items-center gap-1.5">
-          <Sliders className="w-3.5 h-3.5" />
-          PHOTO FITTING &amp; DEFORMATION ({activeSurface.toUpperCase()})
+      <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-200 shrink-0">
+        <span className="font-mono font-bold text-sky-700 flex items-center gap-1.5">
+          <Sliders className="w-3.5 h-3.5 text-sky-600" />
+          PHOTO FITTING ({activeSurface.toUpperCase()})
         </span>
         <div className="flex items-center gap-1">
           <button
             onClick={onUndoTransform}
             disabled={!canUndoTransform}
             title="Undo Photo Edit"
-            className="p-1 text-slate-300 hover:text-white disabled:opacity-35 rounded hover:bg-slate-800"
+            className="p-1 text-slate-600 hover:text-slate-900 disabled:opacity-35 rounded hover:bg-slate-200/70"
           >
             <Undo2 className="w-3.5 h-3.5" />
           </button>
@@ -113,7 +113,7 @@ export const PhotoFittingPanel: React.FC<PhotoFittingPanelProps> = ({
             onClick={onRedoTransform}
             disabled={!canRedoTransform}
             title="Redo Photo Edit"
-            className="p-1 text-slate-300 hover:text-white disabled:opacity-35 rounded hover:bg-slate-800"
+            className="p-1 text-slate-600 hover:text-slate-900 disabled:opacity-35 rounded hover:bg-slate-200/70"
           >
             <Redo2 className="w-3.5 h-3.5" />
           </button>

@@ -1,2886 +1,2814 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChainageProfileSegmentRecord,
+  CustomSegmentType,
   CustomTunnelProfileDefinition,
   Point2D,
   ProfileControlPoint,
   ProfileSegment,
+  ProfileType,
   SavedDesignGeometryRecord,
-  SurveyControlPoint,
   TunnelGeometry,
   TunnelSettings,
 } from '../types/tunnel';
 import {
-  applyParametricOverallDimensions,
   buildAuthoritativeCustomTunnelGeometry,
+  computeBulgeFromArcLength,
   computeBulgeFromMidpointHandle,
+  computeBulgeFromRadius,
   CUSTOM_PROFILE_PRESETS,
   evaluateCustomProfileGeometry,
 } from '../engine/customProfileEngine';
+import { createTunnelGeometry } from '../engine/geometryEngine';
+import { generateSampleTunnelDXF, parseDXFStringToGeometry } from '../engine/cadParser';
 import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
-  Columns,
-  CornerUpRight,
-  Crosshair,
-  GripVertical,
-  Maximize2,
-  Minimize2,
-  MousePointer,
-  PanelLeft,
-  PanelRight,
+  CircleDot,
+  Download,
+  FileCode2,
+  FolderOpen,
+  Layers,
+  Move,
   Plus,
-  Redo2,
   RotateCcw,
+  Ruler,
+  Save,
   Sliders,
   Sparkles,
   Trash2,
-  Undo2,
   Upload,
-  ZoomIn,
-  ZoomOut,
 } from 'lucide-react';
-import { ThemeToggleButton, useTheme } from '../context/ThemeContext';
 
 export type ProfileEditorMainTab =
+  | 'common_variants'
   | 'freeform_canvas'
-  | 'trace_image'
-  | 'coordinates_table'
-  | 'dxf_and_library'
-  | 'chainage_schedule';
+  | 'segment_builder'
+  | 'chainage_schedule'
+  | 'dxf_import';
 
-type GraphToolMode = 'select' | 'draw_line' | 'draw_arc' | 'round_corner';
-
-export type BasicRegularTunnelShapeId =
-  | 'd_shaped'
-  | 'horseshoe'
-  | 'circular'
-  | 'rectangular'
-  | 'flat_arch'
-  | 'trapezoidal'
-  | 'stepped_cavern';
-
-/**
- * Build an exact, clean CustomTunnelProfileDefinition from Basic Regular Shape parameters
- * (Width, Height, Wall Height, Crown Radius, Corner Fillet Radius, Top Width, Invert Drop)
- */
-function buildBasicRegularShapeProfile(params: {
-  shapeId: BasicRegularTunnelShapeId;
-  width: number;
-  height: number;
-  wallHeight: number;
-  crownRadius: number;
-  cornerRadius: number;
-  topWidth: number;
-  invertDrop: number;
-}): CustomTunnelProfileDefinition {
-  const w = Math.max(1.0, Number(params.width.toFixed(3)));
-  const h = Math.max(1.0, Number(params.height.toFixed(3)));
-  const halfW = Number((w / 2).toFixed(3));
-  const wh = Math.max(0.4, Math.min(h - 0.3, Number(params.wallHeight.toFixed(3))));
-  const cornerR = Math.max(0, Math.min(w * 0.4, h * 0.4, Number(params.cornerRadius.toFixed(3))));
-  const invDrop = Math.max(0, Math.min(h * 0.3, Number(params.invertDrop.toFixed(3))));
-
-  if (params.shapeId === 'circular') {
-    // Full Circle / Elliptical TBM profile using 4 cardinal points with exact semicircular/elliptical arcs
-    const rX = halfW;
-    const rY = Number((h / 2).toFixed(3));
-    const cy = rY;
-    const pts: ProfileControlPoint[] = [
-      { id: 'P1', label: 'P1', x: 0, y: 0, role: 'smooth_tangent' },
-      { id: 'P2', label: 'P2', x: -rX, y: cy, role: 'smooth_tangent' },
-      { id: 'P3', label: 'P3', x: 0, y: h, role: 'crown_apex' },
-      { id: 'P4', label: 'P4', x: rX, y: cy, role: 'smooth_tangent' },
-    ];
-    // For a 90-degree quarter-circle arc, bulge = tan(90° / 4) = tan(22.5°) = 0.4142
-    const quarterBulge = Number((0.4142 * (rY / Math.max(0.5, rX))).toFixed(4));
-    const segs: ProfileSegment[] = [
-      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
-      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
-      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
-      { id: 'S4', fromPointId: 'P4', toPointId: 'P1', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
-    ];
-    return {
-      id: `prof-circular-${Date.now()}`,
-      name: Math.abs(w - h) < 0.05 ? `Circular TBM (Ø${w.toFixed(2)}m)` : `Elliptical (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
-      category: 'freeform',
-      controlPoints: pts,
-      segments: segs,
-      isClosed: true,
-      version: 'v1.0',
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  if (params.shapeId === 'rectangular') {
-    // Rectangular / Box Tunnel with optional rounded corner fillet radius
-    if (cornerR <= 0.05) {
-      const pts: ProfileControlPoint[] = [
-        { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
-        { id: 'P2', label: 'P2', x: -halfW, y: h, role: 'left_wall_top' },
-        { id: 'P3', label: 'P3', x: halfW, y: h, role: 'right_wall_top' },
-        { id: 'P4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
-      ];
-      const segs: ProfileSegment[] = [
-        { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
-        { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'line' },
-        { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
-        { id: 'S4', fromPointId: 'P4', toPointId: 'P1', type: 'line' },
-      ];
-      return {
-        id: `prof-rect-${Date.now()}`,
-        name: `Rectangular Box (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
-        category: 'freeform',
-        controlPoints: pts,
-        segments: segs,
-        isClosed: true,
-        version: 'v1.0',
-        updatedAt: new Date().toISOString(),
-      };
-    } else {
-      const r = Math.min(cornerR, halfW - 0.2, h / 2 - 0.2);
-      const b90 = 0.4142;
-      const pts: ProfileControlPoint[] = [
-        { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
-        { id: 'P2', label: 'P2', x: -halfW, y: Number((h - r).toFixed(3)), role: 'left_wall_top' },
-        { id: 'P3', label: 'P3', x: Number((-halfW + r).toFixed(3)), y: h, role: 'smooth_tangent' },
-        { id: 'P4', label: 'P4', x: Number((halfW - r).toFixed(3)), y: h, role: 'smooth_tangent' },
-        { id: 'P5', label: 'P5', x: halfW, y: Number((h - r).toFixed(3)), role: 'right_wall_top' },
-        { id: 'P6', label: 'P6', x: halfW, y: 0, role: 'right_invert' },
-      ];
-      const segs: ProfileSegment[] = [
-        { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
-        { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: b90, arcRadiusMeters: r },
-        { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
-        { id: 'S4', fromPointId: 'P4', toPointId: 'P5', type: 'arc', arcBulge: b90, arcRadiusMeters: r },
-        { id: 'S5', fromPointId: 'P5', toPointId: 'P6', type: 'line' },
-        { id: 'S6', fromPointId: 'P6', toPointId: 'P1', type: 'line' },
-      ];
-      return {
-        id: `prof-rect-fillet-${Date.now()}`,
-        name: `Rounded Box (${w.toFixed(2)}m × ${h.toFixed(2)}m, R=${r.toFixed(2)}m)`,
-        category: 'freeform',
-        controlPoints: pts,
-        segments: segs,
-        isClosed: true,
-        version: 'v1.0',
-        updatedAt: new Date().toISOString(),
-      };
-    }
-  }
-
-  if (params.shapeId === 'horseshoe') {
-    const invW = Number((halfW * 0.86).toFixed(3));
-    const crownSag = Math.max(0.5, h - wh);
-    const crownBulge = Number(((2 * crownSag) / Math.max(1, w)).toFixed(4));
-    const wallBulge = 0.18;
-    const invBulge = invDrop > 0.02 ? Number(((2 * invDrop) / Math.max(1, invW * 2)).toFixed(4)) : 0;
-    const pts: ProfileControlPoint[] = [
-      { id: 'P1', label: 'P1', x: -invW, y: 0, role: 'left_invert' },
-      { id: 'P2', label: 'P2', x: -halfW, y: wh, role: 'left_wall_top' },
-      { id: 'P3', label: 'P3', x: halfW, y: wh, role: 'right_wall_top' },
-      { id: 'P4', label: 'P4', x: invW, y: 0, role: 'right_invert' },
-    ];
-    const segs: ProfileSegment[] = [
-      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'arc', arcBulge: wallBulge },
-      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: crownBulge },
-      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'arc', arcBulge: wallBulge },
-      {
-        id: 'S4',
-        fromPointId: 'P4',
-        toPointId: 'P1',
-        type: invBulge > 0 ? 'arc' : 'line',
-        arcBulge: invBulge > 0 ? invBulge : undefined,
-      },
-    ];
-    return {
-      id: `prof-horseshoe-${Date.now()}`,
-      name: `Horseshoe (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
-      category: 'freeform',
-      controlPoints: pts,
-      segments: segs,
-      isClosed: true,
-      version: 'v1.0',
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  if (params.shapeId === 'flat_arch') {
-    const haunchW = Number((halfW * 0.68).toFixed(3));
-    const haunchY = Number(Math.min(h - 0.25, wh + (h - wh) * 0.62).toFixed(3));
-    const pts: ProfileControlPoint[] = [
-      { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
-      { id: 'P2', label: 'P2', x: -halfW, y: wh, role: 'left_wall_top' },
-      { id: 'P3', label: 'P3', x: -haunchW, y: haunchY, role: 'smooth_tangent' },
-      { id: 'P4', label: 'P4', x: haunchW, y: haunchY, role: 'smooth_tangent' },
-      { id: 'P5', label: 'P5', x: halfW, y: wh, role: 'right_wall_top' },
-      { id: 'P6', label: 'P6', x: halfW, y: 0, role: 'right_invert' },
-    ];
-    const topSag = Math.max(0.2, h - haunchY);
-    const topBulge = Number(((2 * topSag) / Math.max(0.8, haunchW * 2)).toFixed(4));
-    const segs: ProfileSegment[] = [
-      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
-      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: 0.26 },
-      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'arc', arcBulge: topBulge },
-      { id: 'S4', fromPointId: 'P4', toPointId: 'P5', type: 'arc', arcBulge: 0.26 },
-      { id: 'S5', fromPointId: 'P5', toPointId: 'P6', type: 'line' },
-      { id: 'S6', fromPointId: 'P6', toPointId: 'P1', type: 'line' },
-    ];
-    return {
-      id: `prof-flat-arch-${Date.now()}`,
-      name: `Flat-Arch / Basket-Handle (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
-      category: 'freeform',
-      controlPoints: pts,
-      segments: segs,
-      isClosed: true,
-      version: 'v1.0',
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  if (params.shapeId === 'trapezoidal') {
-    const topHalfW = Number((Math.max(1.0, params.topWidth) / 2).toFixed(3));
-    const roofWallY = invDrop > 0.05 ? Number(Math.max(0.5, h - invDrop).toFixed(3)) : h;
-    const roofBulge =
-      invDrop > 0.05 ? Number(((2 * invDrop) / Math.max(1.0, topHalfW * 2)).toFixed(4)) : 0;
-    const pts: ProfileControlPoint[] = [
-      { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
-      { id: 'P2', label: 'P2', x: -topHalfW, y: roofWallY, role: 'left_wall_top' },
-      { id: 'P3', label: 'P3', x: topHalfW, y: roofWallY, role: 'right_wall_top' },
-      { id: 'P4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
-    ];
-    const segs: ProfileSegment[] = [
-      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
-      {
-        id: 'S2',
-        fromPointId: 'P2',
-        toPointId: 'P3',
-        type: roofBulge > 0 ? 'arc' : 'line',
-        arcBulge: roofBulge > 0 ? roofBulge : undefined,
-      },
-      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
-      { id: 'S4', fromPointId: 'P4', toPointId: 'P1', type: 'line' },
-    ];
-    return {
-      id: `prof-trap-${Date.now()}`,
-      name: `Trapezoidal (${w.toFixed(2)}m Base × ${(topHalfW * 2).toFixed(2)}m Top × ${h.toFixed(2)}m H)`,
-      category: 'freeform',
-      controlPoints: pts,
-      segments: segs,
-      isClosed: true,
-      version: 'v1.0',
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  if (params.shapeId === 'stepped_cavern') {
-    const stepM = Math.max(0.3, Math.min(halfW * 0.35, Number(params.cornerRadius.toFixed(2)) || 1.0));
-    const lowerWallH = Number((wh * 0.55).toFixed(2));
-    const crownSag = Math.max(0.6, h - wh);
-    const crownBulge = Number(((2 * crownSag) / Math.max(1, w)).toFixed(4));
-    const pts: ProfileControlPoint[] = [
-      { id: 'P1', label: 'P1', x: Number((-halfW + stepM).toFixed(3)), y: 0, role: 'left_invert' },
-      { id: 'P2', label: 'P2', x: Number((-halfW + stepM).toFixed(3)), y: lowerWallH, role: 'step_corner' },
-      { id: 'P3', label: 'P3', x: -halfW, y: lowerWallH, role: 'step_corner' },
-      { id: 'P4', label: 'P4', x: -halfW, y: wh, role: 'left_wall_top' },
-      { id: 'P5', label: 'P5', x: halfW, y: wh, role: 'right_wall_top' },
-      { id: 'P6', label: 'P6', x: halfW, y: lowerWallH, role: 'step_corner' },
-      { id: 'P7', label: 'P7', x: Number((halfW - stepM).toFixed(3)), y: lowerWallH, role: 'step_corner' },
-      { id: 'P8', label: 'P8', x: Number((halfW - stepM).toFixed(3)), y: 0, role: 'right_invert' },
-    ];
-    const segs: ProfileSegment[] = [
-      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
-      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'line' },
-      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
-      { id: 'S4', fromPointId: 'P4', toPointId: 'P5', type: 'arc', arcBulge: crownBulge },
-      { id: 'S5', fromPointId: 'P5', toPointId: 'P6', type: 'line' },
-      { id: 'S6', fromPointId: 'P6', toPointId: 'P7', type: 'line' },
-      { id: 'S7', fromPointId: 'P7', toPointId: 'P8', type: 'line' },
-      { id: 'S8', fromPointId: 'P8', toPointId: 'P1', type: 'line' },
-    ];
-    return {
-      id: `prof-cavern-${Date.now()}`,
-      name: `Stepped Cavern (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
-      category: 'powerhouse_cavern',
-      controlPoints: pts,
-      segments: segs,
-      isClosed: true,
-      version: 'v1.0',
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  // Default: D-Shaped (Vertical Walls + Arch Crown)
-  const crownSag = Math.max(0.3, h - wh);
-  const crownBulge = Number(((2 * crownSag) / Math.max(1, w)).toFixed(4));
-  const computedCrownR = Number(((w * w) / (8 * crownSag) + crownSag / 2).toFixed(3));
-  const invBulge = invDrop > 0.02 ? Number(((2 * invDrop) / Math.max(1, w)).toFixed(4)) : 0;
-
-  const pts: ProfileControlPoint[] = [
-    { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
-    { id: 'P2', label: 'P2', x: -halfW, y: wh, role: 'left_wall_top' },
-    { id: 'P3', label: 'P3', x: halfW, y: wh, role: 'right_wall_top' },
-    { id: 'P4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
-  ];
-  const segs: ProfileSegment[] = [
-    { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
-    {
-      id: 'S2',
-      fromPointId: 'P2',
-      toPointId: 'P3',
-      type: 'arc',
-      arcBulge: crownBulge,
-      arcRadiusMeters: computedCrownR,
-    },
-    { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
-    {
-      id: 'S4',
-      fromPointId: 'P4',
-      toPointId: 'P1',
-      type: invBulge > 0 ? 'arc' : 'line',
-      arcBulge: invBulge > 0 ? invBulge : undefined,
-    },
-  ];
-  return {
-    id: `prof-dshape-${Date.now()}`,
-    name: `D-Shaped (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
-    category: 'freeform',
-    controlPoints: pts,
-    segments: segs,
-    isClosed: true,
-    version: 'v1.0',
-    updatedAt: new Date().toISOString(),
-  };
-}
+type CustomShapeSubMode = 'LINE' | 'ARC' | 'XY_POINT' | 'SELECT_EDIT';
 
 interface FreeformCustomProfileEditorProps {
   geometry: TunnelGeometry;
   settings: TunnelSettings;
-  onConfirmGeometry: (nextGeometry: TunnelGeometry, proceedToNextScreen?: boolean) => void;
-  onUpdateSettings?: React.Dispatch<React.SetStateAction<TunnelSettings>>;
-  onBack: () => void;
-  onUploadCADFile: (file: File) => Promise<void>;
-  onDownloadSampleDXF: () => void;
-  cadStatus?: string;
   savedGeometries: SavedDesignGeometryRecord[];
-  onSaveGeometryToLibrary: (name: string, geom: TunnelGeometry) => void;
-  onLoadSavedGeometry: (rec: SavedDesignGeometryRecord) => void;
-  onDeleteSavedGeometry: (id: string) => void;
   chainageSchedule: ChainageProfileSegmentRecord[];
-  onUpdateChainageSchedule: (next: ChainageProfileSegmentRecord[]) => void;
-  surveyControlPoints?: SurveyControlPoint[];
-  onSyncProfileToSurveyControlPoints?: (profile: CustomTunnelProfileDefinition) => void;
   initialTab?: ProfileEditorMainTab;
+  onApplyGeometry: (nextGeometry: TunnelGeometry, proceedToPhotos?: boolean) => void;
+  onSaveToGeometryLibrary: (name: string, nextGeometry: TunnelGeometry) => void;
+  onDeleteSavedGeometry: (id: string) => void;
+  onUpdateChainageSchedule: (next: ChainageProfileSegmentRecord[]) => void;
+  onSyncProfileToSurveyControlPoints?: (profile: CustomTunnelProfileDefinition) => void;
+  onBack: () => void;
 }
 
-/**
- * Helper: Convert sagitta/radius into bulge for a chord of length L
- */
-function radiusToBulge(chordLen: number, radius: number, sign = 1): number {
-  const halfC = chordLen / 2;
-  if (chordLen < 1e-4 || Math.abs(radius) <= halfC) {
-    return (sign >= 0 ? 1 : -1) * 0.5;
-  }
-  const r = Math.max(halfC + 0.01, Math.abs(radius));
-  const sagitta = r - Math.sqrt(Math.max(0, r * r - halfC * halfC));
-  const bulgeMag = (2 * sagitta) / chordLen;
-  return (sign >= 0 ? 1 : -1) * Number(Math.min(2.5, Math.max(0.02, bulgeMag)).toFixed(4));
-}
-
-/**
- * Helper: Build clean initial profile from current geometry
- */
-function createInitialGraphProfile(geometry: TunnelGeometry): CustomTunnelProfileDefinition {
-  if (geometry.customProfile && geometry.customProfile.controlPoints.length >= 2) {
-    return geometry.customProfile;
-  }
-  const w = Number((geometry.width || 9.0).toFixed(2));
-  const h = Number((geometry.height || 7.5).toFixed(2));
-  const wh = Number(Math.min(h - 1.0, geometry.wallHeight || 4.2).toFixed(2));
-  const halfW = Number((w / 2).toFixed(3));
-  const crownSag = Math.max(0.5, h - wh);
-  const crownBulge = Number(((2 * crownSag) / Math.max(1, w)).toFixed(4));
-
-  const pts: ProfileControlPoint[] = [
-    { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
-    { id: 'P2', label: 'P2', x: -halfW, y: wh, role: 'left_wall_top' },
-    { id: 'P3', label: 'P3', x: halfW, y: wh, role: 'right_wall_top' },
-    { id: 'P4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
-  ];
-  const segs: ProfileSegment[] = [
-    { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
-    { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: crownBulge },
-    { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
-    { id: 'S4', fromPointId: 'P4', toPointId: 'P1', type: 'line' },
-  ];
-  return {
-    id: `prof-${Date.now()}`,
-    name: geometry.profileName || `Custom Shape (${w}m × ${h}m)`,
-    category: 'freeform',
-    controlPoints: pts,
-    segments: segs,
-    isClosed: true,
-    version: 'v1.0',
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-/**
- * Normalize control point labels P1, P2, ... Pn and rebuild matching sequential segments
- */
-function normalizeProfileTopology(
-  points: ProfileControlPoint[],
-  existingSegments: ProfileSegment[],
-  isClosed: boolean
-): { controlPoints: ProfileControlPoint[]; segments: ProfileSegment[] } {
-  const renamedPoints = points.map((pt, idx) => ({
-    ...pt,
-    label: `P${idx + 1}`,
-  }));
-
-  if (renamedPoints.length < 2) {
-    return { controlPoints: renamedPoints, segments: [] };
-  }
-
-  const segCount = isClosed ? renamedPoints.length : renamedPoints.length - 1;
-  const nextSegments: ProfileSegment[] = [];
-
-  for (let i = 0; i < segCount; i++) {
-    const a = renamedPoints[i];
-    const b = renamedPoints[(i + 1) % renamedPoints.length];
-    const existing =
-      existingSegments.find((s) => s.fromPointId === a.id && s.toPointId === b.id) ||
-      existingSegments[i];
-
-    nextSegments.push({
-      id: existing?.id || `S${i + 1}`,
-      fromPointId: a.id,
-      toPointId: b.id,
-      type: existing?.type === 'arc' ? 'arc' : 'line',
-      arcBulge: existing?.type === 'arc' ? existing.arcBulge ?? 0.35 : undefined,
-      arcRadiusMeters: existing?.arcRadiusMeters,
-    });
-  }
-
-  return { controlPoints: renamedPoints, segments: nextSegments };
-}
+const COMMON_TUNNEL_VARIANTS: {
+  id: ProfileType;
+  label: string;
+  subtitle: string;
+  defaultW: number;
+  defaultH: number;
+  defaultWallH: number;
+  defaultCrownR: number;
+}[] = [
+  {
+    id: 'd_shaped',
+    label: 'D-Shaped Tunnel',
+    subtitle: 'Vertical side walls + arched roof + flat invert',
+    defaultW: 8.4,
+    defaultH: 7.2,
+    defaultWallH: 4.2,
+    defaultCrownR: 4.35,
+  },
+  {
+    id: 'horseshoe',
+    label: 'Standard Horseshoe',
+    subtitle: 'Curved side walls + semicircular arch crown',
+    defaultW: 8.5,
+    defaultH: 7.5,
+    defaultWallH: 3.8,
+    defaultCrownR: 4.25,
+  },
+  {
+    id: 'modified_horseshoe',
+    label: 'Modified Horseshoe (NATM)',
+    subtitle: 'Curved walls + multi-radius arch for underground headings',
+    defaultW: 9.2,
+    defaultH: 7.8,
+    defaultWallH: 4.0,
+    defaultCrownR: 4.6,
+  },
+  {
+    id: 'circular',
+    label: 'Circular / TBM Profile',
+    subtitle: 'Full circular excavation section',
+    defaultW: 7.6,
+    defaultH: 7.6,
+    defaultWallH: 3.8,
+    defaultCrownR: 3.8,
+  },
+  {
+    id: 'flat_roof',
+    label: 'Rectangular / Box Portal',
+    subtitle: 'Vertical walls + flat roof / portal cut',
+    defaultW: 8.0,
+    defaultH: 6.0,
+    defaultWallH: 5.6,
+    defaultCrownR: 12.0,
+  },
+];
 
 export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorProps> = ({
   geometry,
-  onConfirmGeometry,
+  settings,
+  savedGeometries,
+  initialTab = 'common_variants',
+  onApplyGeometry,
+  onSaveToGeometryLibrary,
+  onDeleteSavedGeometry,
   onBack,
-  onUploadCADFile,
 }) => {
-  const { theme } = useTheme();
-  const isLight = theme === 'light';
-  // Profile + Undo / Redo History Stack
-  const [profile, setProfile] = useState<CustomTunnelProfileDefinition>(() =>
-    createInitialGraphProfile(geometry)
-  );
-  const [pastProfiles, setPastProfiles] = useState<CustomTunnelProfileDefinition[]>([]);
-  const [futureProfiles, setFutureProfiles] = useState<CustomTunnelProfileDefinition[]>([]);
-
-  const updateProfileWithUndo = useCallback(
-    (
-      updater:
-        | CustomTunnelProfileDefinition
-        | ((prev: CustomTunnelProfileDefinition) => CustomTunnelProfileDefinition)
-    ) => {
-      setProfile((prev) => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        setPastProfiles((p) => [...p.slice(-39), prev]);
-        setFutureProfiles([]);
-        return {
-          ...next,
-          updatedAt: new Date().toISOString(),
-        };
-      });
-    },
-    []
+  // Normalize initial tab so legacy 'segment_builder' or 'chainage_schedule' map cleanly
+  const [mainTab, setMainTab] = useState<'common_variants' | 'freeform_canvas' | 'dxf_import'>(
+    () => {
+      if (initialTab === 'dxf_import') return 'dxf_import';
+      if (initialTab === 'freeform_canvas' || initialTab === 'segment_builder')
+        return 'freeform_canvas';
+      return 'common_variants';
+    }
   );
 
-  const handleUndo = useCallback(() => {
-    setPastProfiles((prevPast) => {
-      if (prevPast.length === 0) return prevPast;
-      const previous = prevPast[prevPast.length - 1];
-      setFutureProfiles((prevFuture) => [profile, ...prevFuture.slice(0, 39)]);
-      setProfile(previous);
-      return prevPast.slice(0, -1);
-    });
-  }, [profile]);
+  // ============================================================================
+  // MODE 1: COMMON TUNNEL VARIANTS STATE
+  // ============================================================================
+  const [variantType, setVariantType] = useState<ProfileType>(
+    geometry.crownGeometry || 'd_shaped'
+  );
+  const [varWidth, setVarWidth] = useState<string>(String(geometry.width || 8.4));
+  const [varHeight, setVarHeight] = useState<string>(String(geometry.height || 7.2));
+  const [varWallHeight, setVarWallHeight] = useState<string>(String(geometry.wallHeight || 4.2));
+  const [varCrownRadius, setVarCrownRadius] = useState<string>(
+    String(geometry.crownRadius || 4.35)
+  );
+  const [variantShapeName, setVariantShapeName] = useState<string>(
+    `${settings.locationName || 'Heading'} - ${(geometry.crownGeometry || 'd_shaped')
+      .replace(/_/g, ' ')
+      .toUpperCase()}`
+  );
 
-  const handleRedo = useCallback(() => {
-    setFutureProfiles((prevFuture) => {
-      if (prevFuture.length === 0) return prevFuture;
-      const next = prevFuture[0];
-      setPastProfiles((prevPast) => [...prevPast.slice(-39), profile]);
-      setProfile(next);
-      return prevFuture.slice(1);
-    });
-  }, [profile]);
+  const previewVariantGeometry = useMemo(() => {
+    const w = Math.max(1.5, parseFloat(varWidth) || 8.4);
+    const h = Math.max(1.5, parseFloat(varHeight) || 7.2);
+    const wh = Math.min(h - 0.2, Math.max(0.5, parseFloat(varWallHeight) || 4.2));
+    const cr = Math.max(1.0, parseFloat(varCrownRadius) || w / 2);
+    return createTunnelGeometry(w, h, wh, variantType, cr, 'manual');
+  }, [varWidth, varHeight, varWallHeight, varCrownRadius, variantType]);
 
-  // Keyboard shortcuts for Undo (Ctrl+Z) & Redo (Ctrl+Y)
+  // ============================================================================
+  // MODE 2: CUSTOM SHAPE (EMPTY BY DEFAULT — LINE, ARC, XY POINT)
+  // ============================================================================
+  // Starts completely EMPTY so the user can build from scratch without clutter!
+  const [profile, setProfile] = useState<CustomTunnelProfileDefinition>(() => ({
+    id: `custom-prof-${Date.now()}`,
+    name: `${settings.locationName || 'Custom'} Tunnel Shape`,
+    category: 'freeform_polygon',
+    controlPoints: [],
+    segments: [],
+    isClosed: false,
+    version: 'v1.0',
+    updatedAt: new Date().toISOString(),
+  }));
+
+  const [subMode, setSubMode] = useState<CustomShapeSubMode>('LINE');
+  const [showPropertySidebar, setShowPropertySidebar] = useState<boolean>(true);
+  // Controls whether the canvas is actively waiting for the next point on a rubber-band line
+  const [isDrawingChainActive, setIsDrawingChainActive] = useState<boolean>(true);
+  const [cursorPreviewPt, setCursorPreviewPt] = useState<Point2D | null>(null);
+  const [cursorHoverPt, setCursorHoverPt] = useState<Point2D | null>(null);
+  // Default to 0.01m (exact cursor tip) so clicked points and lines match the cursor 1:1
+  const [snapStepMeters, setSnapStepMeters] = useState<number>(0.01);
+  const [visualSnapEnabled, setVisualSnapEnabled] = useState<boolean>(true);
+  const [activeVisualSnap, setActiveVisualSnap] = useState<{
+    snappedPt: Point2D;
+    kind: 'ENDPOINT' | 'ORIGIN' | 'AXIS_OR_ORTHO';
+    label: string;
+    verticalGuideX?: number;
+    verticalRefPt?: Point2D;
+    horizontalGuideY?: number;
+    horizontalRefPt?: Point2D;
+    isCloseLoopTarget?: boolean;
+  } | null>(null);
+  const [selectedPointId, setSelectedPointId] = useState<string | null>(null);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
+  const [draggingPointId, setDraggingPointId] = useState<string | null>(null);
+  const [draggingArcSegId, setDraggingArcSegId] = useState<string | null>(null);
+  const [statusNote, setStatusNote] = useState<string>(
+    'Canvas is empty and ready. Click on the canvas or enter coordinates on the right to start drawing.'
+  );
+
+  // Line Mode numeric inputs (Start X1,Y1 -> Length & Angle OR End X2,Y2)
+  const [lineStartX, setLineStartX] = useState<string>('-4.20');
+  const [lineStartY, setLineStartY] = useState<string>('0.00');
+  const [lineInputMethod, setLineInputMethod] = useState<'LENGTH_ANGLE' | 'END_XY'>('LENGTH_ANGLE');
+  const [lineLengthM, setLineLengthM] = useState<string>('4.20');
+  const [lineAngleDeg, setLineAngleDeg] = useState<string>('90');
+  const [lineEndX, setLineEndX] = useState<string>('-4.20');
+  const [lineEndY, setLineEndY] = useState<string>('4.20');
+
+  // Arc Mode numeric inputs (Start Point -> Arc Length -> End Point)
+  const [arcStartX, setArcStartX] = useState<string>('-4.20');
+  const [arcStartY, setArcStartY] = useState<string>('4.20');
+  const [arcEndX, setArcEndX] = useState<string>('4.20');
+  const [arcEndY, setArcEndY] = useState<string>('4.20');
+  const [arcLengthM, setArcLengthM] = useState<string>('10.80');
+  const [arcDirectionOutward, setArcDirectionOutward] = useState<boolean>(true);
+  // Track 2-click canvas Arc creation: 1st click = Start Point, 2nd click = End Point
+  const [pendingCanvasArcStartPt, setPendingCanvasArcStartPt] = useState<Point2D | null>(null);
+
+  // XY Point Mode numeric inputs
+  const [xyInputX, setXyInputX] = useState<string>('0.00');
+  const [xyInputY, setXyInputY] = useState<string>('0.00');
+
+  // ============================================================================
+  // MODE 3: DWG / DXF IMPORT STATE
+  // ============================================================================
+  const dxfFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dxfImportedGeometry, setDxfImportedGeometry] = useState<TunnelGeometry | null>(null);
+  const [dxfStatusMessage, setDxfStatusMessage] = useState<string>('');
+
+  // Keep Line and Arc start coordinates synced with the last point in `profile.controlPoints`
+  useEffect(() => {
+    const pts = profile.controlPoints;
+    if (pts.length > 0) {
+      const last = pts[pts.length - 1];
+      setLineStartX(last.x.toFixed(2));
+      setLineStartY(last.y.toFixed(2));
+      setArcStartX(last.x.toFixed(2));
+      setArcStartY(last.y.toFixed(2));
+    }
+  }, [profile.controlPoints]);
+
+  // Whenever the user switches sub-modes or main tabs, stop any dangling rubber-band line!
+  const handleSelectSubMode = (nextMode: CustomShapeSubMode) => {
+    setSubMode(nextMode);
+    setCursorPreviewPt(null);
+    setPendingCanvasArcStartPt(null);
+    if (nextMode === 'LINE') {
+      setIsDrawingChainActive(!profile.isClosed);
+      setSelectedSegmentId(null);
+    } else if (nextMode === 'ARC') {
+      setIsDrawingChainActive(false);
+      setSelectedPointId(null);
+    } else if (nextMode === 'XY_POINT') {
+      setIsDrawingChainActive(false);
+      setSelectedSegmentId(null);
+    } else {
+      setIsDrawingChainActive(false);
+    }
+  };
+
+  // Stop line dragging on Escape or Enter
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        if (e.shiftKey) {
-          e.preventDefault();
-          handleRedo();
-        } else {
-          e.preventDefault();
-          handleUndo();
-        }
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        handleRedo();
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        setIsDrawingChainActive(false);
+        setCursorPreviewPt(null);
+        setPendingCanvasArcStartPt(null);
+        setStatusNote('Stopped active line preview. Click Close Shape when ready.');
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleUndo, handleRedo]);
+  }, []);
 
-  // Active Tool & Selection
-  const [tool, setTool] = useState<GraphToolMode>('select');
-  const [selectedPointId, setSelectedPointId] = useState<string | null>(
-    profile.controlPoints[profile.controlPoints.length - 1]?.id || null
-  );
-  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
-    profile.segments[0]?.id || null
+  const evaluatedCustom = useMemo(() => evaluateCustomProfileGeometry(profile), [profile]);
+
+  const builtCustomGeometry = useMemo(
+    () =>
+      buildAuthoritativeCustomTunnelGeometry(profile, {
+        source: profile.category === 'dxf_import' ? 'dxf' : 'custom_profile',
+      }),
+    [profile]
   );
 
-  // Graph Paper Viewport (Origin + Scale in pixels per meter)
+  // ============================================================================
+  // SVG CANVAS COORDINATE SYSTEM (STRICT 1:1 METER SCALE & EXACT CURSOR CTM)
+  // ============================================================================
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const cadInputRef = useRef<HTMLInputElement | null>(null);
-  const viewW = 920;
-  const viewH = 660;
-  const [pxPerMeter, setPxPerMeter] = useState<number>(46);
-  const [originPx, setOriginPx] = useState<{ x: number; y: number }>({
-    x: 460,
-    y: 520,
+  const [svgViewportSize, setSvgViewportSize] = useState<{ width: number; height: number }>({
+    width: 820,
+    height: 540,
   });
-  const [gridSnapStep, setGridSnapStep] = useState<number>(0.25); // meters (0 = off)
-  const [cursorMeters, setCursorMeters] = useState<Point2D | null>(null);
-
-  const [dragging, setDragging] = useState<{
-    kind: 'point' | 'arc_handle' | 'pan';
-    id: string;
-    startClientX: number;
-    startClientY: number;
-    startOriginX: number;
-    startOriginY: number;
-    snapshotSaved?: boolean;
-  } | null>(null);
-
-  // Input State: Add by Length & Angle OR Add by X, Y
-  const [addMode, setAddMode] = useState<'length_angle' | 'xy'>('length_angle');
-  const [inputLengthM, setInputLengthM] = useState<string>('3.50');
-  const [inputAngleDeg, setInputAngleDeg] = useState<string>('90');
-  const [inputSegType, setInputSegType] = useState<'line' | 'arc'>('line');
-  const [inputArcRadiusM, setInputArcRadiusM] = useState<string>('5.00');
-  const [inputX, setInputX] = useState<string>('0.00');
-  const [inputY, setInputY] = useState<string>('6.00');
-
-  // Corner Round (Fillet) Radius Input
-  const [roundRadiusM, setRoundRadiusM] = useState<string>('1.20');
-
-  // Extendable & Dockable Aside Panel State (Left or Right Dock + Drag Resize Width)
-  const [asideDockSide, setAsideDockSide] = useState<'left' | 'right'>('right');
-  const [asideWidthPx, setAsideWidthPx] = useState<number>(400);
-  const [isAsideCollapsed, setIsAsideCollapsed] = useState<boolean>(false);
-  const [resizingAside, setResizingAside] = useState<{
-    startX: number;
-    startWidth: number;
-  } | null>(null);
-  const [cadProfileCmd, setCadProfileCmd] = useState<string>('');
 
   useEffect(() => {
-    if (!resizingAside) return;
-    const onMove = (ev: MouseEvent) => {
-      const dx = ev.clientX - resizingAside.startX;
-      const delta = asideDockSide === 'right' ? -dx : dx;
-      const nextW = Math.max(280, Math.min(680, Math.round(resizingAside.startWidth + delta)));
-      setAsideWidthPx(nextW);
+    const el = svgRef.current;
+    if (!el) return;
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 40 && rect.height > 40) {
+        setSvgViewportSize((prev) => {
+          const w = Math.round(rect.width);
+          const h = Math.round(rect.height);
+          return prev.width === w && prev.height === h ? prev : { width: w, height: h };
+        });
+      }
     };
-    const onUp = () => setResizingAside(null);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    window.addEventListener('resize', updateSize);
     return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      observer.disconnect();
+      window.removeEventListener('resize', updateSize);
     };
-  }, [resizingAside, asideDockSide]);
+  }, [mainTab]);
 
-  // Easy Basic Regular Shape Generator State (Width, Height & Required Details)
-  const [basicShapeId, setBasicShapeId] = useState<BasicRegularTunnelShapeId>(
-    geometry.crownGeometry === 'horseshoe'
-      ? 'horseshoe'
-      : geometry.crownGeometry === 'circular'
-      ? 'circular'
-      : geometry.crownGeometry === 'flat_arch'
-      ? 'flat_arch'
-      : 'd_shaped'
-  );
-  const [basicWidthM, setBasicWidthM] = useState<string>(String((geometry.width || 9.0).toFixed(2)));
-  const [basicHeightM, setBasicHeightM] = useState<string>(
-    String((geometry.height || 7.5).toFixed(2))
-  );
-  const [basicWallHeightM, setBasicWallHeightM] = useState<string>(
-    String((geometry.wallHeight || 4.2).toFixed(2))
-  );
-  const [basicCornerRadiusM, setBasicCornerRadiusM] = useState<string>('0.00');
-  const [basicTopWidthM, setBasicTopWidthM] = useState<string>(
-    String(((geometry.width || 9.0) * 0.78).toFixed(2))
-  );
-  const [basicInvertDropM, setBasicInvertDropM] = useState<string>('0.00');
-  const [lockCircularDiameter, setLockCircularDiameter] = useState<boolean>(true);
-  const [showBasicShapePanel, setShowBasicShapePanel] = useState<boolean>(true);
+  const viewW = svgViewportSize.width;
+  const viewH = svgViewportSize.height;
 
-  // Left-Click Contextual Quick Action Bar Visibility
-  const [showLeftClickShortcuts, setShowLeftClickShortcuts] = useState<boolean>(true);
+  const canvasMetrics = useMemo(() => {
+    // Fixed, rock-solid engineering world bounds so clicking or dragging a point NEVER shifts the grid underneath the cursor!
+    const minX = -6.5;
+    const maxX = 6.5;
+    const minY = -1.0;
+    const maxY = 9.0;
 
-  const handleApplyBasicRegularShape = useCallback(
-    (overrides?: Partial<{
-      shapeId: BasicRegularTunnelShapeId;
-      width: string;
-      height: string;
-      wallHeight: string;
-      cornerRadius: string;
-      topWidth: string;
-      invertDrop: string;
-    }>) => {
-      const sId = overrides?.shapeId ?? basicShapeId;
-      const wVal = Math.max(1.0, parseFloat(overrides?.width ?? basicWidthM) || 9.0);
-      const hVal =
-        sId === 'circular' && lockCircularDiameter && overrides?.width !== undefined
-          ? wVal
-          : Math.max(1.0, parseFloat(overrides?.height ?? basicHeightM) || 7.5);
-      const whRaw = parseFloat(overrides?.wallHeight ?? basicWallHeightM);
-      const whVal = Number.isFinite(whRaw)
-        ? Math.max(0.4, Math.min(hVal - 0.3, whRaw))
-        : Number((hVal * 0.56).toFixed(2));
-      const cRad = Math.max(0, parseFloat(overrides?.cornerRadius ?? basicCornerRadiusM) || 0);
-      const topW = Math.max(1.0, parseFloat(overrides?.topWidth ?? basicTopWidthM) || wVal * 0.78);
-      const invD = Math.max(0, parseFloat(overrides?.invertDrop ?? basicInvertDropM) || 0);
+    const spanW = maxX - minX; // 13.0m
+    const spanH = maxY - minY; // 10.0m
+    const padPx = 36;
+    const pxPerMeter = Math.min(
+      Math.max(12, (viewW - padPx * 2) / spanW),
+      Math.max(12, (viewH - padPx * 2) / spanH)
+    );
 
-      const crownSag = Math.max(0.3, hVal - whVal);
-      const autoCrownR = Number(((wVal * wVal) / (8 * crownSag) + crownSag / 2).toFixed(2));
+    const centerWorldX = (minX + maxX) / 2; // 0.0m
+    const centerWorldY = (minY + maxY) / 2; // 4.0m
 
-      const nextProf = buildBasicRegularShapeProfile({
-        shapeId: sId,
-        width: wVal,
-        height: hVal,
-        wallHeight: whVal,
-        crownRadius: autoCrownR,
-        cornerRadius: cRad,
-        topWidth: topW,
-        invertDrop: invD,
-      });
+    const worldToScreen = (pt: Point2D): { cx: number; cy: number } => ({
+      cx: Number((viewW / 2 + (pt.x - centerWorldX) * pxPerMeter).toFixed(2)),
+      cy: Number((viewH / 2 - (pt.y - centerWorldY) * pxPerMeter).toFixed(2)),
+    });
 
-      updateProfileWithUndo(nextProf);
-      setSelectedPointId(nextProf.controlPoints[0]?.id || null);
-      setSelectedSegmentId(nextProf.segments[0]?.id || null);
-    },
-    [
-      basicShapeId,
-      basicWidthM,
-      basicHeightM,
-      basicWallHeightM,
-      basicCornerRadiusM,
-      basicTopWidthM,
-      basicInvertDropM,
-      lockCircularDiameter,
-      updateProfileWithUndo,
-    ]
-  );
-
-  // Evaluate current profile geometry
-  const evaluated = useMemo(() => evaluateCustomProfileGeometry(profile), [profile]);
-
-  // Coordinate conversions between Graph Paper (Meters) and SVG Canvas (Pixels)
-  const metersToPx = useCallback(
-    (pt: Point2D) => ({
-      x: originPx.x + pt.x * pxPerMeter,
-      y: originPx.y - pt.y * pxPerMeter,
-    }),
-    [originPx, pxPerMeter]
-  );
-
-  const clientToMeters = useCallback(
-    (clientX: number, clientY: number, applySnap = true): Point2D => {
+    const screenToWorld = (clientX: number, clientY: number): Point2D => {
       const svg = svgRef.current;
       if (!svg) return { x: 0, y: 0 };
-      const rect = svg.getBoundingClientRect();
-      const scaleX = viewW / Math.max(1, rect.width);
-      const scaleY = viewH / Math.max(1, rect.height);
-      const svgX = (clientX - rect.left) * scaleX;
-      const svgY = (clientY - rect.top) * scaleY;
 
-      let mx = (svgX - originPx.x) / pxPerMeter;
-      let my = (originPx.y - svgY) / pxPerMeter;
+      let sx = 0;
+      let sy = 0;
 
-      if (applySnap && gridSnapStep > 0) {
-        mx = Math.round(mx / gridSnapStep) * gridSnapStep;
-        my = Math.round(my / gridSnapStep) * gridSnapStep;
-      }
-      return {
-        x: Number(mx.toFixed(3)),
-        y: Number(my.toFixed(3)),
-      };
-    },
-    [originPx, pxPerMeter, gridSnapStep]
-  );
-
-  // Auto-Fit Graph Viewport to current profile
-  const handleFitGraph = useCallback(() => {
-    if (profile.controlPoints.length === 0) {
-      setOriginPx({ x: viewW / 2, y: viewH * 0.78 });
-      setPxPerMeter(45);
-      return;
-    }
-    const xs = profile.controlPoints.map((p) => p.x);
-    const ys = profile.controlPoints.map((p) => p.y);
-    const minX = Math.min(...xs, -4);
-    const maxX = Math.max(...xs, 4);
-    const minY = Math.min(...ys, 0);
-    const maxY = Math.max(...ys, 6);
-
-    const spanX = Math.max(6, maxX - minX + 4);
-    const spanY = Math.max(6, maxY - minY + 4);
-    const nextScale = Math.max(
-      18,
-      Math.min(85, Math.min((viewW - 140) / spanX, (viewH - 130) / spanY))
-    );
-    const midX = (minX + maxX) / 2;
-    const midY = (minY + maxY) / 2;
-
-    setPxPerMeter(Math.round(nextScale));
-    setOriginPx({
-      x: Math.round(viewW / 2 - midX * nextScale),
-      y: Math.round(viewH / 2 + midY * nextScale),
-    });
-  }, [profile.controlPoints]);
-
-  // Round (Fillet) a Corner Vertex Pi into a smooth tangent circular arc of radius R
-  const handleRoundCornerVertex = useCallback(
-    (pointId: string, radiusMeters: number) => {
-      const pts = profile.controlPoints;
-      const idx = pts.findIndex((p) => p.id === pointId);
-      if (idx === -1 || pts.length < 3) return;
-
-      const prevIdx = (idx - 1 + pts.length) % pts.length;
-      const nextIdx = (idx + 1) % pts.length;
-      const A = pts[prevIdx];
-      const B = pts[idx];
-      const C = pts[nextIdx];
-
-      const ux = A.x - B.x;
-      const uy = A.y - B.y;
-      const vx = C.x - B.x;
-      const vy = C.y - B.y;
-      const lenA = Math.hypot(ux, uy);
-      const lenC = Math.hypot(vx, vy);
-      if (lenA < 0.1 || lenC < 0.1) return;
-
-      const uUnit = { x: ux / lenA, y: uy / lenA };
-      const vUnit = { x: vx / lenC, y: vy / lenC };
-      const dot = Math.max(-0.995, Math.min(0.995, uUnit.x * vUnit.x + uUnit.y * vUnit.y));
-      const interiorAngle = Math.acos(dot); // radians
-      if (interiorAngle < 0.15 || interiorAngle > Math.PI - 0.1) return;
-
-      const halfAngle = interiorAngle / 2;
-      const rawTangentDist = radiusMeters / Math.tan(halfAngle);
-      const maxDist = 0.45 * Math.min(lenA, lenC);
-      const d = Math.min(rawTangentDist, maxDist);
-      const effectiveRadius = d * Math.tan(halfAngle);
-
-      const T1: ProfileControlPoint = {
-        id: `P-${Date.now()}-a`,
-        label: 'P',
-        x: Number((B.x + uUnit.x * d).toFixed(3)),
-        y: Number((B.y + uUnit.y * d).toFixed(3)),
-        role: B.role || 'corner',
-      };
-      const T2: ProfileControlPoint = {
-        id: `P-${Date.now()}-b`,
-        label: 'P',
-        x: Number((B.x + vUnit.x * d).toFixed(3)),
-        y: Number((B.y + vUnit.y * d).toFixed(3)),
-        role: B.role || 'corner',
-      };
-
-      // Cross product determines turn direction so the arc curves outward around the corner
-      const cross = uUnit.x * vUnit.y - uUnit.y * vUnit.x;
-      const sweepAngle = Math.PI - interiorAngle;
-      const bulgeMag = Math.tan(sweepAngle / 4);
-      const bulge = Number(((cross >= 0 ? -1 : 1) * bulgeMag).toFixed(4));
-
-      const newPts = [...pts.slice(0, idx), T1, T2, ...pts.slice(idx + 1)];
-
-      updateProfileWithUndo((prev) => {
-        const norm = normalizeProfileTopology(newPts, prev.segments, prev.isClosed);
-        // Set the segment connecting T1 -> T2 as an arc with the computed bulge
-        const updatedSegs = norm.segments.map((s) =>
-          s.fromPointId === T1.id && s.toPointId === T2.id
-            ? {
-                ...s,
-                type: 'arc' as const,
-                arcBulge: bulge,
-                arcRadiusMeters: Number(effectiveRadius.toFixed(3)),
-              }
-            : s
+      // Use authoritative browser SVG CTM inverse so viewBox, preserveAspectRatio, and CSS scaling match 1:1
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        const pt = svg.createSVGPoint();
+        pt.x = clientX;
+        pt.y = clientY;
+        const transformed = pt.matrixTransform(ctm.inverse());
+        sx = transformed.x;
+        sy = transformed.y;
+      } else {
+        const rect = svg.getBoundingClientRect();
+        const scaleFactor = Math.min(
+          Math.max(1, rect.width) / viewW,
+          Math.max(1, rect.height) / viewH
         );
+        const offsetX = (rect.width - viewW * scaleFactor) / 2;
+        const offsetY = (rect.height - viewH * scaleFactor) / 2;
+        sx = (clientX - rect.left - offsetX) / scaleFactor;
+        sy = (clientY - rect.top - offsetY) / scaleFactor;
+      }
+
+      const rawX = centerWorldX + (sx - viewW / 2) / pxPerMeter;
+      const rawY = centerWorldY - (sy - viewH / 2) / pxPerMeter;
+      const step = snapStepMeters > 0 ? snapStepMeters : 0.01;
+      return {
+        x: Number((Math.round(rawX / step) * step).toFixed(2)),
+        y: Number((Math.round(rawY / step) * step).toFixed(2)),
+      };
+    };
+
+    return {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      pxPerMeter,
+      worldToScreen,
+      screenToWorld,
+    };
+  }, [viewW, viewH, snapStepMeters]);
+
+  // ============================================================================
+  // VISUAL SNAPPING ENGINE (ENDPOINTS, X=0 / Y=0 AXES, ORTHO & SYMMETRY GUIDES)
+  // ============================================================================
+  const evaluateVisualSnap = (
+    rawPt: Point2D,
+    ignorePointId?: string | null
+  ): {
+    pt: Point2D;
+    snapInfo: {
+      snappedPt: Point2D;
+      kind: 'ENDPOINT' | 'ORIGIN' | 'AXIS_OR_ORTHO';
+      label: string;
+      verticalGuideX?: number;
+      verticalRefPt?: Point2D;
+      horizontalGuideY?: number;
+      horizontalRefPt?: Point2D;
+      isCloseLoopTarget?: boolean;
+    } | null;
+  } => {
+    if (!visualSnapEnabled) {
+      return { pt: rawPt, snapInfo: null };
+    }
+
+    const pts = profile.controlPoints.filter((p) => p.id !== ignorePointId);
+    const endpointTolM = 0.28;
+    const axisTolM = 0.18;
+    const orthoTolM = 0.16;
+
+    // 1. Check Endpoint Snap (Highest Priority — especially P1 Close Loop or any vertex)
+    let bestEp: { cp: ProfileControlPoint; dist: number; isFirst: boolean } | null = null;
+    for (let i = 0; i < pts.length; i++) {
+      const cp = pts[i];
+      const d = Math.hypot(rawPt.x - cp.x, rawPt.y - cp.y);
+      if (d <= endpointTolM && (!bestEp || d < bestEp.dist)) {
+        bestEp = {
+          cp,
+          dist: d,
+          isFirst:
+            profile.controlPoints.length >= 3 &&
+            !profile.isClosed &&
+            cp.id === profile.controlPoints[0].id,
+        };
+      }
+    }
+
+    if (bestEp) {
+      const snapped = { x: bestEp.cp.x, y: bestEp.cp.y };
+      return {
+        pt: snapped,
+        snapInfo: {
+          snappedPt: snapped,
+          kind: 'ENDPOINT',
+          label: bestEp.isFirst
+            ? `ENDPOINT ${bestEp.cp.label} (CLOSE SHAPE)`
+            : `ENDPOINT ${bestEp.cp.label} (${snapped.x.toFixed(2)}m, ${snapped.y.toFixed(2)}m)`,
+          verticalGuideX: snapped.x,
+          horizontalGuideY: snapped.y,
+          isCloseLoopTarget: bestEp.isFirst,
+        },
+      };
+    }
+
+    // 2. Check Origin (0.00m, 0.00m) Intersection Snap
+    if (Math.hypot(rawPt.x, rawPt.y) <= 0.22) {
+      const snapped = { x: 0, y: 0 };
+      return {
+        pt: snapped,
+        snapInfo: {
+          snappedPt: snapped,
+          kind: 'ORIGIN',
+          label: 'ORIGIN (X=0.00m, Y=0.00m)',
+          verticalGuideX: 0,
+          horizontalGuideY: 0,
+        },
+      };
+    }
+
+    // 3. Check Independent X (Centerline / Vertical Ortho / Symmetry) & Y (Invert / Horizontal Ortho) Snaps
+    let snappedX = rawPt.x;
+    let snappedY = rawPt.y;
+    let verticalGuideX: number | undefined;
+    let verticalRefPt: Point2D | undefined;
+    let horizontalGuideY: number | undefined;
+    let horizontalRefPt: Point2D | undefined;
+    const labels: string[] = [];
+
+    // 3A. X-Coordinate Snap: Centerline X=0m, Vertical Alignment with existing point, or Mirror Symmetry (-cp.x)
+    if (Math.abs(rawPt.x) <= axisTolM) {
+      snappedX = 0;
+      verticalGuideX = 0;
+      labels.push('CENTERLINE X=0m');
+    } else {
+      let bestVert: { x: number; dist: number; tag: string; refPt: Point2D } | null = null;
+      for (const cp of pts) {
+        const dSame = Math.abs(rawPt.x - cp.x);
+        if (dSame <= orthoTolM && (!bestVert || dSame < bestVert.dist)) {
+          bestVert = {
+            x: cp.x,
+            dist: dSame,
+            tag: `VERT ALIGN ${cp.label} (X=${cp.x.toFixed(2)}m)`,
+            refPt: { x: cp.x, y: cp.y },
+          };
+        }
+        // Mirror symmetry across X=0 centerline
+        if (Math.abs(cp.x) >= 0.25) {
+          const symX = Number((-cp.x).toFixed(2));
+          const dSym = Math.abs(rawPt.x - symX);
+          if (dSym <= orthoTolM && (!bestVert || dSym < bestVert.dist)) {
+            bestVert = {
+              x: symX,
+              dist: dSym,
+              tag: `SYMMETRY ↔ ${cp.label} (X=${symX.toFixed(2)}m)`,
+              refPt: { x: cp.x, y: cp.y },
+            };
+          }
+        }
+      }
+      if (bestVert) {
+        snappedX = bestVert.x;
+        verticalGuideX = bestVert.x;
+        verticalRefPt = bestVert.refPt;
+        labels.push(bestVert.tag);
+      }
+    }
+
+    // 3B. Y-Coordinate Snap: Invert Floor Y=0m or Horizontal Alignment with existing point
+    if (Math.abs(rawPt.y) <= axisTolM) {
+      snappedY = 0;
+      horizontalGuideY = 0;
+      labels.push('INVERT AXIS Y=0m');
+    } else {
+      let bestHoriz: { y: number; dist: number; tag: string; refPt: Point2D } | null = null;
+      for (const cp of pts) {
+        const dSameY = Math.abs(rawPt.y - cp.y);
+        if (dSameY <= orthoTolM && (!bestHoriz || dSameY < bestHoriz.dist)) {
+          bestHoriz = {
+            y: cp.y,
+            dist: dSameY,
+            tag: `HORIZ ALIGN ${cp.label} (Y=${cp.y.toFixed(2)}m)`,
+            refPt: { x: cp.x, y: cp.y },
+          };
+        }
+      }
+      if (bestHoriz) {
+        snappedY = bestHoriz.y;
+        horizontalGuideY = bestHoriz.y;
+        horizontalRefPt = bestHoriz.refPt;
+        labels.push(bestHoriz.tag);
+      }
+    }
+
+    if (labels.length > 0) {
+      const finalPt = {
+        x: Number(snappedX.toFixed(2)),
+        y: Number(snappedY.toFixed(2)),
+      };
+      return {
+        pt: finalPt,
+        snapInfo: {
+          snappedPt: finalPt,
+          kind: 'AXIS_OR_ORTHO',
+          label: labels.join(' + '),
+          verticalGuideX,
+          verticalRefPt,
+          horizontalGuideY,
+          horizontalRefPt,
+        },
+      };
+    }
+
+    return { pt: rawPt, snapInfo: null };
+  };
+
+  // ============================================================================
+  // HELPER: APPEND POINT OR SEGMENT TO CUSTOM PROFILE
+  // ============================================================================
+  const appendLineSegmentPoints = (
+    startPt: Point2D,
+    endPt: Point2D,
+    closeAfter = false
+  ) => {
+    setProfile((prev) => {
+      const pts = [...prev.controlPoints];
+      const segs = [...prev.segments];
+
+      // Check if startPt is already the last point
+      let fromPoint: ProfileControlPoint;
+      if (
+        pts.length > 0 &&
+        Math.hypot(pts[pts.length - 1].x - startPt.x, pts[pts.length - 1].y - startPt.y) < 0.05
+      ) {
+        fromPoint = pts[pts.length - 1];
+      } else {
+        const startId = `P${pts.length + 1}`;
+        fromPoint = {
+          id: startId,
+          label: startId,
+          x: Number(startPt.x.toFixed(2)),
+          y: Number(startPt.y.toFixed(2)),
+          role: 'corner',
+        };
+        pts.push(fromPoint);
+      }
+
+      // Check if endPt closes back onto P1
+      if (
+        pts.length >= 3 &&
+        Math.hypot(pts[0].x - endPt.x, pts[0].y - endPt.y) < 0.28
+      ) {
+        const closeSeg: ProfileSegment = {
+          id: `S-${Date.now()}-close`,
+          fromPointId: fromPoint.id,
+          toPointId: pts[0].id,
+          type: 'line',
+        };
+        setIsDrawingChainActive(false);
+        setCursorPreviewPt(null);
+        setStatusNote(`Closed tunnel shape (${pts.length} points). Ready to save & add pictures.`);
         return {
           ...prev,
-          controlPoints: norm.controlPoints,
-          segments: updatedSegs,
+          controlPoints: pts,
+          segments: [...segs, closeSeg],
+          isClosed: true,
+          updatedAt: new Date().toISOString(),
         };
-      });
-      setSelectedPointId(T1.id);
-    },
-    [profile.controlPoints, updateProfileWithUndo]
-  );
+      }
 
-  // Add a new point at (x, y) connected by line or arc from the last point
-  const handleAddPointAt = useCallback(
-    (pt: Point2D, segType: 'line' | 'arc' = 'line', arcRadius?: number) => {
-      const newPointId = `P-${Date.now()}`;
-      const newPt: ProfileControlPoint = {
-        id: newPointId,
-        label: `P${profile.controlPoints.length + 1}`,
-        x: Number(pt.x.toFixed(3)),
-        y: Number(pt.y.toFixed(3)),
-        role: pt.y <= 0.15 ? 'left_invert' : 'corner',
+      const endId = `P${pts.length + 1}`;
+      const toPoint: ProfileControlPoint = {
+        id: endId,
+        label: endId,
+        x: Number(endPt.x.toFixed(2)),
+        y: Number(endPt.y.toFixed(2)),
+        role: 'corner',
+      };
+      pts.push(toPoint);
+
+      const newSeg: ProfileSegment = {
+        id: `S-${Date.now()}-${pts.length}`,
+        fromPointId: fromPoint.id,
+        toPointId: toPoint.id,
+        type: 'line',
+      };
+      segs.push(newSeg);
+
+      const len = Math.hypot(toPoint.x - fromPoint.x, toPoint.y - fromPoint.y);
+      setStatusNote(
+        `Connected Line ${fromPoint.label} → ${toPoint.label} (Length = ${len.toFixed(2)} m).`
+      );
+
+      return {
+        ...prev,
+        controlPoints: pts,
+        segments: segs,
+        isClosed: closeAfter ? true : prev.isClosed,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  };
+
+  const appendArcSegmentByLength = (
+    startPt: Point2D,
+    endPt: Point2D,
+    targetArcLenMeters: number,
+    outward = true
+  ) => {
+    const chord = Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y);
+    if (chord < 0.1) {
+      setStatusNote('Arc start and end points must be at least 0.10m apart.');
+      return;
+    }
+    const effectiveArcLen = Math.max(chord * 1.02, targetArcLenMeters);
+    const computedBulge = computeBulgeFromArcLength(
+      chord,
+      effectiveArcLen,
+      outward ? 1 : -1
+    );
+
+    setProfile((prev) => {
+      const pts = [...prev.controlPoints];
+      const segs = [...prev.segments];
+
+      let fromPoint: ProfileControlPoint;
+      if (
+        pts.length > 0 &&
+        Math.hypot(pts[pts.length - 1].x - startPt.x, pts[pts.length - 1].y - startPt.y) < 0.05
+      ) {
+        fromPoint = pts[pts.length - 1];
+      } else {
+        const startId = `P${pts.length + 1}`;
+        fromPoint = {
+          id: startId,
+          label: startId,
+          x: Number(startPt.x.toFixed(2)),
+          y: Number(startPt.y.toFixed(2)),
+          role: 'arch_shoulder',
+        };
+        pts.push(fromPoint);
+      }
+
+      // Check if endPt is P1 (closing with an arc)
+      let toPoint: ProfileControlPoint;
+      let shouldClose = prev.isClosed;
+      if (
+        pts.length >= 2 &&
+        Math.hypot(pts[0].x - endPt.x, pts[0].y - endPt.y) < 0.25
+      ) {
+        toPoint = pts[0];
+        shouldClose = true;
+      } else {
+        const endId = `P${pts.length + 1}`;
+        toPoint = {
+          id: endId,
+          label: endId,
+          x: Number(endPt.x.toFixed(2)),
+          y: Number(endPt.y.toFixed(2)),
+          role: 'arch_shoulder',
+        };
+        pts.push(toPoint);
+      }
+
+      const arcSeg: ProfileSegment = {
+        id: `S-arc-${Date.now()}`,
+        fromPointId: fromPoint.id,
+        toPointId: toPoint.id,
+        type: 'arc',
+        arcBulge: computedBulge,
+        arcConvexOutward: outward,
       };
 
-      updateProfileWithUndo((prev) => {
-        const lastPt = prev.controlPoints[prev.controlPoints.length - 1];
-        const nextPts = [...prev.controlPoints, newPt];
-        const norm = normalizeProfileTopology(nextPts, prev.segments, prev.isClosed);
+      setIsDrawingChainActive(false);
+      setCursorPreviewPt(null);
+      setPendingCanvasArcStartPt(null);
+      setSelectedSegmentId(arcSeg.id);
+      setStatusNote(
+        `Created Arc ${fromPoint.label} → ${toPoint.label} (Chord = ${chord.toFixed(
+          2
+        )} m, Arc Length = ${effectiveArcLen.toFixed(2)} m).`
+      );
 
-        if (lastPt && segType === 'arc') {
-          const chord = Math.hypot(newPt.x - lastPt.x, newPt.y - lastPt.y);
-          const r = arcRadius && arcRadius > 0 ? arcRadius : Math.max(chord * 0.75, 3.0);
-          const b = radiusToBulge(chord, r, 1);
-          norm.segments = norm.segments.map((s) =>
-            s.fromPointId === lastPt.id && s.toPointId === newPt.id
-              ? { ...s, type: 'arc', arcBulge: b, arcRadiusMeters: r }
-              : s
-          );
+      return {
+        ...prev,
+        controlPoints: pts,
+        segments: [...segs, arcSeg],
+        isClosed: shouldClose,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  };
+
+  const handleCloseShapeNow = () => {
+    if (profile.controlPoints.length < 3) {
+      setStatusNote('Need at least 3 points to close a tunnel shape.');
+      return;
+    }
+    setProfile((prev) => {
+      const pts = prev.controlPoints;
+      const first = pts[0];
+      const last = pts[pts.length - 1];
+      const hasClosingSeg = prev.segments.some(
+        (s) => s.fromPointId === last.id && s.toPointId === first.id
+      );
+      const nextSegs = hasClosingSeg
+        ? prev.segments
+        : [
+            ...prev.segments,
+            {
+              id: `S-close-${Date.now()}`,
+              fromPointId: last.id,
+              toPointId: first.id,
+              type: 'line' as CustomSegmentType,
+            },
+          ];
+      return {
+        ...prev,
+        segments: nextSegs,
+        isClosed: true,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    // CRITICAL: Immediately stop any rubber-band line from dragging!
+    setIsDrawingChainActive(false);
+    setCursorPreviewPt(null);
+    setPendingCanvasArcStartPt(null);
+    setStatusNote('Tunnel shape closed! Rubber-band line stopped. Ready to save & add pictures.');
+  };
+
+  // ============================================================================
+  // CANVAS POINTER HANDLERS (WITH ZERO ANNOYING DRAG AFTER CLOSE)
+  // ============================================================================
+  const handleCanvasPointerDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (e.button === 2) {
+      // Right-click stops line chain immediately
+      e.preventDefault();
+      setIsDrawingChainActive(false);
+      setCursorPreviewPt(null);
+      setPendingCanvasArcStartPt(null);
+      return;
+    }
+
+    const rawPt = canvasMetrics.screenToWorld(e.clientX, e.clientY);
+    const { pt, snapInfo } = evaluateVisualSnap(rawPt, null);
+    setActiveVisualSnap(snapInfo);
+    const pts = profile.controlPoints;
+
+    // 1. Check if user clicked an Arc Midpoint Handle to adjust arc curve interactively
+    for (const segMetric of evaluatedCustom.segmentMetrics) {
+      if (segMetric.type === 'arc') {
+        const dMid = Math.hypot(
+          segMetric.midHandlePoint.x - pt.x,
+          segMetric.midHandlePoint.y - pt.y
+        );
+        if (dMid <= 0.35) {
+          setSelectedSegmentId(segMetric.segmentId);
+          setDraggingArcSegId(segMetric.segmentId);
+          return;
         }
+      }
+    }
 
-        return {
-          ...prev,
-          controlPoints: norm.controlPoints,
-          segments: norm.segments,
+    // 2. Check if user clicked First Point P1 while drawing a chain -> CLOSE SHAPE & STOP LINE!
+    if (
+      subMode === 'LINE' &&
+      isDrawingChainActive &&
+      !profile.isClosed &&
+      pts.length >= 3
+    ) {
+      const distToFirst = Math.hypot(pts[0].x - pt.x, pts[0].y - pt.y);
+      if (distToFirst <= 0.38) {
+        handleCloseShapeNow();
+        return;
+      }
+    }
+
+    // 3. Check if user clicked an existing vertex to select or drag it
+    const hitPoint = pts.find((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= 0.32);
+    if (hitPoint && (subMode === 'SELECT_EDIT' || profile.isClosed || !isDrawingChainActive)) {
+      setSelectedPointId(hitPoint.id);
+      setDraggingPointId(hitPoint.id);
+      return;
+    }
+
+    // 4. Mode-specific canvas click behavior
+    if (subMode === 'LINE') {
+      if (profile.isClosed) {
+        // Shape is already closed -> do NOT add random points or drag lines unless reopened
+        return;
+      }
+      if (!isDrawingChainActive) {
+        setIsDrawingChainActive(true);
+      }
+      if (pts.length === 0) {
+        const firstCp: ProfileControlPoint = {
+          id: 'P1',
+          label: 'P1',
+          x: pt.x,
+          y: pt.y,
+          role: 'invert_corner',
         };
-      });
-      setSelectedPointId(newPointId);
-    },
-    [profile.controlPoints.length, updateProfileWithUndo]
-  );
-
-  // Add Next Segment by Length (m) and Angle (deg) from Selected Point or Last Point
-  const handleAddByLengthAndAngle = () => {
-    const length = Math.max(0.05, parseFloat(inputLengthM) || 2.0);
-    const angleDeg = parseFloat(inputAngleDeg) || 0;
-    const rad = (angleDeg * Math.PI) / 180;
-
-    const anchorPt =
-      profile.controlPoints.find((p) => p.id === selectedPointId) ||
-      profile.controlPoints[profile.controlPoints.length - 1] || { x: 0, y: 0 };
-
-    const nextX = Number((anchorPt.x + length * Math.cos(rad)).toFixed(3));
-    const nextY = Number((anchorPt.y + length * Math.sin(rad)).toFixed(3));
-    const r = parseFloat(inputArcRadiusM) || length;
-
-    handleAddPointAt({ x: nextX, y: nextY }, inputSegType, r);
-  };
-
-  // Update an existing segment's Length or Angle (moves its endpoint `toPointId`)
-  const handleUpdateSegmentLengthAngle = (
-    segId: string,
-    newLengthMeters: number,
-    newAngleDeg: number
-  ) => {
-    const seg = profile.segments.find((s) => s.id === segId);
-    if (!seg) return;
-    const fromPt = profile.controlPoints.find((p) => p.id === seg.fromPointId);
-    if (!fromPt) return;
-
-    const safeLen = Math.max(0.05, newLengthMeters);
-    const rad = (newAngleDeg * Math.PI) / 180;
-    const nextX = Number((fromPt.x + safeLen * Math.cos(rad)).toFixed(3));
-    const nextY = Number((fromPt.y + safeLen * Math.sin(rad)).toFixed(3));
-
-    updateProfileWithUndo((prev) => ({
-      ...prev,
-      controlPoints: prev.controlPoints.map((pt) =>
-        pt.id === seg.toPointId ? { ...pt, x: nextX, y: nextY } : pt
-      ),
-    }));
-  };
-
-  // Mouse handlers on the Graph Canvas
-  const handleCanvasMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (e.button === 1 || e.shiftKey) {
-      setDragging({
-        kind: 'pan',
-        id: 'pan',
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startOriginX: originPx.x,
-        startOriginY: originPx.y,
-      });
+        setProfile((prev) => ({
+          ...prev,
+          controlPoints: [firstCp],
+          segments: [],
+          isClosed: false,
+        }));
+        setSelectedPointId('P1');
+        setStatusNote(
+          `Placed Start Point P1 (${pt.x.toFixed(2)}m, ${pt.y.toFixed(
+            2
+          )}m). Click next point or enter Length (m) on the right.`
+        );
+      } else {
+        const lastPt = pts[pts.length - 1];
+        appendLineSegmentPoints(lastPt, pt, false);
+      }
       return;
     }
 
-    const ptMeters = clientToMeters(e.clientX, e.clientY, true);
-    if (tool === 'draw_line') {
-      handleAddPointAt(ptMeters, 'line');
-    } else if (tool === 'draw_arc') {
-      handleAddPointAt(ptMeters, 'arc', parseFloat(inputArcRadiusM) || 5.0);
-    } else if (tool === 'select') {
-      // Start panning when clicking empty graph paper
-      setDragging({
-        kind: 'pan',
-        id: 'pan',
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startOriginX: originPx.x,
-        startOriginY: originPx.y,
-      });
-    }
-  };
-
-  const handleCanvasMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const ptMeters = clientToMeters(e.clientX, e.clientY, true);
-    setCursorMeters(ptMeters);
-
-    if (!dragging) return;
-
-    if (dragging.kind === 'pan') {
-      const svg = svgRef.current;
-      if (!svg) return;
-      const rect = svg.getBoundingClientRect();
-      const dx = (e.clientX - dragging.startClientX) * (viewW / Math.max(1, rect.width));
-      const dy = (e.clientY - dragging.startClientY) * (viewH / Math.max(1, rect.height));
-      setOriginPx({
-        x: Math.round(dragging.startOriginX + dx),
-        y: Math.round(dragging.startOriginY + dy),
-      });
+    if (subMode === 'ARC') {
+      if (!pendingCanvasArcStartPt) {
+        // If there is already a last point in the chain, use it or start from clicked point
+        const startPt =
+          pts.length > 0 ? { x: pts[pts.length - 1].x, y: pts[pts.length - 1].y } : pt;
+        if (pts.length === 0) {
+          setPendingCanvasArcStartPt(pt);
+          setArcStartX(pt.x.toFixed(2));
+          setArcStartY(pt.y.toFixed(2));
+          setStatusNote(
+            `Arc Start Point set at (${pt.x.toFixed(2)}m, ${pt.y.toFixed(
+              2
+            )}m). Now click the Arc End Point on the canvas.`
+          );
+        } else {
+          // Connect from last point to clicked End Point with an Arc!
+          const chord = Math.hypot(pt.x - startPt.x, pt.y - startPt.y);
+          const defaultArcLen = Number((chord * 1.22).toFixed(2));
+          setArcEndX(pt.x.toFixed(2));
+          setArcEndY(pt.y.toFixed(2));
+          setArcLengthM(String(defaultArcLen));
+          appendArcSegmentByLength(startPt, pt, defaultArcLen, arcDirectionOutward);
+        }
+      } else {
+        // 2nd click in Arc mode -> End point!
+        const startPt = pendingCanvasArcStartPt;
+        const chord = Math.hypot(pt.x - startPt.x, pt.y - startPt.y);
+        const defaultArcLen = Number((chord * 1.22).toFixed(2));
+        setArcEndX(pt.x.toFixed(2));
+        setArcEndY(pt.y.toFixed(2));
+        setArcLengthM(String(defaultArcLen));
+        appendArcSegmentByLength(startPt, pt, defaultArcLen, arcDirectionOutward);
+      }
       return;
     }
 
-    if (dragging.kind === 'point') {
+    if (subMode === 'XY_POINT') {
+      setXyInputX(pt.x.toFixed(2));
+      setXyInputY(pt.y.toFixed(2));
+      if (!profile.isClosed) {
+        const nextId = `P${pts.length + 1}`;
+        const nextPt: ProfileControlPoint = {
+          id: nextId,
+          label: nextId,
+          x: pt.x,
+          y: pt.y,
+          role: 'corner',
+        };
+        setProfile((prev) => {
+          const prevPts = prev.controlPoints;
+          const prevSegs = prev.segments;
+          const newSegs =
+            prevPts.length > 0
+              ? [
+                  ...prevSegs,
+                  {
+                    id: `S-${Date.now()}`,
+                    fromPointId: prevPts[prevPts.length - 1].id,
+                    toPointId: nextId,
+                    type: 'line' as CustomSegmentType,
+                  },
+                ]
+              : prevSegs;
+          return {
+            ...prev,
+            controlPoints: [...prevPts, nextPt],
+            segments: newSegs,
+          };
+        });
+      }
+    }
+  };
+
+  const handleCanvasPointerMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rawPt = canvasMetrics.screenToWorld(e.clientX, e.clientY);
+    const { pt, snapInfo } = evaluateVisualSnap(rawPt, draggingPointId);
+    setActiveVisualSnap(snapInfo);
+    setCursorHoverPt(pt);
+
+    if (draggingPointId) {
       setProfile((prev) => ({
         ...prev,
-        controlPoints: prev.controlPoints.map((p) =>
-          p.id === dragging.id && !p.locked ? { ...p, x: ptMeters.x, y: ptMeters.y } : p
+        controlPoints: prev.controlPoints.map((cp) =>
+          cp.id === draggingPointId ? { ...cp, x: pt.x, y: pt.y } : cp
         ),
+        updatedAt: new Date().toISOString(),
       }));
       return;
     }
 
-    if (dragging.kind === 'arc_handle') {
-      const rawPt = clientToMeters(e.clientX, e.clientY, false);
-      setProfile((prev) => {
-        const seg = prev.segments.find((s) => s.id === dragging.id);
-        if (!seg) return prev;
-        const a = prev.controlPoints.find((p) => p.id === seg.fromPointId);
-        const b = prev.controlPoints.find((p) => p.id === seg.toPointId);
-        if (!a || !b) return prev;
-        const arcBulge = computeBulgeFromMidpointHandle(a, b, rawPt);
-        return {
+    if (draggingArcSegId) {
+      const segMetric = evaluatedCustom.segmentMetrics.find(
+        (m) => m.segmentId === draggingArcSegId
+      );
+      if (segMetric) {
+        const nextBulge = computeBulgeFromMidpointHandle(
+          segMetric.fromPoint,
+          segMetric.toPoint,
+          pt
+        );
+        setProfile((prev) => ({
           ...prev,
           segments: prev.segments.map((s) =>
-            s.id === seg.id ? { ...s, type: 'arc', arcBulge } : s
+            s.id === draggingArcSegId
+              ? { ...s, type: 'arc', arcBulge: nextBulge, arcRadiusMeters: undefined }
+              : s
           ),
-        };
+          updatedAt: new Date().toISOString(),
+        }));
+      }
+      return;
+    }
+
+    // ONLY update rubber-band preview when actively drawing an unclosed chain!
+    if (
+      !profile.isClosed &&
+      ((subMode === 'LINE' && isDrawingChainActive && profile.controlPoints.length > 0) ||
+        (subMode === 'ARC' && (pendingCanvasArcStartPt !== null || profile.controlPoints.length > 0)))
+    ) {
+      setCursorPreviewPt(pt);
+    } else if (cursorPreviewPt !== null) {
+      setCursorPreviewPt(null);
+    }
+  };
+
+  const handleCanvasPointerUp = () => {
+    setDraggingPointId(null);
+    setDraggingArcSegId(null);
+  };
+
+  const handleCanvasPointerLeave = () => {
+    setCursorHoverPt(null);
+    setActiveVisualSnap(null);
+    setDraggingPointId(null);
+    setDraggingArcSegId(null);
+  };
+
+  // ============================================================================
+  // DWG / DXF UPLOAD HANDLER
+  // ============================================================================
+  const handleUploadCadFile = async (file: File) => {
+    setDxfStatusMessage(`Reading ${file.name}...`);
+    try {
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith('.dxf')) {
+        const text = await file.text();
+        const parsed = parseDXFStringToGeometry(text, file.name);
+        setDxfImportedGeometry(parsed);
+        if (parsed.customProfile) {
+          setProfile(parsed.customProfile);
+        }
+        setDxfStatusMessage(
+          `Loaded ${file.name}: Width ${parsed.width.toFixed(2)}m × Height ${parsed.height.toFixed(
+            2
+          )}m (Wall ${parsed.wallHeight.toFixed(2)}m)`
+        );
+        return;
+      }
+
+      const arrayBuf = await file.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuf);
+      let binary = '';
+      for (let i = 0; i < Math.min(bytes.byteLength, 250000); i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const contentBase64 = btoa(binary);
+      const res = await fetch('/api/geometry/parse-cad', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name, contentBase64 }),
       });
+      if (!res.ok) throw new Error('CAD conversion failed');
+      const data = await res.json();
+      if (data.format === 'dxf' && data.dxfText) {
+        const parsed = parseDXFStringToGeometry(data.dxfText, file.name);
+        setDxfImportedGeometry(parsed);
+        if (parsed.customProfile) setProfile(parsed.customProfile);
+        setDxfStatusMessage(
+          `Loaded ${file.name}: ${parsed.width.toFixed(2)}m W × ${parsed.height.toFixed(2)}m H`
+        );
+      } else {
+        const converted = createTunnelGeometry(
+          data.width || 8.4,
+          data.height || 7.2,
+          data.wallHeight || 4.2,
+          'd_shaped',
+          (data.width || 8.4) / 2,
+          'dwg',
+          file.name
+        );
+        setDxfImportedGeometry(converted);
+        setDxfStatusMessage(
+          `Loaded DWG (${file.name}): ${converted.width.toFixed(2)}m W × ${converted.height.toFixed(
+            2
+          )}m H`
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unable to parse CAD file';
+      setDxfStatusMessage(`Error: ${msg}`);
     }
   };
 
-  const handleCanvasMouseUp = () => {
-    setDragging(null);
-  };
-
-  // Compute grid lines & scale ticks in real-world meters
-  const graphGrid = useMemo(() => {
-    const minX = Math.floor(-originPx.x / pxPerMeter) - 1;
-    const maxX = Math.ceil((viewW - originPx.x) / pxPerMeter) + 1;
-    const minY = Math.floor((originPx.y - viewH) / pxPerMeter) - 1;
-    const maxY = Math.ceil(originPx.y / pxPerMeter) + 1;
-
-    const majorStep = pxPerMeter < 26 ? 2 : 1;
-    const minorStep = pxPerMeter >= 40 ? 0.25 : 0.5;
-
-    const vMinor: number[] = [];
-    const vMajor: number[] = [];
-    for (let x = Math.floor(minX / minorStep) * minorStep; x <= maxX; x += minorStep) {
-      const rx = Number(x.toFixed(2));
-      if (Math.abs(rx % majorStep) < 1e-3) {
-        vMajor.push(rx);
-      } else {
-        vMinor.push(rx);
-      }
+  // ============================================================================
+  // SAVE & PROCEED TO ADD PICTURES
+  // ============================================================================
+  const handleConfirmAndGoToPhotos = () => {
+    if (mainTab === 'common_variants') {
+      const saveName =
+        variantShapeName.trim() ||
+        `${settings.locationName || 'Tunnel'} (${previewVariantGeometry.width}m×${
+          previewVariantGeometry.height
+        }m)`;
+      onSaveToGeometryLibrary(saveName, previewVariantGeometry);
+      onApplyGeometry(previewVariantGeometry, true);
+      return;
     }
 
-    const hMinor: number[] = [];
-    const hMajor: number[] = [];
-    for (let y = Math.floor(minY / minorStep) * minorStep; y <= maxY; y += minorStep) {
-      const ry = Number(y.toFixed(2));
-      if (Math.abs(ry % majorStep) < 1e-3) {
-        hMajor.push(ry);
-      } else {
-        hMinor.push(ry);
-      }
+    if (mainTab === 'dxf_import') {
+      const targetGeom = dxfImportedGeometry || previewVariantGeometry;
+      const saveName =
+        targetGeom.cadFileName ||
+        `${settings.locationName || 'Tunnel'} CAD (${targetGeom.width}m×${targetGeom.height}m)`;
+      onSaveToGeometryLibrary(saveName, targetGeom);
+      onApplyGeometry(targetGeom, true);
+      return;
     }
 
-    return { vMinor, vMajor, hMinor, hMajor };
-  }, [originPx, pxPerMeter]);
-
-  // Sampled polygon path in SVG pixels
-  const profileSvgPath = useMemo(() => {
-    if (evaluated.crossSectionPoints.length === 0) return '';
-    const cmds = evaluated.crossSectionPoints.map((pt, i) => {
-      const p = metersToPx(pt);
-      return `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+    // Custom Shape mode
+    if (profile.controlPoints.length < 3) {
+      setStatusNote('Please create at least 3 points to form a valid tunnel shape before continuing.');
+      return;
+    }
+    const closedProfile: CustomTunnelProfileDefinition = {
+      ...profile,
+      isClosed: true,
+      updatedAt: new Date().toISOString(),
+    };
+    const finalCustomGeom = buildAuthoritativeCustomTunnelGeometry(closedProfile, {
+      source: 'custom_profile',
     });
-    if (profile.isClosed && cmds.length >= 3) cmds.push('Z');
-    return cmds.join(' ');
-  }, [evaluated.crossSectionPoints, metersToPx, profile.isClosed]);
-
-  // Selected Point & Selected Segment objects
-  const selectedPoint = useMemo(
-    () => profile.controlPoints.find((p) => p.id === selectedPointId) || null,
-    [profile.controlPoints, selectedPointId]
-  );
-
-  const selectedSegmentMetrics = useMemo(
-    () => evaluated.segmentMetrics.find((m) => m.segmentId === selectedSegmentId) || null,
-    [evaluated.segmentMetrics, selectedSegmentId]
-  );
+    const saveName =
+      closedProfile.name.trim() ||
+      `${settings.locationName || 'Custom'} (${finalCustomGeom.width}m×${finalCustomGeom.height}m)`;
+    onSaveToGeometryLibrary(saveName, finalCustomGeom);
+    onApplyGeometry(finalCustomGeom, true);
+  };
 
   const selectedSegment = useMemo(
     () => profile.segments.find((s) => s.id === selectedSegmentId) || null,
     [profile.segments, selectedSegmentId]
   );
-
-  // Live polar readout from last point to cursor
-  const livePolarFromLast = useMemo(() => {
-    const lastPt = profile.controlPoints[profile.controlPoints.length - 1];
-    if (!lastPt || !cursorMeters) return null;
-    const dx = cursorMeters.x - lastPt.x;
-    const dy = cursorMeters.y - lastPt.y;
-    const len = Math.hypot(dx, dy);
-    const deg = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
-    return { lastPt, len, deg };
-  }, [profile.controlPoints, cursorMeters]);
-
-  // Execute AutoCAD command inside Draw Tunnel Block Editor
-  const handleExecuteProfileCadCmd = (raw: string) => {
-    const cmd = raw.trim().toUpperCase();
-    if (!cmd) return;
-    if (cmd === 'LINE' || cmd === 'PLINE' || cmd === 'L' || cmd === 'PL') {
-      setTool('draw_line');
-    } else if (cmd === 'ARC' || cmd === 'A') {
-      setTool('draw_arc');
-    } else if (cmd === 'FILLET' || cmd === 'ROUND' || cmd === 'F') {
-      setTool('round_corner');
-    } else if (cmd === 'SELECT' || cmd === 'ESC') {
-      setTool('select');
-    } else if (cmd === 'CLOSE' || cmd === 'C') {
-      updateProfileWithUndo((prev) => {
-        const nextClosed = !prev.isClosed;
-        const norm = normalizeProfileTopology(prev.controlPoints, prev.segments, nextClosed);
-        return { ...prev, isClosed: nextClosed, controlPoints: norm.controlPoints, segments: norm.segments };
-      });
-    } else if (cmd === 'DSHAPE' || cmd === 'D') {
-      setBasicShapeId('d_shaped');
-      handleApplyBasicRegularShape({ shapeId: 'd_shaped' });
-    } else if (cmd === 'HORSESHOE') {
-      setBasicShapeId('horseshoe');
-      handleApplyBasicRegularShape({ shapeId: 'horseshoe' });
-    } else if (cmd === 'CIRCLE' || cmd === 'TBM') {
-      setBasicShapeId('circular');
-      handleApplyBasicRegularShape({ shapeId: 'circular' });
-    } else if (cmd === 'RECT' || cmd === 'BOX') {
-      setBasicShapeId('rectangular');
-      handleApplyBasicRegularShape({ shapeId: 'rectangular' });
-    } else if (cmd === 'ZOOM' || cmd === 'FIT' || cmd === 'ZE') {
-      handleFitGraph();
-    } else if (cmd === 'U' || cmd === 'UNDO') {
-      handleUndo();
-    } else if (cmd === 'REDO') {
-      handleRedo();
-    }
-    setCadProfileCmd('');
-  };
+  const selectedSegmentMetrics = useMemo(
+    () => evaluatedCustom.segmentMetrics.find((m) => m.segmentId === selectedSegmentId) || null,
+    [evaluatedCustom.segmentMetrics, selectedSegmentId]
+  );
 
   return (
-    <div className="h-dvh w-full flex flex-col bg-[#090D16] text-slate-100 font-mono select-none overflow-hidden">
+    <div className="h-dvh w-full bg-slate-50 text-slate-900 flex flex-col overflow-hidden select-none">
       {/* ====================================================================
-          AUTOCAD 2026 BLOCK EDITOR — TOP APPLICATION BAR & RIBBON
+          TOP HEADER BAR: PROJECT / LOCATION BADGE + 3 SIMPLE SHAPE TABS
          ==================================================================== */}
-      <header className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-[#0E131D] border-b border-[#253047] shrink-0">
-        <div className="flex flex-wrap items-center gap-2">
+      <header className="shrink-0 px-4 py-2.5 bg-white border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+        <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={onBack}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-xs bg-gradient-to-b from-[#0284C7] to-[#0369A1] hover:from-[#0EA5E9] hover:to-[#0284C7] text-white border border-cyan-400/50 text-xs font-bold cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-mono border border-slate-300 cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            ESWA CAD
+            Back to Project &amp; Location
           </button>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs sm:text-sm font-bold text-cyan-300 tracking-wider">
-              BLOCK EDITOR: TUNNEL CROSS-SECTION (W×H)
-            </span>
-            <span className="hidden md:inline-block px-2 py-0.5 rounded-xs bg-[#161F30] text-emerald-300 border border-[#2B3B59] text-[10px]">
-              SPAN: {evaluated.width.toFixed(2)}m W × {evaluated.height.toFixed(2)}m H · AREA:{' '}
-              {evaluated.designAreaSqMeters.toFixed(2)} m²
-            </span>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono uppercase tracking-wider text-sky-700 font-bold">
+                STEP 2 · CREATE TUNNEL SHAPE &amp; SIZE
+              </span>
+              <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[11px] font-mono text-emerald-800">
+                {settings.projectName || 'Project'} · {settings.locationName || settings.tunnelName || 'Location'}
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* Quick Template / Preset Loader + DXF Upload + Confirm Button */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <select
-            value=""
-            onChange={(e) => {
-              const val = e.target.value;
-              if (!val) return;
-              if (val === 'blank') {
-                updateProfileWithUndo({
-                  ...profile,
-                  name: 'Custom Graph Profile',
-                  controlPoints: [{ id: 'P1', label: 'P1', x: -4.5, y: 0, role: 'left_invert' }],
-                  segments: [],
-                  isClosed: false,
-                });
-                setTool('draw_line');
-                return;
-              }
-              const found = CUSTOM_PROFILE_PRESETS.find((p) => p.id === val);
-              if (found) {
-                const nextP = found.createProfile();
-                updateProfileWithUndo(nextP);
-                setSelectedPointId(nextP.controlPoints[0]?.id || null);
-                setSelectedSegmentId(nextP.segments[0]?.id || null);
-              }
-            }}
-            className="px-2 py-1 bg-[#141C2B] border border-[#2B3A55] rounded-xs text-xs text-cyan-300 cursor-pointer"
-          >
-            <option value="">Insert CAD Block / Preset...</option>
-            <option value="blank">Blank Graph (Start from P1)</option>
-            {CUSTOM_PROFILE_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-
-          <input
-            ref={cadInputRef}
-            type="file"
-            accept=".dxf,.dwg"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onUploadCADFile(f);
-              e.target.value = '';
-            }}
-          />
+        {/* 3 Clear Shape Creation Tabs */}
+        <div className="flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-xl">
           <button
             type="button"
-            onClick={() => cadInputRef.current?.click()}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-xs bg-[#161F30] hover:bg-slate-700 text-slate-200 border border-[#2B3A55] text-xs cursor-pointer"
-            title="DXFIN — Import DXF/DWG profile onto graph"
+            onClick={() => setMainTab('common_variants')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer ${
+              mainTab === 'common_variants'
+                ? 'bg-sky-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
           >
-            <Upload className="w-3.5 h-3.5 text-cyan-400" />
-            Import DXF
+            1. Common Tunnel Variants
           </button>
-
           <button
             type="button"
-            onClick={() => {
-              const built = buildAuthoritativeCustomTunnelGeometry(profile);
-              onConfirmGeometry(built, true);
-            }}
-            disabled={profile.controlPoints.length < 3}
-            className="flex items-center gap-1.5 px-3.5 py-1 rounded-xs bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-bold text-xs border border-emerald-400/50 shadow-md cursor-pointer"
+            onClick={() => setMainTab('freeform_canvas')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer ${
+              mainTab === 'freeform_canvas'
+                ? 'bg-sky-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
           >
-            <CheckCircle2 className="w-4 h-4" />
-            BCLOSE &amp; Apply Tunnel Shape
-            <ArrowRight className="w-3.5 h-3.5" />
+            2. Custom Shape (Line / Arc / XY)
+          </button>
+          <button
+            type="button"
+            onClick={() => setMainTab('dxf_import')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer ${
+              mainTab === 'dxf_import'
+                ? 'bg-sky-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            3. Import DWG / DXF
           </button>
         </div>
+
+        <button
+          type="button"
+          onClick={handleConfirmAndGoToPhotos}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold shadow-md cursor-pointer"
+        >
+          <CheckCircle2 className="w-4 h-4" />
+          Save Shape &amp; Go to Add Pictures
+          <ArrowRight className="w-4 h-4" />
+        </button>
       </header>
 
       {/* ====================================================================
-          MAIN BODY: GRAPH PAPER WITH SCALES + EXTENDABLE LEFT/RIGHT INSPECTOR
+          TAB 1: COMMON TUNNEL VARIANTS (SIMPLE, FAST & ACCURATE)
          ==================================================================== */}
-      <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
-        {/* LEFT/MAIN COLUMN: GRAPH PAPER STAGE + TOP DRAWING TOOLBAR */}
-        <div
-          className={`flex-1 flex flex-col min-w-0 min-h-0 relative bg-[#070B12] ${
-            asideDockSide === 'left' ? 'lg:order-2' : 'lg:order-1'
-          }`}
-        >
-          {/* Simple, Clean Drawing Toolbar */}
-          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-[#0E1524] border-b border-slate-800 text-xs">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setTool('select')}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded font-semibold cursor-pointer ${
-                  tool === 'select'
-                    ? 'bg-cyan-600 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:text-white'
-                }`}
-              >
-                <MousePointer className="w-3.5 h-3.5" />
-                Select / Move
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTool('draw_line')}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded font-semibold cursor-pointer ${
-                  tool === 'draw_line'
-                    ? 'bg-cyan-600 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:text-white'
-                }`}
-              >
-                <Plus className="w-3.5 h-3.5" />
-                + Line Point
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTool('draw_arc')}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded font-semibold cursor-pointer ${
-                  tool === 'draw_arc'
-                    ? 'bg-amber-600 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:text-white'
-                }`}
-              >
-                <Plus className="w-3.5 h-3.5" />
-                + Arc Point
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTool('round_corner')}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded font-semibold cursor-pointer ${
-                  tool === 'round_corner'
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-slate-800 text-slate-300 hover:text-white'
-                }`}
-                title="Click any corner point on the graph to round/fillet it with Radius R"
-              >
-                <CornerUpRight className="w-3.5 h-3.5" />
-                Round Corner (R={roundRadiusM}m)
-              </button>
-
-              <div className="h-4 w-px bg-slate-700 mx-1" />
-
-              {/* Undo / Redo Buttons */}
-              <button
-                type="button"
-                onClick={handleUndo}
-                disabled={pastProfiles.length === 0}
-                className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 border border-slate-700 cursor-pointer"
-                title="Undo (Ctrl+Z)"
-              >
-                <Undo2 className="w-3.5 h-3.5 text-cyan-400" />
-                Undo ({pastProfiles.length})
-              </button>
-
-              <button
-                type="button"
-                onClick={handleRedo}
-                disabled={futureProfiles.length === 0}
-                className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 border border-slate-700 cursor-pointer"
-                title="Redo (Ctrl+Y)"
-              >
-                <Redo2 className="w-3.5 h-3.5 text-cyan-400" />
-                Redo
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  updateProfileWithUndo((prev) => {
-                    const nextClosed = !prev.isClosed;
-                    const norm = normalizeProfileTopology(
-                      prev.controlPoints,
-                      prev.segments,
-                      nextClosed
-                    );
-                    return {
-                      ...prev,
-                      isClosed: nextClosed,
-                      controlPoints: norm.controlPoints,
-                      segments: norm.segments,
-                    };
-                  })
-                }
-                className={`px-2.5 py-1 rounded border text-[11px] font-semibold cursor-pointer ${
-                  profile.isClosed
-                    ? 'bg-emerald-950/70 text-emerald-300 border-emerald-600/50'
-                    : 'bg-amber-950/70 text-amber-300 border-amber-600/50'
-                }`}
-              >
-                {profile.isClosed ? 'Closed Shape' : 'Open Polyline (Click to Close)'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  updateProfileWithUndo({
-                    ...profile,
-                    controlPoints: [{ id: 'P1', label: 'P1', x: -4.0, y: 0, role: 'left_invert' }],
-                    segments: [],
-                    isClosed: false,
-                  });
-                  setSelectedPointId('P1');
-                  setTool('draw_line');
-                }}
-                className="flex items-center gap-1 px-2 py-1 rounded bg-rose-950/60 hover:bg-rose-900/80 text-rose-200 border border-rose-700/50 text-[11px] cursor-pointer"
-                title="Clear all points and start fresh on the graph"
-              >
-                <RotateCcw className="w-3 h-3" />
-                Clear
-              </button>
+      {mainTab === 'common_variants' && (
+        <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-5 p-5 overflow-y-auto">
+          {/* Left 7 Cols: Variant Cards + Dimension Inputs */}
+          <div className="lg:col-span-7 space-y-5">
+            <div className="p-4 rounded-xl bg-[#111827] border border-slate-800 space-y-3">
+              <div className="text-xs font-mono uppercase tracking-wider text-cyan-400 font-bold">
+                1. Choose Common Tunnel Variant
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {COMMON_TUNNEL_VARIANTS.map((v) => {
+                  const active = variantType === v.id;
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      onClick={() => {
+                        setVariantType(v.id);
+                        setVarWidth(String(v.defaultW));
+                        setVarHeight(String(v.defaultH));
+                        setVarWallHeight(String(v.defaultWallH));
+                        setVarCrownRadius(String(v.defaultCrownR));
+                        setVariantShapeName(
+                          `${settings.locationName || 'Heading'} - ${v.label} (${v.defaultW}m×${
+                            v.defaultH
+                          }m)`
+                        );
+                      }}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                        active
+                          ? 'bg-cyan-950/60 border-cyan-500 text-white shadow-sm'
+                          : 'bg-slate-900/80 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-sm">{v.label}</span>
+                        <span className="text-[11px] font-mono text-cyan-300">
+                          {v.defaultW}m × {v.defaultH}m
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">{v.subtitle}</p>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
-            {/* Grid Snap & Zoom Controls */}
-            <div className="flex items-center gap-2">
-              <label className="flex items-center gap-1 text-[11px] text-slate-300">
-                <span>Grid Snap:</span>
-                <select
-                  value={gridSnapStep}
-                  onChange={(e) => setGridSnapStep(Number(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-cyan-300"
-                >
-                  <option value={0}>Off (Free)</option>
-                  <option value={0.05}>0.05 m</option>
-                  <option value={0.1}>0.10 m</option>
-                  <option value={0.25}>0.25 m</option>
-                  <option value={0.5}>0.50 m</option>
-                  <option value={1.0}>1.00 m</option>
-                </select>
+            <div className="p-4 rounded-xl bg-[#111827] border border-slate-800 space-y-4">
+              <div className="text-xs font-mono uppercase tracking-wider text-cyan-400 font-bold">
+                2. Enter Exact Tunnel Size (1m Engineering Scale)
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <label className="space-y-1">
+                  <span className="text-xs text-slate-300 font-medium">Span Width W (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="1.5"
+                    value={varWidth}
+                    onChange={(e) => {
+                      setVarWidth(e.target.value);
+                      const w = parseFloat(e.target.value);
+                      if (!Number.isNaN(w) && w > 1) {
+                        setVarCrownRadius((w / 2).toFixed(2));
+                      }
+                    }}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono text-sm text-white"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs text-slate-300 font-medium">Total Height H (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="1.5"
+                    value={varHeight}
+                    onChange={(e) => setVarHeight(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono text-sm text-white"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs text-slate-300 font-medium">
+                    Left &amp; Right Wall H (m)
+                  </span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.5"
+                    value={varWallHeight}
+                    onChange={(e) => setVarWallHeight(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono text-sm text-white"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs text-slate-300 font-medium">Crown Radius R (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="1.0"
+                    value={varCrownRadius}
+                    onChange={(e) => setVarCrownRadius(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono text-sm text-white"
+                  />
+                </label>
+              </div>
+
+              <label className="block space-y-1 pt-1">
+                <span className="text-xs text-slate-400">
+                  Shape Name (Saved automatically for {settings.locationName || 'this location'})
+                </span>
+                <input
+                  type="text"
+                  value={variantShapeName}
+                  onChange={(e) => setVariantShapeName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono text-xs text-cyan-200"
+                />
               </label>
-
-              <button
-                type="button"
-                onClick={() => setPxPerMeter((s) => Math.min(110, Math.round(s * 1.2)))}
-                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200"
-                title="Zoom In"
-              >
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setPxPerMeter((s) => Math.max(14, Math.round(s / 1.2)))}
-                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200"
-                title="Zoom Out"
-              >
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleFitGraph}
-                className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px] cursor-pointer"
-                title="Center & Fit Shape on Graph"
-              >
-                <Maximize2 className="w-3 h-3" />
-                Fit
-              </button>
-
-              <div className="h-4 w-px bg-slate-700 mx-0.5" />
-
-              {/* Side Panel Dock Left / Right & Expand/Collapse Controls */}
-              <button
-                type="button"
-                onClick={() => setAsideDockSide((prev) => (prev === 'right' ? 'left' : 'right'))}
-                className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-[11px] cursor-pointer"
-                title="Move / Extend Tools Panel to Left or Right Side"
-              >
-                {asideDockSide === 'right' ? (
-                  <>
-                    <PanelLeft className="w-3 h-3" />
-                    Panel → Left
-                  </>
-                ) : (
-                  <>
-                    <PanelRight className="w-3 h-3" />
-                    Panel → Right
-                  </>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsAsideCollapsed((prev) => !prev)}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] cursor-pointer ${
-                  isAsideCollapsed
-                    ? 'bg-cyan-600 text-white border-cyan-400 font-bold'
-                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                }`}
-                title="Expand or Collapse the Side Shape & Coordinates Panel"
-              >
-                <Columns className="w-3 h-3" />
-                {isAsideCollapsed ? 'Show Panel' : 'Hide Panel'}
-              </button>
             </div>
           </div>
 
-          {/* Interactive SVG Graph Paper with X and Y Scales */}
-          <div className="flex-1 relative min-h-0 overflow-hidden">
-            <svg
-              ref={svgRef}
-              viewBox={`0 0 ${viewW} ${viewH}`}
-              preserveAspectRatio="xMidYMid meet"
-              onMouseDown={handleCanvasMouseDown}
-              onMouseMove={handleCanvasMouseMove}
-              onMouseUp={handleCanvasMouseUp}
-              onWheel={(e) => {
-                e.preventDefault();
-                const factor = e.deltaY < 0 ? 1.12 : 0.89;
-                setPxPerMeter((s) => Math.max(14, Math.min(110, Math.round(s * factor))));
-              }}
-              className={`w-full h-full ${
-                tool === 'draw_line' || tool === 'draw_arc'
-                  ? 'cursor-crosshair'
-                  : tool === 'round_corner'
-                  ? 'cursor-pointer'
-                  : 'cursor-grab active:cursor-grabbing'
-              }`}
-            >
-              {/* 1. Minor Grid Lines */}
-              {graphGrid.vMinor.map((mx) => {
-                const px = originPx.x + mx * pxPerMeter;
-                return (
+          {/* Right 5 Cols: Scaled 1m Preview */}
+          <div className="lg:col-span-5 flex flex-col p-4 rounded-xl bg-[#111827] border border-slate-800">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <span className="text-xs font-mono font-bold text-cyan-300">
+                SCALED 1:1 CROSS-SECTION PREVIEW
+              </span>
+              <span className="text-xs font-mono text-emerald-400">
+                Area: {(previewVariantGeometry.designAreaSqMeters || 0).toFixed(2)} m²
+              </span>
+            </div>
+            <div className="flex-1 flex items-center justify-center py-4 bg-slate-50 rounded-lg border border-slate-200 my-2">
+              <svg viewBox="-7 -1.5 14 11" className="w-full max-h-[340px]">
+                {/* 1m Grid */}
+                {[-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6].map((gx) => (
                   <line
-                    key={`vmin-${mx}`}
-                    x1={px}
+                    key={`gx-${gx}`}
+                    x1={gx}
                     y1={0}
-                    x2={px}
-                    y2={viewH - 28}
-                    stroke={isLight ? '#E2E8F0' : '#162033'}
-                    strokeWidth="0.8"
+                    x2={gx}
+                    y2={9}
+                    stroke={gx === 0 ? 'rgba(2,132,199,0.5)' : 'rgba(100,116,139,0.2)'}
+                    strokeWidth="0.04"
                   />
-                );
-              })}
-              {graphGrid.hMinor.map((my) => {
-                const py = originPx.y - my * pxPerMeter;
-                return (
+                ))}
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((gy) => (
                   <line
-                    key={`hmin-${my}`}
-                    x1={44}
-                    y1={py}
-                    x2={viewW}
-                    y2={py}
-                    stroke={isLight ? '#E2E8F0' : '#162033'}
-                    strokeWidth="0.8"
+                    key={`gy-${gy}`}
+                    x1={-6}
+                    y1={8 - gy}
+                    x2={6}
+                    y2={8 - gy}
+                    stroke={gy === 0 ? 'rgba(2,132,199,0.5)' : 'rgba(100,116,139,0.2)'}
+                    strokeWidth="0.04"
                   />
-                );
-              })}
-
-              {/* 2. Major Meter Grid Lines */}
-              {graphGrid.vMajor.map((mx) => {
-                const px = originPx.x + mx * pxPerMeter;
-                const isZero = Math.abs(mx) < 1e-3;
-                return (
-                  <line
-                    key={`vmaj-${mx}`}
-                    x1={px}
-                    y1={0}
-                    x2={px}
-                    y2={viewH - 28}
-                    stroke={isZero ? '#0284C7' : isLight ? '#CBD5E1' : '#1E2D47'}
-                    strokeWidth={isZero ? '1.6' : '1.1'}
-                    strokeDasharray={isZero ? '6,3' : undefined}
-                  />
-                );
-              })}
-              {graphGrid.hMajor.map((my) => {
-                const py = originPx.y - my * pxPerMeter;
-                const isZero = Math.abs(my) < 1e-3;
-                return (
-                  <line
-                    key={`hmaj-${my}`}
-                    x1={44}
-                    y1={py}
-                    x2={viewW}
-                    y2={py}
-                    stroke={isZero ? '#10B981' : isLight ? '#CBD5E1' : '#1E2D47'}
-                    strokeWidth={isZero ? '1.6' : '1.1'}
-                  />
-                );
-              })}
-
-              {/* 3. Excavated Tunnel Profile Fill & Vector Boundary */}
-              {profileSvgPath && (
-                <path
-                  d={profileSvgPath}
-                  fill={
-                    profile.isClosed
-                      ? isLight
-                        ? 'rgba(2, 132, 199, 0.12)'
-                        : 'rgba(14, 165, 233, 0.13)'
-                      : 'none'
-                  }
-                  stroke={isLight ? '#0284C7' : '#38BDF8'}
-                  strokeWidth="2.8"
-                  strokeLinejoin="round"
+                ))}
+                <polygon
+                  points={previewVariantGeometry.crossSectionPoints
+                    .map((p) => `${p.x.toFixed(2)},${(8 - p.y).toFixed(2)}`)
+                    .join(' ')}
+                  fill="rgba(2, 132, 199, 0.14)"
+                  stroke="#0284C7"
+                  strokeWidth="0.12"
                 />
-              )}
+                <text
+                  x="0"
+                  y="9.1"
+                  textAnchor="middle"
+                  fontSize="0.45"
+                  fill="#0F172A"
+                  fontWeight="700"
+                  fontFamily="IBM Plex Mono, monospace"
+                >
+                  Width = {previewVariantGeometry.width.toFixed(2)}m · Height ={' '}
+                  {previewVariantGeometry.height.toFixed(2)}m · Wall ={' '}
+                  {previewVariantGeometry.wallHeight.toFixed(2)}m
+                </text>
+              </svg>
+            </div>
+            <button
+              type="button"
+              onClick={handleConfirmAndGoToPhotos}
+              className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              Use This Tunnel Shape &amp; Go to Add Pictures →
+            </button>
+          </div>
+        </div>
+      )}
 
-              {/* 4. Live Rubber-Band Line when Drawing */}
-              {(tool === 'draw_line' || tool === 'draw_arc') && livePolarFromLast && cursorMeters && (
-                <g>
-                  {(() => {
-                    const aPx = metersToPx(livePolarFromLast.lastPt);
-                    const bPx = metersToPx(cursorMeters);
-                    return (
-                      <>
+      {/* ====================================================================
+          TAB 2: CUSTOM SHAPE (EMPTY CANVAS + LINE MODE / ARC MODE / XY POINT)
+         ==================================================================== */}
+      {mainTab === 'freeform_canvas' && (
+        <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+          {/* LEFT / CENTER: INTERACTIVE 1M ENGINEERING CANVAS */}
+          <div className="flex-1 min-w-0 min-h-0 flex flex-col p-3 gap-2.5 overflow-hidden">
+            {/* Simple Mode Bar Above Canvas */}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#111827] border border-slate-800">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleSelectSubMode('LINE')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold cursor-pointer ${
+                    subMode === 'LINE'
+                      ? 'bg-cyan-600 text-white'
+                      : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-700'
+                  }`}
+                >
+                  <Ruler className="w-3.5 h-3.5" />
+                  1. Line Mode
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectSubMode('ARC')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold cursor-pointer ${
+                    subMode === 'ARC'
+                      ? 'bg-amber-600 text-white'
+                      : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-700'
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  2. Arc Mode
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectSubMode('XY_POINT')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold cursor-pointer ${
+                    subMode === 'XY_POINT'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-700'
+                  }`}
+                >
+                  <CircleDot className="w-3.5 h-3.5" />
+                  3. XY Point Mode
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectSubMode('SELECT_EDIT')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold cursor-pointer ${
+                    subMode === 'SELECT_EDIT'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-700'
+                  }`}
+                >
+                  <Move className="w-3.5 h-3.5" />
+                  Move / Edit Point
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVisualSnapEnabled((prev) => !prev)}
+                  className={`px-2.5 py-1.5 rounded-lg border text-xs font-mono font-bold cursor-pointer transition-colors ${
+                    visualSnapEnabled
+                      ? 'bg-emerald-950/90 hover:bg-emerald-900 text-emerald-300 border-emerald-500/60'
+                      : 'bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-700'
+                  }`}
+                  title="Toggle visual snapping to endpoints, centerline (X=0), invert axis (Y=0), orthogonal alignment, and symmetry"
+                >
+                  {visualSnapEnabled ? '🧲 Visual Snap: ON' : 'Visual Snap: OFF'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSnapStepMeters((prev) => (prev === 0.01 ? 0.1 : prev === 0.1 ? 0.5 : 0.01))
+                  }
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-slate-700 text-xs font-mono cursor-pointer"
+                  title="Toggle cursor snap precision"
+                >
+                  {snapStepMeters === 0.01
+                    ? 'Grid: 0.01m'
+                    : `Grid: ${snapStepMeters}m`}
+                </button>
+                {!profile.isClosed && profile.controlPoints.length >= 3 && (
+                  <button
+                    type="button"
+                    onClick={handleCloseShapeNow}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold cursor-pointer"
+                  >
+                    ✓ Close Shape
+                  </button>
+                )}
+                {isDrawingChainActive && !profile.isClosed && profile.controlPoints.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsDrawingChainActive(false);
+                      setCursorPreviewPt(null);
+                      setPendingCanvasArcStartPt(null);
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-amber-950/80 hover:bg-amber-900 text-amber-200 border border-amber-600/50 text-xs font-mono cursor-pointer"
+                  >
+                    Stop Line (Esc)
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfile((prev) => {
+                      const nextPts = prev.controlPoints.slice(0, -1);
+                      const nextPtIds = new Set(nextPts.map((p) => p.id));
+                      return {
+                        ...prev,
+                        controlPoints: nextPts,
+                        segments: prev.segments.filter(
+                          (s) => nextPtIds.has(s.fromPointId) && nextPtIds.has(s.toPointId)
+                        ),
+                        isClosed: false,
+                      };
+                    });
+                    setCursorPreviewPt(null);
+                  }}
+                  disabled={profile.controlPoints.length === 0}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-mono cursor-pointer"
+                >
+                  Undo Point
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfile({
+                      id: `custom-prof-${Date.now()}`,
+                      name: profile.name,
+                      category: 'freeform_polygon',
+                      controlPoints: [],
+                      segments: [],
+                      isClosed: false,
+                      version: 'v1.0',
+                      updatedAt: new Date().toISOString(),
+                    });
+                    setSelectedPointId(null);
+                    setSelectedSegmentId(null);
+                    setCursorPreviewPt(null);
+                    setPendingCanvasArcStartPt(null);
+                    setIsDrawingChainActive(true);
+                    setStatusNote('Cleared canvas. Click or enter coordinates to start drawing.');
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-700/50 text-xs font-mono cursor-pointer"
+                >
+                  Clear Empty
+                </button>
+              </div>
+            </div>
+
+            {/* SVG 1m-Scaled Canvas (Light Mode Engineering Sheet Grid) */}
+            <div className="relative flex-1 min-h-0 rounded-xl bg-white border border-slate-300 overflow-hidden flex items-center justify-center shadow-inner">
+              <svg
+                ref={svgRef}
+                viewBox={`0 0 ${viewW} ${viewH}`}
+                preserveAspectRatio="xMidYMid meet"
+                onMouseDown={handleCanvasPointerDown}
+                onMouseMove={handleCanvasPointerMove}
+                onMouseUp={handleCanvasPointerUp}
+                onMouseLeave={handleCanvasPointerLeave}
+                onContextMenu={(e) => e.preventDefault()}
+                onDoubleClick={() => {
+                  if (!profile.isClosed && profile.controlPoints.length >= 3) {
+                    handleCloseShapeNow();
+                  } else {
+                    setIsDrawingChainActive(false);
+                    setCursorPreviewPt(null);
+                  }
+                }}
+                className="w-full h-full block cursor-crosshair bg-[#F8FAFC]"
+              >
+                {/* 1m Real-World Engineering Grid & Ruler Ticks */}
+                {(() => {
+                  const gridLines: React.ReactNode[] = [];
+                  for (let gx = -12; gx <= 12; gx++) {
+                    const pTop = canvasMetrics.worldToScreen({ x: gx, y: 15 });
+                    const pBot = canvasMetrics.worldToScreen({ x: gx, y: -5 });
+                    const isZero = gx === 0;
+                    gridLines.push(
+                      <g key={`gx-${gx}`}>
                         <line
-                          x1={aPx.x}
-                          y1={aPx.y}
-                          x2={bPx.x}
-                          y2={bPx.y}
-                          stroke={tool === 'draw_arc' ? '#F59E0B' : isLight ? '#0284C7' : '#22D3EE'}
-                          strokeWidth="2"
-                          strokeDasharray="5,4"
-                        />
-                        <rect
-                          x={(aPx.x + bPx.x) / 2 - 58}
-                          y={(aPx.y + bPx.y) / 2 - 22}
-                          width="116"
-                          height="18"
-                          rx="3"
-                          fill={isLight ? '#FFFFFF' : '#0F172A'}
-                          stroke={isLight ? '#0284C7' : '#38BDF8'}
-                          strokeWidth="0.8"
+                          x1={pTop.cx}
+                          y1={0}
+                          x2={pBot.cx}
+                          y2={viewH}
+                          stroke={
+                            isZero ? 'rgba(2, 132, 199, 0.55)' : 'rgba(100, 116, 139, 0.22)'
+                          }
+                          strokeWidth={isZero ? '1.4' : '0.85'}
+                          strokeDasharray={isZero ? '5,4' : undefined}
                         />
                         <text
-                          x={(aPx.x + bPx.x) / 2}
-                          y={(aPx.y + bPx.y) / 2 - 10}
+                          x={pTop.cx}
+                          y={viewH - 8}
+                          textAnchor="middle"
+                          fontSize="9.5"
+                          fontWeight="600"
+                          fontFamily="IBM Plex Mono, monospace"
+                          fill={isZero ? '#0369A1' : '#475569'}
+                        >
+                          {gx}m
+                        </text>
+                      </g>
+                    );
+                  }
+                  for (let gy = -2; gy <= 14; gy++) {
+                    const pLeft = canvasMetrics.worldToScreen({ x: -15, y: gy });
+                    const pRight = canvasMetrics.worldToScreen({ x: 15, y: gy });
+                    const isZero = gy === 0;
+                    gridLines.push(
+                      <g key={`gy-${gy}`}>
+                        <line
+                          x1={0}
+                          y1={pLeft.cy}
+                          x2={viewW}
+                          y2={pRight.cy}
+                          stroke={
+                            isZero ? 'rgba(2, 132, 199, 0.55)' : 'rgba(100, 116, 139, 0.22)'
+                          }
+                          strokeWidth={isZero ? '1.4' : '0.85'}
+                          strokeDasharray={isZero ? '5,4' : undefined}
+                        />
+                        <text
+                          x={22}
+                          y={pLeft.cy - 3}
+                          fontSize="9.5"
+                          fontWeight="600"
+                          fontFamily="IBM Plex Mono, monospace"
+                          fill={isZero ? '#0369A1' : '#475569'}
+                        >
+                          {gy}m
+                        </text>
+                      </g>
+                    );
+                  }
+                  return gridLines;
+                })()}
+
+                {/* Closed Polygon Fill */}
+                {profile.isClosed && evaluatedCustom.crossSectionPoints.length >= 3 && (
+                  <polygon
+                    points={evaluatedCustom.crossSectionPoints
+                      .map((pt) => {
+                        const s = canvasMetrics.worldToScreen(pt);
+                        return `${s.cx},${s.cy}`;
+                      })
+                      .join(' ')}
+                    fill="rgba(2, 132, 199, 0.12)"
+                    stroke="none"
+                  />
+                )}
+
+                {/* Drawn Segments (Lines & Arcs) with Length Labels */}
+                {evaluatedCustom.segmentMetrics.map((seg) => {
+                  const ptsScreen = seg.sampledPoints.map((p) => canvasMetrics.worldToScreen(p));
+                  const dPath = ptsScreen
+                    .map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.cx} ${p.cy}`)
+                    .join(' ');
+                  const midS = canvasMetrics.worldToScreen(seg.midHandlePoint);
+                  const isSelSeg = seg.segmentId === selectedSegmentId;
+
+                  return (
+                    <g key={seg.segmentId}>
+                      <path
+                        d={dPath}
+                        fill="none"
+                        stroke={
+                          isSelSeg
+                            ? '#D97706'
+                            : seg.type === 'arc'
+                            ? '#0891B2'
+                            : '#0284C7'
+                        }
+                        strokeWidth={isSelSeg ? '3.5' : '2.5'}
+                        className="cursor-pointer"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedSegmentId(seg.segmentId);
+                        }}
+                      />
+                      {/* Segment Length Label */}
+                      <g
+                        transform={`translate(${midS.cx}, ${
+                          seg.type === 'arc' ? midS.cy - 18 : midS.cy
+                        })`}
+                        className="cursor-pointer"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedSegmentId(seg.segmentId);
+                        }}
+                      >
+                        <rect
+                          x="-34"
+                          y="-10"
+                          width="68"
+                          height="16"
+                          rx="3"
+                          fill="#FFFFFF"
+                          stroke={seg.type === 'arc' ? '#D97706' : '#0284C7'}
+                          strokeWidth="1.2"
+                        />
+                        <text
+                          x="0"
+                          y="1.5"
+                          textAnchor="middle"
+                          fontSize="9.5"
+                          fontWeight="700"
+                          fontFamily="IBM Plex Mono, monospace"
+                          fill={seg.type === 'arc' ? '#B45309' : '#0369A1'}
+                        >
+                          {seg.type === 'arc'
+                            ? `Arc ${seg.arcLength.toFixed(2)}m`
+                            : `${seg.arcLength.toFixed(2)}m`}
+                        </text>
+                      </g>
+
+                      {/* Interactive Arc Peak Handle aligned 1:1 with midHandlePoint */}
+                      {seg.type === 'arc' && (
+                        <circle
+                          cx={midS.cx}
+                          cy={midS.cy}
+                          r="6"
+                          fill="#F59E0B"
+                          stroke="#FFFFFF"
+                          strokeWidth="1.8"
+                          className="cursor-grab active:cursor-grabbing"
+                        />
+                      )}
+                    </g>
+                  );
+                })}
+
+                {/* Active Rubber-Band Preview Line ONLY while actively drawing an unclosed shape! */}
+                {!profile.isClosed &&
+                  cursorPreviewPt &&
+                  ((subMode === 'LINE' &&
+                    isDrawingChainActive &&
+                    profile.controlPoints.length > 0) ||
+                    (subMode === 'ARC' &&
+                      (pendingCanvasArcStartPt !== null ||
+                        profile.controlPoints.length > 0))) &&
+                  (() => {
+                    const anchorWorld =
+                      subMode === 'ARC' && pendingCanvasArcStartPt
+                        ? pendingCanvasArcStartPt
+                        : profile.controlPoints[profile.controlPoints.length - 1];
+                    if (!anchorWorld) return null;
+                    const s1 = canvasMetrics.worldToScreen(anchorWorld);
+                    const s2 = canvasMetrics.worldToScreen(cursorPreviewPt);
+                    const lenM = Math.hypot(
+                      cursorPreviewPt.x - anchorWorld.x,
+                      cursorPreviewPt.y - anchorWorld.y
+                    );
+                    const angDeg =
+                      (Math.atan2(
+                        cursorPreviewPt.y - anchorWorld.y,
+                        cursorPreviewPt.x - anchorWorld.x
+                      ) *
+                        180) /
+                      Math.PI;
+
+                    return (
+                      <g className="pointer-events-none">
+                        <line
+                          x1={s1.cx}
+                          y1={s1.cy}
+                          x2={s2.cx}
+                          y2={s2.cy}
+                          stroke="#D97706"
+                          strokeWidth="2"
+                          strokeDasharray="6,4"
+                        />
+                        <rect
+                          x={(s1.cx + s2.cx) / 2 - 58}
+                          y={(s1.cy + s2.cy) / 2 - 22}
+                          width="116"
+                          height="18"
+                          rx="4"
+                          fill="#FFFFFF"
+                          stroke="#D97706"
+                          strokeWidth="1.2"
+                        />
+                        <text
+                          x={(s1.cx + s2.cx) / 2}
+                          y={(s1.cy + s2.cy) / 2 - 9.5}
                           textAnchor="middle"
                           fontSize="10"
                           fontWeight="700"
-                          fill={isLight ? '#0369A1' : '#38BDF8'}
+                          fontFamily="IBM Plex Mono, monospace"
+                          fill="#B45309"
                         >
-                          L={livePolarFromLast.len.toFixed(2)}m ∠{livePolarFromLast.deg.toFixed(1)}°
+                          L={lenM.toFixed(2)}m ∠{Math.round(angDeg)}°
                         </text>
-                      </>
+                      </g>
                     );
                   })()}
-                </g>
-              )}
 
-              {/* 5. Segment Length, Angle & Arc Midpoint Handles */}
-              {evaluated.segmentMetrics.map((segMetric) => {
-                const seg = profile.segments.find((s) => s.id === segMetric.segmentId);
-                if (!seg) return null;
-                const a = profile.controlPoints.find((p) => p.id === seg.fromPointId);
-                const b = profile.controlPoints.find((p) => p.id === seg.toPointId);
-                if (!a || !b) return null;
+                {/* Pending Arc Start Point Marker */}
+                {subMode === 'ARC' && pendingCanvasArcStartPt && (
+                  <g className="pointer-events-none">
+                    {(() => {
+                      const s = canvasMetrics.worldToScreen(pendingCanvasArcStartPt);
+                      return (
+                        <>
+                          <circle
+                            cx={s.cx}
+                            cy={s.cy}
+                            r="7"
+                            fill="#F59E0B"
+                            stroke="#FFFFFF"
+                            strokeWidth="2"
+                          />
+                          <text
+                            x={s.cx}
+                            y={s.cy - 10}
+                            textAnchor="middle"
+                            fontSize="10"
+                            fontWeight="700"
+                            fontFamily="IBM Plex Mono, monospace"
+                            fill="#B45309"
+                          >
+                            ARC START
+                          </text>
+                        </>
+                      );
+                    })()}
+                  </g>
+                )}
 
-                const midPx = metersToPx(segMetric.midHandlePoint);
-                const isSelected = seg.id === selectedSegmentId;
-                const dx = b.x - a.x;
-                const dy = b.y - a.y;
-                const angleDeg = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
+                {/* Control Point Vertices (P1..Pn) */}
+                {profile.controlPoints.map((cp, idx) => {
+                  const s = canvasMetrics.worldToScreen(cp);
+                  const isFirst = idx === 0;
+                  const canCloseOnFirst =
+                    isFirst && !profile.isClosed && profile.controlPoints.length >= 3;
+                  const isSel = cp.id === selectedPointId;
 
-                return (
-                  <g key={seg.id}>
-                    {/* Clickable Label Pill on Segment */}
-                    <g
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedSegmentId(seg.id);
-                      }}
-                      className="cursor-pointer"
-                    >
-                      <rect
-                        x={midPx.x - 48}
-                        y={midPx.y - 10}
-                        width="96"
-                        height="20"
-                        rx="4"
+                  return (
+                    <g key={cp.id}>
+                      <circle
+                        cx={s.cx}
+                        cy={s.cy}
+                        r={canCloseOnFirst ? '8' : isSel ? '7' : '5.5'}
                         fill={
-                          isSelected
-                            ? '#0284C7'
-                            : isLight
-                            ? 'rgba(255, 255, 255, 0.94)'
-                            : 'rgba(15, 23, 42, 0.90)'
+                          canCloseOnFirst
+                            ? '#059669'
+                            : isSel
+                            ? '#D97706'
+                            : '#0284C7'
                         }
-                        stroke={
-                          isSelected
-                            ? isLight
-                              ? '#0F172A'
-                              : '#FFFFFF'
-                            : seg.type === 'arc'
-                            ? '#F59E0B'
-                            : '#475569'
-                        }
-                        strokeWidth={isSelected ? '1.5' : '1'}
+                        stroke="#FFFFFF"
+                        strokeWidth="2"
+                        className="cursor-pointer"
                       />
                       <text
-                        x={midPx.x}
-                        y={midPx.y + 3.5}
+                        x={s.cx}
+                        y={s.cy - 10}
                         textAnchor="middle"
-                        fontSize="9.5"
+                        fontSize="10"
                         fontWeight="700"
-                        fill={
-                          isSelected
-                            ? '#FFFFFF'
-                            : seg.type === 'arc'
-                            ? isLight
-                              ? '#B45309'
-                              : '#FDE68A'
-                            : isLight
-                            ? '#0F172A'
-                            : '#E2E8F0'
-                        }
+                        fontFamily="IBM Plex Mono, monospace"
+                        fill={canCloseOnFirst ? '#047857' : '#0F172A'}
+                        className="pointer-events-none"
                       >
-                        {seg.type === 'arc'
-                          ? `ARC L=${segMetric.arcLength.toFixed(2)}m`
-                          : `${segMetric.chordLength.toFixed(2)}m ∠${angleDeg.toFixed(0)}°`}
+                        {canCloseOnFirst
+                          ? 'P1 (CLICK TO CLOSE)'
+                          : `${cp.label} (${cp.x.toFixed(2)},${cp.y.toFixed(2)})`}
                       </text>
                     </g>
+                  );
+                })}
 
-                    {/* Draggable Arc Handle (or Convert-to-Arc Handle when segment is selected) */}
-                    {(seg.type === 'arc' || isSelected) && (
-                      <circle
-                        cx={midPx.x}
-                        cy={midPx.y - (seg.type === 'arc' ? 0 : 16)}
-                        r={7}
-                        fill="#F59E0B"
-                        stroke={isLight ? '#FFFFFF' : '#0F172A'}
-                        strokeWidth="2"
-                        className="cursor-ns-resize"
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          setSelectedSegmentId(seg.id);
-                          setPastProfiles((p) => [...p.slice(-39), profile]);
-                          setFutureProfiles([]);
-                          setDragging({
-                            kind: 'arc_handle',
-                            id: seg.id,
-                            startClientX: e.clientX,
-                            startClientY: e.clientY,
-                            startOriginX: originPx.x,
-                            startOriginY: originPx.y,
-                          });
-                        }}
-                      >
-                        <title>Drag to curve this segment into an Arc</title>
-                      </circle>
-                    )}
-                  </g>
-                );
-              })}
+                {/* Visual Snapping Alignment Guides & OSNAP Target Indicator */}
+                {activeVisualSnap &&
+                  (() => {
+                    const snapS = canvasMetrics.worldToScreen(activeVisualSnap.snappedPt);
+                    const isEp =
+                      activeVisualSnap.kind === 'ENDPOINT' ||
+                      activeVisualSnap.kind === 'ORIGIN';
+                    const snapColor = activeVisualSnap.isCloseLoopTarget
+                      ? '#059669'
+                      : isEp
+                      ? '#10B981'
+                      : '#0284C7';
 
-              {/* 6. Control Points P1, P2, ... Pn */}
-              {profile.controlPoints.map((pt) => {
-                const px = metersToPx(pt);
-                const isSelected = pt.id === selectedPointId;
-                return (
-                  <g
-                    key={pt.id}
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                      if (tool === 'round_corner') {
-                        handleRoundCornerVertex(pt.id, Math.max(0.2, parseFloat(roundRadiusM) || 1.2));
-                        return;
-                      }
-                      setSelectedPointId(pt.id);
-                      setPastProfiles((p) => [...p.slice(-39), profile]);
-                      setFutureProfiles([]);
-                      setDragging({
-                        kind: 'point',
-                        id: pt.id,
-                        startClientX: e.clientX,
-                        startClientY: e.clientY,
-                        startOriginX: originPx.x,
-                        startOriginY: originPx.y,
-                      });
-                    }}
-                    className="cursor-pointer"
-                  >
-                    <circle
-                      cx={px.x}
-                      cy={px.y}
-                      r={isSelected ? 8 : 6}
-                      fill={isSelected ? '#0284C7' : isLight ? '#FFFFFF' : '#0F172A'}
-                      stroke={isSelected ? (isLight ? '#0F172A' : '#FFFFFF') : isLight ? '#0284C7' : '#38BDF8'}
-                      strokeWidth="2.2"
-                    />
-                    <text
-                      x={px.x + 10}
-                      y={px.y - 8}
-                      fontSize="10.5"
-                      fontWeight="700"
-                      fill={isSelected ? (isLight ? '#0369A1' : '#22D3EE') : isLight ? '#0F172A' : '#F8FAFC'}
-                    >
-                      {pt.label} ({pt.x.toFixed(2)}, {pt.y.toFixed(2)})
-                    </text>
-                  </g>
-                );
-              })}
+                    return (
+                      <g className="pointer-events-none">
+                        {/* Vertical Snap Guide Line (Centerline X=0, Ortho Vertical, or Symmetry) */}
+                        {activeVisualSnap.verticalGuideX !== undefined && (
+                          <>
+                            <line
+                              x1={snapS.cx}
+                              y1={0}
+                              x2={snapS.cx}
+                              y2={viewH}
+                              stroke={snapColor}
+                              strokeWidth="1.4"
+                              strokeDasharray="4,4"
+                              opacity="0.85"
+                            />
+                            {activeVisualSnap.verticalRefPt && (
+                              <circle
+                                cx={
+                                  canvasMetrics.worldToScreen(activeVisualSnap.verticalRefPt).cx
+                                }
+                                cy={
+                                  canvasMetrics.worldToScreen(activeVisualSnap.verticalRefPt).cy
+                                }
+                                r="7.5"
+                                fill="none"
+                                stroke={snapColor}
+                                strokeWidth="1.5"
+                                strokeDasharray="2,2"
+                              />
+                            )}
+                          </>
+                        )}
 
-              {/* 7. Bottom X-Axis Scale Bar (Meters from Centerline) */}
-              <rect
-                x={44}
-                y={viewH - 28}
-                width={viewW - 44}
-                height={28}
-                fill={isLight ? '#E2E8F0' : '#0D1320'}
-              />
-              <line
-                x1={44}
-                y1={viewH - 28}
-                x2={viewW}
-                y2={viewH - 28}
-                stroke={isLight ? '#94A3B8' : '#334155'}
-                strokeWidth="1.2"
-              />
-              {graphGrid.vMajor.map((mx) => {
-                const px = originPx.x + mx * pxPerMeter;
-                if (px < 50 || px > viewW - 20) return null;
-                return (
-                  <g key={`xscale-${mx}`}>
-                    <line
-                      x1={px}
-                      y1={viewH - 28}
-                      x2={px}
-                      y2={viewH - 21}
-                      stroke={isLight ? '#475569' : '#94A3B8'}
-                      strokeWidth="1.2"
-                    />
-                    <text
-                      x={px}
-                      y={viewH - 8}
-                      textAnchor="middle"
-                      fontSize="10"
-                      fontWeight={Math.abs(mx) < 1e-3 ? '700' : '500'}
-                      fill={
-                        Math.abs(mx) < 1e-3
-                          ? isLight
-                            ? '#0369A1'
-                            : '#38BDF8'
-                          : isLight
-                          ? '#334155'
-                          : '#94A3B8'
-                      }
-                    >
-                      {mx > 0 ? `+${mx}m` : `${mx}m`}
-                    </text>
-                  </g>
-                );
-              })}
+                        {/* Horizontal Snap Guide Line (Invert Y=0 or Ortho Horizontal) */}
+                        {activeVisualSnap.horizontalGuideY !== undefined && (
+                          <>
+                            <line
+                              x1={0}
+                              y1={snapS.cy}
+                              x2={viewW}
+                              y2={snapS.cy}
+                              stroke={snapColor}
+                              strokeWidth="1.4"
+                              strokeDasharray="4,4"
+                              opacity="0.85"
+                            />
+                            {activeVisualSnap.horizontalRefPt && (
+                              <circle
+                                cx={
+                                  canvasMetrics.worldToScreen(activeVisualSnap.horizontalRefPt).cx
+                                }
+                                cy={
+                                  canvasMetrics.worldToScreen(activeVisualSnap.horizontalRefPt).cy
+                                }
+                                r="7.5"
+                                fill="none"
+                                stroke={snapColor}
+                                strokeWidth="1.5"
+                                strokeDasharray="2,2"
+                              />
+                            )}
+                          </>
+                        )}
 
-              {/* 8. Left Y-Axis Scale Bar (Height in Meters) */}
-              <rect x={0} y={0} width={44} height={viewH} fill={isLight ? '#E2E8F0' : '#0D1320'} />
-              <line
-                x1={44}
-                y1={0}
-                x2={44}
-                y2={viewH - 28}
-                stroke={isLight ? '#94A3B8' : '#334155'}
-                strokeWidth="1.2"
-              />
-              {graphGrid.hMajor.map((my) => {
-                const py = originPx.y - my * pxPerMeter;
-                if (py < 16 || py > viewH - 34) return null;
-                return (
-                  <g key={`yscale-${my}`}>
-                    <line
-                      x1={37}
-                      y1={py}
-                      x2={44}
-                      y2={py}
-                      stroke={isLight ? '#475569' : '#94A3B8'}
-                      strokeWidth="1.2"
-                    />
-                    <text
-                      x={33}
-                      y={py + 3.5}
-                      textAnchor="end"
-                      fontSize="10"
-                      fontWeight={Math.abs(my) < 1e-3 ? '700' : '500'}
-                      fill={
-                        Math.abs(my) < 1e-3
-                          ? isLight
-                            ? '#047857'
-                            : '#10B981'
-                          : isLight
-                          ? '#334155'
-                          : '#94A3B8'
-                      }
-                    >
-                      {my}m
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
+                        {/* OSNAP Target Reticle: CAD Endpoint Square or Axis/Ortho Diamond */}
+                        {isEp ? (
+                          <>
+                            <circle
+                              cx={snapS.cx}
+                              cy={snapS.cy}
+                              r="11"
+                              fill="rgba(16, 185, 129, 0.14)"
+                              stroke={snapColor}
+                              strokeWidth="1.4"
+                            />
+                            <rect
+                              x={snapS.cx - 6}
+                              y={snapS.cy - 6}
+                              width="12"
+                              height="12"
+                              fill="none"
+                              stroke={snapColor}
+                              strokeWidth="2.2"
+                            />
+                          </>
+                        ) : (
+                          <polygon
+                            points={`${snapS.cx},${snapS.cy - 7.5} ${snapS.cx + 7.5},${snapS.cy} ${snapS.cx},${snapS.cy + 7.5} ${snapS.cx - 7.5},${snapS.cy}`}
+                            fill="rgba(2, 132, 199, 0.14)"
+                            stroke={snapColor}
+                            strokeWidth="2"
+                          />
+                        )}
 
-            {/* Floating Live Dimensions & Cursor Coordinates Bar */}
-            <div className="absolute top-3 left-14 right-3 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-              <div className="px-3 py-1.5 rounded bg-slate-950/90 border border-slate-800 text-[11px] flex items-center gap-3 shadow-lg">
-                <span>
-                  Width: <strong className="text-cyan-300">{evaluated.width.toFixed(2)} m</strong>
-                </span>
-                <span>·</span>
-                <span>
-                  Height: <strong className="text-cyan-300">{evaluated.height.toFixed(2)} m</strong>
-                </span>
-                <span>·</span>
-                <span>
-                  Area: <strong className="text-emerald-300">{evaluated.designAreaSqMeters.toFixed(2)} m²</strong>
-                </span>
-                <span>·</span>
-                <span>
-                  Perimeter:{' '}
-                  <strong className="text-amber-300">{evaluated.totalPerimeterMeters.toFixed(2)} m</strong>
-                </span>
-              </div>
+                        {/* Floating Visual Snap Pill Badge near Cursor */}
+                        <g
+                          transform={`translate(${Math.min(
+                            viewW - 210,
+                            Math.max(12, snapS.cx + 12)
+                          )}, ${Math.max(24, snapS.cy - 28)})`}
+                        >
+                          <rect
+                            x="0"
+                            y="-13"
+                            width={Math.max(135, activeVisualSnap.label.length * 6.2 + 18)}
+                            height="19"
+                            rx="4"
+                            fill="#0F172A"
+                            stroke={snapColor}
+                            strokeWidth="1.3"
+                            opacity="0.95"
+                          />
+                          <text
+                            x="8"
+                            y="-0.5"
+                            fontSize="9.5"
+                            fontWeight="700"
+                            fontFamily="IBM Plex Mono, monospace"
+                            fill="#6EE7B7"
+                          >
+                            🧲 {activeVisualSnap.label}
+                          </text>
+                        </g>
+                      </g>
+                    );
+                  })()}
 
-              <div className="px-3 py-1.5 rounded bg-slate-950/90 border border-slate-800 text-[11px] flex items-center gap-2 shadow-lg pointer-events-auto">
-                <Crosshair className="w-3.5 h-3.5 text-cyan-400" />
-                {cursorMeters ? (
-                  <span>
-                    X: <strong className="text-white">{cursorMeters.x.toFixed(2)}m</strong>, Y:{' '}
-                    <strong className="text-white">{cursorMeters.y.toFixed(2)}m</strong>
-                  </span>
-                ) : (
-                  <span className="text-slate-400">Move cursor on graph</span>
-                )}
-              </div>
+                {/* Exact Cursor Tip Target Marker (1:1 locked to mouse crosshair) */}
+                {cursorHoverPt &&
+                  (() => {
+                    const curS = canvasMetrics.worldToScreen(cursorHoverPt);
+                    return (
+                      <g className="pointer-events-none">
+                        <circle
+                          cx={curS.cx}
+                          cy={curS.cy}
+                          r="4"
+                          fill="none"
+                          stroke="#0284C7"
+                          strokeWidth="1.5"
+                        />
+                        <circle cx={curS.cx} cy={curS.cy} r="1.5" fill="#0284C7" />
+                        <text
+                          x={curS.cx + 8}
+                          y={curS.cy + 14}
+                          fontSize="9.5"
+                          fontWeight="700"
+                          fontFamily="IBM Plex Mono, monospace"
+                          fill="#0369A1"
+                        >
+                          ({cursorHoverPt.x.toFixed(2)}m, {cursorHoverPt.y.toFixed(2)}m)
+                        </text>
+                      </g>
+                    );
+                  })()}
+              </svg>
+
+              {/* Empty State Helper Overlay when 0 points exist */}
+              {profile.controlPoints.length === 0 && !pendingCanvasArcStartPt && (
+                <div className="absolute top-3 left-3 px-3.5 py-2 rounded-xl bg-white/95 border border-sky-300 text-xs font-mono text-sky-900 shadow-xs pointer-events-none">
+                  Empty 1m-Scale Canvas: Click first point on the grid OR enter coordinates in the right panel.
+                </div>
+              )}
             </div>
 
-            {/* Clean AutoCAD Command Prompt Bar */}
-            <div className="absolute bottom-3 left-14 right-3 flex items-center justify-center pointer-events-none z-20">
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleExecuteProfileCadCmd(cadProfileCmd);
-                }}
-                className="pointer-events-auto flex items-center gap-2 px-3 py-1 rounded-xs bg-[#090D16]/95 border border-[#2C3A55] shadow-xl text-[11px] w-full max-w-md"
-              >
-                <span className="text-[10px] font-bold text-amber-400 shrink-0">Command:</span>
-                <input
-                  type="text"
-                  value={cadProfileCmd}
-                  onChange={(e) => setCadProfileCmd(e.target.value)}
-                  placeholder="Type PLINE, ARC, FILLET, DSHAPE, BOX, CIRCLE, ZOOM..."
-                  className="w-full bg-transparent text-[10px] font-mono text-white placeholder-slate-500 outline-none"
-                />
-              </form>
+            {/* Bottom Status Bar */}
+            <div className="px-3 py-1.5 rounded-lg bg-[#111827] border border-slate-800 flex items-center justify-between text-xs font-mono text-slate-300">
+              <span>{statusNote}</span>
+              <span className="text-cyan-300">
+                Points: {profile.controlPoints.length} · Status:{' '}
+                {profile.isClosed ? 'CLOSED SHAPE' : 'OPEN'}
+              </span>
             </div>
           </div>
-        </div>
 
-        {/* ====================================================================
-            EXTENDABLE LEFT / RIGHT PANEL:
-            0. EASY BASIC REGULAR SHAPES (WIDTH & HEIGHT)
-            1. ADD BY LENGTH & ANGLE / X,Y
-            2. EDIT SELECTED POINT / LINE / ARC / ROUND
-            3. POINTS & SEGMENTS TABLE
-           ==================================================================== */}
-        {!isAsideCollapsed && (
-          <aside
-            style={{ width: `${asideWidthPx}px` }}
-            className={`relative w-full lg:w-auto max-w-full lg:max-w-[52vw] bg-[#101726] border-t lg:border-t-0 ${
-              asideDockSide === 'left'
-                ? 'lg:order-1 lg:border-r'
-                : 'lg:order-2 lg:border-l'
-            } border-slate-800 flex flex-col min-h-0 overflow-y-auto p-3.5 space-y-3.5 text-xs shrink-0 transition-[width] duration-75`}
-          >
-            {/* Interactive Drag Handle to Extend Panel Left or Right */}
-            <div
-              onMouseDown={(e) => {
-                e.preventDefault();
-                setResizingAside({
-                  startX: e.clientX,
-                  startWidth: asideWidthPx,
-                });
-              }}
-              title="Drag Left or Right to Extend / Resize Panel Width"
-              className={`hidden lg:flex items-center justify-center absolute top-0 bottom-0 w-2.5 cursor-col-resize z-30 group ${
-                asideDockSide === 'left' ? '-right-1.5' : '-left-1.5'
-              }`}
-            >
-              <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-cyan-400 transition-colors" />
-            </div>
-
-            {/* Panel Header: Extend Width (- / +) & Dock Left / Right Controls */}
-            <div className="flex flex-wrap items-center justify-between gap-1.5 pb-2 border-b border-slate-800">
-              <div className="flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-                <span className="font-bold text-slate-100 text-[11px] tracking-wide">
-                  SHAPE &amp; DIMENSIONS PANEL
+          {/* ==================================================================
+              RESPONSIVE COLLAPSIBLE RIGHT PROPERTY PALETTE SIDEBAR:
+              STRICTLY SHOWS ONLY CURRENT MODE'S TOOLS!
+             ================================================================== */}
+          {!showPropertySidebar ? (
+            <aside className="w-10 shrink-0 bg-[#111827] border-l border-slate-800 flex flex-col items-center py-3 gap-3 select-none">
+              <button
+                type="button"
+                onClick={() => setShowPropertySidebar(true)}
+                className="w-7 h-7 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white flex items-center justify-center cursor-pointer shadow-xs"
+                title="Expand Property Palette Sidebar"
+              >
+                «
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPropertySidebar(true)}
+                className="w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 text-cyan-400 border border-slate-700 flex items-center justify-center cursor-pointer"
+                title={`Active Tool: ${subMode}`}
+              >
+                <Sliders className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPropertySidebar(true)}
+                className="mt-2 [writing-mode:vertical-rl] rotate-180 text-[10px] font-mono font-bold tracking-widest text-slate-400 hover:text-cyan-300 uppercase cursor-pointer"
+              >
+                PROPERTIES · {subMode}
+              </button>
+            </aside>
+          ) : (
+          <aside className="w-full lg:w-[360px] shrink-0 bg-[#111827] border-l border-slate-800 flex flex-col overflow-hidden">
+            {/* Collapsible Sidebar Header */}
+            <div className="px-3.5 py-2.5 bg-slate-950 border-b border-slate-800 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-cyan-300 truncate">
+                <Sliders className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>
+                  {subMode === 'LINE'
+                    ? 'LINE TOOL PROPERTIES'
+                    : subMode === 'ARC'
+                    ? 'ARC TOOL PROPERTIES'
+                    : 'XY POINT PROPERTIES'}
                 </span>
               </div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setAsideDockSide((prev) => (prev === 'right' ? 'left' : 'right'))}
-                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-[10px] flex items-center gap-1 cursor-pointer"
-                  title="Move Panel to Left or Right Side"
-                >
-                  {asideDockSide === 'right' ? (
+              <button
+                type="button"
+                onClick={() => setShowPropertySidebar(false)}
+                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-mono text-[10px] font-bold cursor-pointer flex items-center gap-1 shrink-0"
+                title="Collapse Property Sidebar to maximize canvas workspace"
+              >
+                <span>Collapse</span>
+                <span>»</span>
+              </button>
+            </div>
+
+            <div className="flex-1 p-4 overflow-y-auto space-y-4">
+            {/* Shape Name */}
+            <div className="space-y-1 pb-3 border-b border-slate-800">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-cyan-400 font-bold">
+                Custom Tunnel Shape Name
+              </span>
+              <input
+                type="text"
+                value={profile.name}
+                onChange={(e) => setProfile((p) => ({ ...p, name: e.target.value }))}
+                className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-white"
+              />
+            </div>
+
+            {/* --------------------------------------------------------------
+                CONTEXT 1: LINE MODE PROPERTY PALETTE ONLY
+               -------------------------------------------------------------- */}
+            {subMode === 'LINE' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-cyan-300">
+                    LINE MODE · CONNECT TWO POINTS
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">1m Scale</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Click points directly on the canvas, or enter the Start Point and Line Length (m) below to connect two points accurately.
+                </p>
+
+                {/* Start Point (X1, Y1) */}
+                <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
+                  <div className="text-[11px] font-mono text-slate-300 font-semibold">
+                    1. Start Point (X₁, Y₁)
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">Start X₁ (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={lineStartX}
+                        onChange={(e) => setLineStartX(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">Start Y₁ (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={lineStartY}
+                        onChange={(e) => setLineStartY(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Method Toggle: By Length & Direction vs End Point (X2, Y2) */}
+                <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center gap-1 p-0.5 bg-slate-900 rounded-lg border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setLineInputMethod('LENGTH_ANGLE')}
+                      className={`flex-1 py-1 text-[11px] font-mono rounded-md cursor-pointer ${
+                        lineInputMethod === 'LENGTH_ANGLE'
+                          ? 'bg-cyan-600 text-white font-semibold'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      By Length (m)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLineInputMethod('END_XY')}
+                      className={`flex-1 py-1 text-[11px] font-mono rounded-md cursor-pointer ${
+                        lineInputMethod === 'END_XY'
+                          ? 'bg-cyan-600 text-white font-semibold'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      By End Point (X₂,Y₂)
+                    </button>
+                  </div>
+
+                  {lineInputMethod === 'LENGTH_ANGLE' ? (
                     <>
-                      <PanelLeft className="w-3 h-3" /> Left
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-0.5">
+                          <span className="text-[10px] text-cyan-300 font-semibold">
+                            Line Length (m)
+                          </span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0.1"
+                            value={lineLengthM}
+                            onChange={(e) => setLineLengthM(e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-cyan-600/60 font-mono text-xs text-white"
+                          />
+                        </label>
+                        <label className="space-y-0.5">
+                          <span className="text-[10px] text-slate-400">Angle (°)</span>
+                          <input
+                            type="number"
+                            step="5"
+                            value={lineAngleDeg}
+                            onChange={(e) => setLineAngleDeg(e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                          />
+                        </label>
+                      </div>
+                      {/* Quick Direction Buttons */}
+                      <div className="grid grid-cols-4 gap-1 pt-0.5">
+                        {[
+                          { label: '↑ Up 90°', deg: '90' },
+                          { label: '→ Right 0°', deg: '0' },
+                          { label: '↓ Down -90°', deg: '-90' },
+                          { label: '← Left 180°', deg: '180' },
+                        ].map((dir) => (
+                          <button
+                            key={dir.deg}
+                            type="button"
+                            onClick={() => setLineAngleDeg(dir.deg)}
+                            className={`py-1 rounded text-[10px] font-mono border cursor-pointer ${
+                              lineAngleDeg === dir.deg
+                                ? 'bg-cyan-950 border-cyan-500 text-cyan-200 font-bold'
+                                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            {dir.label}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const x1 = parseFloat(lineStartX) || 0;
+                          const y1 = parseFloat(lineStartY) || 0;
+                          const len = Math.max(0.1, parseFloat(lineLengthM) || 1);
+                          const rad = ((parseFloat(lineAngleDeg) || 0) * Math.PI) / 180;
+                          const x2 = Number((x1 + len * Math.cos(rad)).toFixed(2));
+                          const y2 = Number((y1 + len * Math.sin(rad)).toFixed(2));
+                          appendLineSegmentPoints({ x: x1, y: y1 }, { x: x2, y: y2 });
+                        }}
+                        className="w-full py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-xs font-bold cursor-pointer"
+                      >
+                        + Connect Line ({lineLengthM} m)
+                      </button>
                     </>
                   ) : (
                     <>
-                      <PanelRight className="w-3 h-3" /> Right
-                    </>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAsideWidthPx((w) => Math.max(280, w - 50))}
-                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] cursor-pointer"
-                  title="Narrow Panel Width"
-                >
-                  −W
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAsideWidthPx((w) => Math.min(680, w + 50))}
-                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] cursor-pointer"
-                  title="Extend Panel Width"
-                >
-                  +Extend
-                </button>
-              </div>
-            </div>
-
-            {/* 0. EASY BASIC REGULAR SHAPES (CHOOSE WIDTH, HEIGHT & REQUIRED DETAILS) */}
-            <div className="p-3 bg-slate-950/95 border border-emerald-500/40 rounded space-y-2.5 shadow-md">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-emerald-300 text-[11px] flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                  0. BASIC REGULAR SHAPES (WIDTH &amp; HEIGHT)
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowBasicShapePanel((prev) => !prev)}
-                  className="text-[10px] text-slate-400 hover:text-white cursor-pointer"
-                >
-                  {showBasicShapePanel ? 'Minimize' : 'Expand'}
-                </button>
-              </div>
-
-              {showBasicShapePanel && (
-                <div className="space-y-2.5">
-                  {/* Shape Type Selector Pills */}
-                  <div className="grid grid-cols-2 gap-1 text-[10px]">
-                    {(
-                      [
-                        { id: 'd_shaped', label: 'D-Shaped (Arch)' },
-                        { id: 'horseshoe', label: 'Horseshoe' },
-                        { id: 'circular', label: 'Circular / TBM' },
-                        { id: 'rectangular', label: 'Rectangular / Box' },
-                        { id: 'flat_arch', label: 'Flat-Arch / Basket' },
-                        { id: 'trapezoidal', label: 'Trapezoidal Adit' },
-                        { id: 'stepped_cavern', label: 'Stepped Cavern' },
-                      ] as { id: BasicRegularTunnelShapeId; label: string }[]
-                    ).map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => {
-                          setBasicShapeId(item.id);
-                          handleApplyBasicRegularShape({ shapeId: item.id });
-                        }}
-                        className={`px-2 py-1 rounded border text-left font-semibold truncate cursor-pointer ${
-                          basicShapeId === item.id
-                            ? 'bg-emerald-600 text-white border-emerald-400'
-                            : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-600'
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Primary Dimensions: Width (m) & Total Height (m) */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="space-y-0.5">
-                      <span className="text-slate-300 text-[10px] font-semibold">
-                        {basicShapeId === 'circular'
-                          ? 'Diameter / Width (m)'
-                          : basicShapeId === 'trapezoidal'
-                          ? 'Bottom Width (m)'
-                          : 'Tunnel Width (m)'}
-                      </span>
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="1.0"
-                        value={basicWidthM}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setBasicWidthM(val);
-                          if (basicShapeId === 'circular' && lockCircularDiameter) {
-                            setBasicHeightM(val);
-                          }
-                          if (parseFloat(val) >= 1.0) {
-                            handleApplyBasicRegularShape({
-                              width: val,
-                              height:
-                                basicShapeId === 'circular' && lockCircularDiameter
-                                  ? val
-                                  : basicHeightM,
-                            });
-                          }
-                        }}
-                        className="w-full px-2 py-1 bg-slate-900 border border-emerald-500/50 rounded text-white font-bold"
-                      />
-                    </label>
-
-                    <label className="space-y-0.5">
-                      <span className="text-slate-300 text-[10px] font-semibold">
-                        Total Height (m)
-                      </span>
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="1.0"
-                        value={basicHeightM}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setBasicHeightM(val);
-                          if (basicShapeId === 'circular' && lockCircularDiameter) {
-                            setBasicWidthM(val);
-                          }
-                          if (parseFloat(val) >= 1.0) {
-                            handleApplyBasicRegularShape({
-                              height: val,
-                              width:
-                                basicShapeId === 'circular' && lockCircularDiameter
-                                  ? val
-                                  : basicWidthM,
-                            });
-                          }
-                        }}
-                        className="w-full px-2 py-1 bg-slate-900 border border-emerald-500/50 rounded text-white font-bold"
-                      />
-                    </label>
-                  </div>
-
-                  {/* Shape-Specific Required Details */}
-                  {(basicShapeId === 'd_shaped' ||
-                    basicShapeId === 'horseshoe' ||
-                    basicShapeId === 'flat_arch' ||
-                    basicShapeId === 'stepped_cavern') && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="space-y-0.5">
-                        <span className="text-slate-400 text-[10px]">Wall Height (m)</span>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0.5"
-                          value={basicWallHeightM}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setBasicWallHeightM(val);
-                            if (parseFloat(val) >= 0.4) {
-                              handleApplyBasicRegularShape({ wallHeight: val });
-                            }
-                          }}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-cyan-300 font-bold"
-                        />
-                      </label>
-
-                      {basicShapeId === 'stepped_cavern' ? (
+                      <div className="grid grid-cols-2 gap-2">
                         <label className="space-y-0.5">
-                          <span className="text-slate-400 text-[10px]">Bench Step Width (m)</span>
+                          <span className="text-[10px] text-slate-400">End X₂ (m)</span>
                           <input
                             type="number"
                             step="0.1"
-                            min="0.3"
-                            value={basicCornerRadiusM === '0.00' ? '1.00' : basicCornerRadiusM}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setBasicCornerRadiusM(val);
-                              handleApplyBasicRegularShape({ cornerRadius: val });
-                            }}
-                            className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-amber-300 font-bold"
+                            value={lineEndX}
+                            onChange={(e) => setLineEndX(e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
                           />
                         </label>
-                      ) : (
                         <label className="space-y-0.5">
-                          <span className="text-slate-400 text-[10px]">Invert Curve Depth (m)</span>
+                          <span className="text-[10px] text-slate-400">End Y₂ (m)</span>
                           <input
                             type="number"
                             step="0.1"
-                            min="0"
-                            value={basicInvertDropM}
+                            value={lineEndY}
+                            onChange={(e) => setLineEndY(e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                          />
+                        </label>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const x1 = parseFloat(lineStartX) || 0;
+                          const y1 = parseFloat(lineStartY) || 0;
+                          const x2 = parseFloat(lineEndX) || 0;
+                          const y2 = parseFloat(lineEndY) || 0;
+                          appendLineSegmentPoints({ x: x1, y: y1 }, { x: x2, y: y2 });
+                        }}
+                        className="w-full py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-xs font-bold cursor-pointer"
+                      >
+                        + Connect Line (X₁,Y₁ → X₂,Y₂)
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* --------------------------------------------------------------
+                CONTEXT 2: ARC MODE PROPERTY PALETTE ONLY
+                (Start Point -> Arc Length -> End Point)
+               -------------------------------------------------------------- */}
+            {subMode === 'ARC' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-amber-300">
+                    ARC MODE · START, ARC LENGTH &amp; END
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Enter the Arc Start Point, End Point, and Arc Length (m) below (or click Start and End points on the canvas).
+                </p>
+
+                <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2.5">
+                  <div className="text-[11px] font-mono text-slate-300 font-semibold">
+                    1. Arc Start Point (X₁, Y₁)
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">Start X₁ (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={arcStartX}
+                        onChange={(e) => setArcStartX(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">Start Y₁ (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={arcStartY}
+                        onChange={(e) => setArcStartY(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="text-[11px] font-mono text-slate-300 font-semibold pt-1">
+                    2. Arc End Point (X₂, Y₂)
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">End X₂ (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={arcEndX}
+                        onChange={(e) => {
+                          setArcEndX(e.target.value);
+                          const c = Math.hypot(
+                            (parseFloat(e.target.value) || 0) - (parseFloat(arcStartX) || 0),
+                            (parseFloat(arcEndY) || 0) - (parseFloat(arcStartY) || 0)
+                          );
+                          if (c > 0.2 && (parseFloat(arcLengthM) || 0) <= c) {
+                            setArcLengthM((c * 1.22).toFixed(2));
+                          }
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">End Y₂ (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={arcEndY}
+                        onChange={(e) => setArcEndY(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="text-[11px] font-mono text-amber-300 font-semibold pt-1">
+                    3. Arc Length (m) &amp; Curve Direction
+                  </div>
+                  {(() => {
+                    const chord = Math.hypot(
+                      (parseFloat(arcEndX) || 0) - (parseFloat(arcStartX) || 0),
+                      (parseFloat(arcEndY) || 0) - (parseFloat(arcStartY) || 0)
+                    );
+                    return (
+                      <div className="text-[10px] font-mono text-slate-400">
+                        Straight Chord Distance = {chord.toFixed(2)} m (Arc Length must be &gt;{' '}
+                        {chord.toFixed(2)} m)
+                      </div>
+                    );
+                  })()}
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-amber-300 font-semibold">
+                        Arc Length (m)
+                      </span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={arcLengthM}
+                        onChange={(e) => setArcLengthM(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-amber-500/60 font-mono text-xs text-white"
+                      />
+                    </label>
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">Curve Direction</span>
+                      <select
+                        value={arcDirectionOutward ? 'OUTWARD' : 'INWARD'}
+                        onChange={(e) => setArcDirectionOutward(e.target.value === 'OUTWARD')}
+                        className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      >
+                        <option value="OUTWARD">Arch Up / Outward</option>
+                        <option value="INWARD">Invert / Inward</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const x1 = parseFloat(arcStartX) || 0;
+                      const y1 = parseFloat(arcStartY) || 0;
+                      const x2 = parseFloat(arcEndX) || 0;
+                      const y2 = parseFloat(arcEndY) || 0;
+                      const len = parseFloat(arcLengthM) || 1;
+                      appendArcSegmentByLength(
+                        { x: x1, y: y1 },
+                        { x: x2, y: y2 },
+                        len,
+                        arcDirectionOutward
+                      );
+                    }}
+                    className="w-full py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-mono text-xs font-bold cursor-pointer"
+                  >
+                    + Create Arc (Start → Arc Length → End)
+                  </button>
+                </div>
+
+                {/* If an existing Arc Segment is clicked, allow live editing its Arc Length */}
+                {selectedSegment && selectedSegmentMetrics && (
+                  <div className="p-3 rounded-xl bg-slate-950/90 border border-amber-500/50 space-y-2">
+                    <div className="text-xs font-mono font-bold text-amber-300">
+                      EDIT SELECTED SEGMENT ({selectedSegmentMetrics.fromPoint.label} →{' '}
+                      {selectedSegmentMetrics.toPoint.label})
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="space-y-0.5">
+                        <span className="text-[10px] text-slate-400">Type</span>
+                        <select
+                          value={selectedSegment.type}
+                          onChange={(e) => {
+                            const nextT = e.target.value as CustomSegmentType;
+                            setProfile((prev) => ({
+                              ...prev,
+                              segments: prev.segments.map((s) =>
+                                s.id === selectedSegment.id
+                                  ? {
+                                      ...s,
+                                      type: nextT,
+                                      arcBulge: nextT === 'arc' ? s.arcBulge || 0.35 : undefined,
+                                    }
+                                  : s
+                              ),
+                            }));
+                          }}
+                          className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                        >
+                          <option value="line">Straight Line</option>
+                          <option value="arc">Curved Arc</option>
+                        </select>
+                      </label>
+                      {selectedSegment.type === 'arc' && (
+                        <label className="space-y-0.5">
+                          <span className="text-[10px] text-amber-300">Arc Length (m)</span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            value={selectedSegmentMetrics.arcLength}
                             onChange={(e) => {
-                              const val = e.target.value;
-                              setBasicInvertDropM(val);
-                              handleApplyBasicRegularShape({ invertDrop: val });
+                              const targetL = parseFloat(e.target.value);
+                              if (Number.isNaN(targetL)) return;
+                              const nextB = computeBulgeFromArcLength(
+                                selectedSegmentMetrics.chordLength,
+                                targetL,
+                                (selectedSegment.arcBulge ?? 0.35) >= 0 ? 1 : -1
+                              );
+                              setProfile((prev) => ({
+                                ...prev,
+                                segments: prev.segments.map((s) =>
+                                  s.id === selectedSegment.id ? { ...s, arcBulge: nextB } : s
+                                ),
+                              }));
                             }}
-                            className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-amber-300 font-bold"
+                            className="w-full px-2 py-1 rounded bg-slate-900 border border-amber-500/60 font-mono text-xs text-white"
                           />
                         </label>
                       )}
                     </div>
-                  )}
-
-                  {basicShapeId === 'rectangular' && (
-                    <div className="grid grid-cols-2 gap-2 items-end">
-                      <label className="space-y-0.5">
-                        <span className="text-slate-400 text-[10px]">
-                          Corner Fillet Radius (m) [0=Sharp]
-                        </span>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0"
-                          value={basicCornerRadiusM}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setBasicCornerRadiusM(val);
-                            handleApplyBasicRegularShape({ cornerRadius: val });
-                          }}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-cyan-300 font-bold"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextR = parseFloat(basicCornerRadiusM) > 0 ? '0.00' : '0.80';
-                          setBasicCornerRadiusM(nextR);
-                          handleApplyBasicRegularShape({ cornerRadius: nextR });
-                        }}
-                        className="py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px] cursor-pointer"
-                      >
-                        {parseFloat(basicCornerRadiusM) > 0
-                          ? 'Make Sharp Corners (0m)'
-                          : 'Round Top Corners (0.8m)'}
-                      </button>
-                    </div>
-                  )}
-
-                  {basicShapeId === 'circular' && (
-                    <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={lockCircularDiameter}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          setLockCircularDiameter(checked);
-                          if (checked) {
-                            setBasicHeightM(basicWidthM);
-                            handleApplyBasicRegularShape({
-                              width: basicWidthM,
-                              height: basicWidthM,
-                            });
-                          }
-                        }}
-                        className="rounded border-slate-700 bg-slate-900 text-emerald-500"
-                      />
-                      <span>Lock Perfect Circle (Diameter W = H)</span>
-                    </label>
-                  )}
-
-                  {basicShapeId === 'trapezoidal' && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="space-y-0.5">
-                        <span className="text-slate-400 text-[10px]">Top Roof Width (m)</span>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="1.0"
-                          value={basicTopWidthM}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setBasicTopWidthM(val);
-                            if (parseFloat(val) >= 1.0) {
-                              handleApplyBasicRegularShape({ topWidth: val });
-                            }
-                          }}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-cyan-300 font-bold"
-                        />
-                      </label>
-                      <label className="space-y-0.5">
-                        <span className="text-slate-400 text-[10px]">Roof Arch Rise (m)</span>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0"
-                          value={basicInvertDropM}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setBasicInvertDropM(val);
-                            handleApplyBasicRegularShape({ invertDrop: val });
-                          }}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-amber-300 font-bold"
-                        />
-                      </label>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-1.5 pt-0.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handleApplyBasicRegularShape();
-                        setTimeout(handleFitGraph, 20);
-                      }}
-                      className="flex-1 py-1.5 px-2.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      Generate {basicWidthM}m × {basicHeightM}m Shape
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const wTarget = Math.max(1.0, parseFloat(basicWidthM) || evaluated.width);
-                        const hTarget = Math.max(1.0, parseFloat(basicHeightM) || evaluated.height);
-                        const scaled = applyParametricOverallDimensions(profile, {
-                          width: wTarget,
-                          height: hTarget,
-                        });
-                        updateProfileWithUndo(scaled);
-                      }}
-                      className="py-1.5 px-2 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] font-semibold cursor-pointer"
-                      title="Scale current graph points to match Width × Height"
-                    >
-                      Scale Current
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          {/* 1. ADD SEGMENT BY LENGTH & ANGLE OR X,Y POINT */}
-          <div className="p-3 bg-slate-950/90 border border-slate-800 rounded space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-cyan-300 text-[11px]">
-                1. ADD LINE / ARC / POINT
-              </span>
-              <div className="flex rounded overflow-hidden border border-slate-700 text-[10px]">
-                <button
-                  type="button"
-                  onClick={() => setAddMode('length_angle')}
-                  className={`px-2 py-0.5 font-semibold cursor-pointer ${
-                    addMode === 'length_angle'
-                      ? 'bg-cyan-600 text-white'
-                      : 'bg-slate-900 text-slate-400'
-                  }`}
-                >
-                  Length &amp; Angle
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAddMode('xy')}
-                  className={`px-2 py-0.5 font-semibold cursor-pointer ${
-                    addMode === 'xy' ? 'bg-cyan-600 text-white' : 'bg-slate-900 text-slate-400'
-                  }`}
-                >
-                  X, Y Point
-                </button>
-              </div>
-            </div>
-
-            {addMode === 'length_angle' ? (
-              <div className="space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-0.5">
-                    <span className="text-slate-400 text-[10px]">Length (m)</span>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0.1"
-                      value={inputLengthM}
-                      onChange={(e) => setInputLengthM(e.target.value)}
-                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-white font-bold"
-                    />
-                  </label>
-                  <label className="space-y-0.5">
-                    <span className="text-slate-400 text-[10px]">Angle (°) [0–360°]</span>
-                    <input
-                      type="number"
-                      step="5"
-                      value={inputAngleDeg}
-                      onChange={(e) => setInputAngleDeg(e.target.value)}
-                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-white font-bold"
-                    />
-                  </label>
-                </div>
-
-                {/* Quick Angle Preset Buttons */}
-                <div className="grid grid-cols-4 gap-1 text-[10px]">
-                  {[
-                    { deg: '0', label: '0° → Right' },
-                    { deg: '90', label: '90° ↑ Up' },
-                    { deg: '180', label: '180° ← Left' },
-                    { deg: '270', label: '270° ↓ Down' },
-                  ].map((b) => (
-                    <button
-                      key={b.deg}
-                      type="button"
-                      onClick={() => setInputAngleDeg(b.deg)}
-                      className={`py-1 rounded border cursor-pointer ${
-                        inputAngleDeg === b.deg
-                          ? 'bg-cyan-950 text-cyan-300 border-cyan-500/60 font-bold'
-                          : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-                      }`}
-                    >
-                      {b.label}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Segment Type: Line vs Arc */}
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setInputSegType('line')}
-                    className={`flex-1 py-1 rounded border text-[11px] font-semibold cursor-pointer ${
-                      inputSegType === 'line'
-                        ? 'bg-cyan-600 text-white border-cyan-400'
-                        : 'bg-slate-900 text-slate-400 border-slate-800'
-                    }`}
-                  >
-                    Straight Line
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setInputSegType('arc')}
-                    className={`flex-1 py-1 rounded border text-[11px] font-semibold cursor-pointer ${
-                      inputSegType === 'arc'
-                        ? 'bg-amber-600 text-white border-amber-400'
-                        : 'bg-slate-900 text-slate-400 border-slate-800'
-                    }`}
-                  >
-                    Curved Arc
-                  </button>
-                  {inputSegType === 'arc' && (
-                    <input
-                      type="number"
-                      step="0.2"
-                      min="0.5"
-                      value={inputArcRadiusM}
-                      onChange={(e) => setInputArcRadiusM(e.target.value)}
-                      placeholder="Radius"
-                      title="Arc Radius (m)"
-                      className="w-20 px-2 py-1 bg-slate-900 border border-amber-500/60 rounded text-amber-200"
-                    />
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleAddByLengthAndAngle}
-                  className="w-full py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  Add {inputSegType === 'arc' ? 'Arc' : 'Line'} ({inputLengthM}m @ {inputAngleDeg}°)
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-0.5">
-                    <span className="text-slate-400 text-[10px]">X Coordinate (m)</span>
-                    <input
-                      type="number"
-                      step="0.25"
-                      value={inputX}
-                      onChange={(e) => setInputX(e.target.value)}
-                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-white font-bold"
-                    />
-                  </label>
-                  <label className="space-y-0.5">
-                    <span className="text-slate-400 text-[10px]">Y Coordinate (m)</span>
-                    <input
-                      type="number"
-                      step="0.25"
-                      value={inputY}
-                      onChange={(e) => setInputY(e.target.value)}
-                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-white font-bold"
-                    />
-                  </label>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleAddPointAt(
-                      { x: parseFloat(inputX) || 0, y: parseFloat(inputY) || 0 },
-                      inputSegType,
-                      parseFloat(inputArcRadiusM) || 5
-                    )
-                  }
-                  className="w-full py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  Add Point ({inputX}m, {inputY}m)
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* 2. SELECTED POINT (X, Y & CORNER ROUND) & SELECTED SEGMENT (LINE / ARC / LENGTH / ANGLE) */}
-          <div className="p-3 bg-slate-950/90 border border-slate-800 rounded space-y-2.5">
-            <span className="font-bold text-cyan-300 text-[11px] block">
-              2. EDIT SELECTED POINT / LINE / ARC / ROUND
-            </span>
-
-            {selectedPoint && (
-              <div className="p-2 bg-slate-900/90 border border-slate-800 rounded space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-white">Point {selectedPoint.label}</span>
-                  {profile.controlPoints.length > 3 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        updateProfileWithUndo((prev) => {
-                          const filtered = prev.controlPoints.filter(
-                            (p) => p.id !== selectedPoint.id
-                          );
-                          const norm = normalizeProfileTopology(
-                            filtered,
-                            prev.segments,
-                            prev.isClosed
-                          );
-                          return {
-                            ...prev,
-                            controlPoints: norm.controlPoints,
-                            segments: norm.segments,
-                          };
-                        });
-                        setSelectedPointId(profile.controlPoints[0]?.id || null);
-                      }}
-                      className="text-rose-400 hover:text-rose-300 flex items-center gap-1 text-[10px] cursor-pointer"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      Delete Point
-                    </button>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="space-y-0.5">
-                    <span className="text-slate-400 text-[10px]">X (m)</span>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={selectedPoint.x}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        if (Number.isNaN(val)) return;
-                        updateProfileWithUndo((prev) => ({
-                          ...prev,
-                          controlPoints: prev.controlPoints.map((p) =>
-                            p.id === selectedPoint.id ? { ...p, x: val } : p
-                          ),
-                        }));
-                      }}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-cyan-300 font-bold"
-                    />
-                  </label>
-                  <label className="space-y-0.5">
-                    <span className="text-slate-400 text-[10px]">Y (m)</span>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={selectedPoint.y}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        if (Number.isNaN(val)) return;
-                        updateProfileWithUndo((prev) => ({
-                          ...prev,
-                          controlPoints: prev.controlPoints.map((p) =>
-                            p.id === selectedPoint.id ? { ...p, y: val } : p
-                          ),
-                        }));
-                      }}
-                      className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-cyan-300 font-bold"
-                    />
-                  </label>
-                </div>
-
-                {/* Round / Fillet This Corner */}
-                <div className="flex items-center gap-2 pt-1 border-t border-slate-800">
-                  <span className="text-[10px] text-indigo-300 font-semibold">
-                    Round Radius (m):
-                  </span>
-                  <input
-                    type="number"
-                    step="0.2"
-                    min="0.2"
-                    max="15"
-                    value={roundRadiusM}
-                    onChange={(e) => setRoundRadiusM(e.target.value)}
-                    className="w-16 px-1.5 py-0.5 bg-slate-950 border border-indigo-500/50 rounded text-white text-[11px]"
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleRoundCornerVertex(
-                        selectedPoint.id,
-                        Math.max(0.2, parseFloat(roundRadiusM) || 1.2)
-                      )
-                    }
-                    className="flex-1 py-1 px-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[10px] flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <CornerUpRight className="w-3 h-3" />
-                    Round Corner {selectedPoint.label}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Selected Segment Inspector */}
-            {selectedSegment && selectedSegmentMetrics && (
-              <div className="p-2 bg-slate-900/90 border border-slate-800 rounded space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-amber-300">
-                    Segment {selectedSegment.id} ({selectedSegment.type.toUpperCase()})
-                  </span>
-                  <div className="flex gap-1">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateProfileWithUndo((prev) => ({
-                          ...prev,
-                          segments: prev.segments.map((s) =>
-                            s.id === selectedSegment.id
-                              ? { ...s, type: 'line', arcBulge: undefined }
-                              : s
-                          ),
-                        }))
-                      }
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
-                        selectedSegment.type === 'line'
-                          ? 'bg-cyan-600 text-white'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      Line
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateProfileWithUndo((prev) => ({
-                          ...prev,
-                          segments: prev.segments.map((s) =>
-                            s.id === selectedSegment.id
-                              ? { ...s, type: 'arc', arcBulge: s.arcBulge || 0.38 }
-                              : s
-                          ),
-                        }))
-                      }
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
-                        selectedSegment.type === 'arc'
-                          ? 'bg-amber-600 text-white'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      Arc
-                    </button>
-                  </div>
-                </div>
-
-                {(() => {
-                  const a = profile.controlPoints.find(
-                    (p) => p.id === selectedSegment.fromPointId
-                  );
-                  const b = profile.controlPoints.find((p) => p.id === selectedSegment.toPointId);
-                  const curAngle =
-                    a && b
-                      ? Number(
-                          (((Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI + 360) % 360).toFixed(
-                            1
-                          )
-                        )
-                      : 0;
-                  const curLen = Number(selectedSegmentMetrics.chordLength.toFixed(2));
-
-                  return (
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="space-y-0.5">
-                        <span className="text-slate-400 text-[10px]">Segment Length (m)</span>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0.1"
-                          value={curLen}
-                          onChange={(e) =>
-                            handleUpdateSegmentLengthAngle(
-                              selectedSegment.id,
-                              parseFloat(e.target.value) || curLen,
-                              curAngle
-                            )
-                          }
-                          className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-white font-bold"
-                        />
-                      </label>
-                      <label className="space-y-0.5">
-                        <span className="text-slate-400 text-[10px]">Angle (°)</span>
-                        <input
-                          type="number"
-                          step="5"
-                          value={curAngle}
-                          onChange={(e) =>
-                            handleUpdateSegmentLengthAngle(
-                              selectedSegment.id,
-                              curLen,
-                              parseFloat(e.target.value) || 0
-                            )
-                          }
-                          className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-white font-bold"
-                        />
-                      </label>
-                    </div>
-                  );
-                })()}
-
-                {selectedSegment.type === 'arc' && (
-                  <div className="space-y-1.5 pt-1 border-t border-slate-800">
-                    <div className="flex items-center justify-between text-[10px]">
-                      <span className="text-amber-300">
-                        Arc Curve Bulge ({selectedSegment.arcBulge?.toFixed(2) || '0.35'})
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateProfileWithUndo((prev) => ({
-                            ...prev,
-                            segments: prev.segments.map((s) =>
-                              s.id === selectedSegment.id
-                                ? { ...s, arcBulge: -(s.arcBulge || 0.35) }
-                                : s
-                            ),
-                          }))
-                        }
-                        className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-200 cursor-pointer"
-                      >
-                        Flip Curve Direction ⌒/⌣
-                      </button>
-                    </div>
-                    <input
-                      type="range"
-                      min="-1.2"
-                      max="1.2"
-                      step="0.02"
-                      value={selectedSegment.arcBulge ?? 0.35}
-                      onChange={(e) => {
-                        const b = parseFloat(e.target.value);
-                        updateProfileWithUndo((prev) => ({
-                          ...prev,
-                          segments: prev.segments.map((s) =>
-                            s.id === selectedSegment.id ? { ...s, arcBulge: b } : s
-                          ),
-                        }));
-                      }}
-                      className="w-full accent-amber-500"
-                    />
                   </div>
                 )}
               </div>
             )}
-          </div>
 
-          {/* 3. POINTS & SEGMENTS TABLE (X, Y, LINE/ARC, LENGTH) */}
-          <div className="p-3 bg-slate-950/90 border border-slate-800 rounded space-y-2 flex-1 min-h-[180px] flex flex-col">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-cyan-300 text-[11px]">
-                3. X, Y POINTS &amp; LINES / ARCS ({profile.controlPoints.length} Pts)
-              </span>
-              <div className="flex items-center gap-1 text-[10px]">
-                <span className="text-slate-400">Scale W×H:</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const nextP = applyParametricOverallDimensions(profile, {
-                      width: evaluated.width,
-                      height: evaluated.height,
-                    });
-                    updateProfileWithUndo(nextP);
-                  }}
-                  className="text-cyan-400 hover:underline"
-                >
-                  {evaluated.width.toFixed(1)}×{evaluated.height.toFixed(1)}m
-                </button>
+            {/* --------------------------------------------------------------
+                CONTEXT 3: XY POINT MODE PROPERTY PALETTE ONLY
+               -------------------------------------------------------------- */}
+            {(subMode === 'XY_POINT' || subMode === 'SELECT_EDIT') && (
+              <div className="space-y-3">
+                <div className="text-xs font-mono font-bold text-emerald-300">
+                  XY POINT COORDINATES (METERS)
+                </div>
+                <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">X (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={xyInputX}
+                        onChange={(e) => setXyInputX(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                    <label className="space-y-0.5">
+                      <span className="text-[10px] text-slate-400">Y (m)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={xyInputY}
+                        onChange={(e) => setXyInputY(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 font-mono text-xs text-white"
+                      />
+                    </label>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const x = parseFloat(xyInputX) || 0;
+                      const y = parseFloat(xyInputY) || 0;
+                      setProfile((prev) => {
+                        const pts = prev.controlPoints;
+                        const nextId = `P${pts.length + 1}`;
+                        const nextPt: ProfileControlPoint = {
+                          id: nextId,
+                          label: nextId,
+                          x: Number(x.toFixed(2)),
+                          y: Number(y.toFixed(2)),
+                          role: 'corner',
+                        };
+                        const nextSegs =
+                          pts.length > 0
+                            ? [
+                                ...prev.segments,
+                                {
+                                  id: `S-${Date.now()}`,
+                                  fromPointId: pts[pts.length - 1].id,
+                                  toPointId: nextId,
+                                  type: 'line' as CustomSegmentType,
+                                },
+                              ]
+                            : prev.segments;
+                        return {
+                          ...prev,
+                          controlPoints: [...pts, nextPt],
+                          segments: nextSegs,
+                        };
+                      });
+                    }}
+                    className="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold cursor-pointer"
+                  >
+                    + Add XY Point
+                  </button>
+                </div>
+
+                {/* Editable List of Points */}
+                {profile.controlPoints.length > 0 && (
+                  <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                    {profile.controlPoints.map((cp) => (
+                      <div
+                        key={cp.id}
+                        className="flex items-center justify-between gap-1.5 p-2 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono"
+                      >
+                        <span className="font-bold text-cyan-300 w-8">{cp.label}</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={cp.x}
+                          onChange={(e) => {
+                            const nx = parseFloat(e.target.value);
+                            if (Number.isNaN(nx)) return;
+                            setProfile((prev) => ({
+                              ...prev,
+                              controlPoints: prev.controlPoints.map((p) =>
+                                p.id === cp.id ? { ...p, x: nx } : p
+                              ),
+                            }));
+                          }}
+                          className="w-20 px-1.5 py-1 rounded bg-slate-950 border border-slate-700 text-white text-xs"
+                        />
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={cp.y}
+                          onChange={(e) => {
+                            const ny = parseFloat(e.target.value);
+                            if (Number.isNaN(ny)) return;
+                            setProfile((prev) => ({
+                              ...prev,
+                              controlPoints: prev.controlPoints.map((p) =>
+                                p.id === cp.id ? { ...p, y: ny } : p
+                              ),
+                            }));
+                          }}
+                          className="w-20 px-1.5 py-1 rounded bg-slate-950 border border-slate-700 text-white text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProfile((prev) => ({
+                              ...prev,
+                              controlPoints: prev.controlPoints.filter((p) => p.id !== cp.id),
+                              segments: prev.segments.filter(
+                                (s) => s.fromPointId !== cp.id && s.toPointId !== cp.id
+                              ),
+                            }));
+                          }}
+                          className="p-1 text-rose-400 hover:text-rose-200 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Live Computed Shape Summary */}
+            <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-1.5 font-mono text-xs">
+              <div className="text-[11px] text-cyan-400 font-bold">
+                COMPUTED TUNNEL DIMENSIONS
+              </div>
+              <div className="flex justify-between text-slate-300">
+                <span>Span Width (W):</span>
+                <strong className="text-white">{builtCustomGeometry.width.toFixed(2)} m</strong>
+              </div>
+              <div className="flex justify-between text-slate-300">
+                <span>Total Height (H):</span>
+                <strong className="text-white">{builtCustomGeometry.height.toFixed(2)} m</strong>
+              </div>
+              <div className="flex justify-between text-slate-300">
+                <span>Left &amp; Right Wall Height:</span>
+                <strong className="text-emerald-300">
+                  {builtCustomGeometry.wallHeight.toFixed(2)} m
+                </strong>
+              </div>
+              <div className="flex justify-between text-slate-300">
+                <span>Cross-Section Area:</span>
+                <strong className="text-cyan-300">
+                  {(builtCustomGeometry.designAreaSqMeters || 0).toFixed(2)} m²
+                </strong>
               </div>
             </div>
 
-            <div className="overflow-y-auto flex-1 border border-slate-800 rounded">
-              <table className="w-full text-left border-collapse text-[10px]">
-                <thead>
-                  <tr className="bg-slate-900 text-slate-400 border-b border-slate-800 sticky top-0">
-                    <th className="py-1 px-1.5">PT</th>
-                    <th className="py-1 px-1.5">X (m)</th>
-                    <th className="py-1 px-1.5">Y (m)</th>
-                    <th className="py-1 px-1.5">NEXT SEG</th>
-                    <th className="py-1 px-1.5">LEN</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {profile.controlPoints.map((pt, idx) => {
-                    const seg = profile.segments[idx];
-                    const metric = seg
-                      ? evaluated.segmentMetrics.find((m) => m.segmentId === seg.id)
-                      : null;
-                    const isSel = pt.id === selectedPointId;
+            {!profile.isClosed && profile.controlPoints.length >= 3 && (
+              <button
+                type="button"
+                onClick={handleCloseShapeNow}
+                className="w-full py-2.5 rounded-xl bg-cyan-700 hover:bg-cyan-600 text-white font-mono text-xs font-bold cursor-pointer"
+              >
+                ✓ Close Tunnel Shape Loop
+              </button>
+            )}
 
-                    return (
-                      <tr
-                        key={pt.id}
-                        onClick={() => {
-                          setSelectedPointId(pt.id);
-                          if (seg) setSelectedSegmentId(seg.id);
-                        }}
-                        className={`border-b border-slate-800/60 cursor-pointer ${
-                          isSel ? 'bg-cyan-950/50' : 'hover:bg-slate-900/60'
-                        }`}
-                      >
-                        <td className="py-1 px-1.5 font-bold text-cyan-300">{pt.label}</td>
-                        <td className="py-1 px-1">
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={pt.x}
-                            onChange={(e) => {
-                              const v = parseFloat(e.target.value);
-                              if (Number.isNaN(v)) return;
-                              updateProfileWithUndo((prev) => ({
-                                ...prev,
-                                controlPoints: prev.controlPoints.map((item) =>
-                                  item.id === pt.id ? { ...item, x: v } : item
-                                ),
-                              }));
-                            }}
-                            className="w-14 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-white"
-                          />
-                        </td>
-                        <td className="py-1 px-1">
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={pt.y}
-                            onChange={(e) => {
-                              const v = parseFloat(e.target.value);
-                              if (Number.isNaN(v)) return;
-                              updateProfileWithUndo((prev) => ({
-                                ...prev,
-                                controlPoints: prev.controlPoints.map((item) =>
-                                  item.id === pt.id ? { ...item, y: v } : item
-                                ),
-                              }));
-                            }}
-                            className="w-14 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-white"
-                          />
-                        </td>
-                        <td className="py-1 px-1.5">
-                          {seg ? (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                updateProfileWithUndo((prev) => ({
-                                  ...prev,
-                                  segments: prev.segments.map((s) =>
-                                    s.id === seg.id
-                                      ? {
-                                          ...s,
-                                          type: s.type === 'arc' ? 'line' : 'arc',
-                                          arcBulge: s.type === 'arc' ? undefined : 0.35,
-                                        }
-                                      : s
-                                  ),
-                                }));
-                              }}
-                              className={`px-1.5 py-0.5 rounded font-bold cursor-pointer ${
-                                seg.type === 'arc'
-                                  ? 'bg-amber-600/30 text-amber-300 border border-amber-500/50'
-                                  : 'bg-slate-800 text-slate-300 border border-slate-700'
-                              }`}
-                              title="Click to toggle Line ↔ Arc"
-                            >
-                              {seg.type.toUpperCase()}
-                            </button>
-                          ) : (
-                            <span className="text-slate-500">—</span>
-                          )}
-                        </td>
-                        <td className="py-1 px-1.5 text-slate-300">
-                          {metric ? `${metric.arcLength.toFixed(2)}m` : '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <button
+              type="button"
+              onClick={handleConfirmAndGoToPhotos}
+              className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold flex items-center justify-center gap-2 shadow-md cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              Save Custom Shape &amp; Go to Add Pictures →
+            </button>
             </div>
-          </div>
           </aside>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
       {/* ====================================================================
-          AUTOCAD BLOCK EDITOR BOTTOM STATUS BAR & COORDINATE READOUT
+          TAB 3: IMPORT DWG / DXF
          ==================================================================== */}
-      <footer className="flex flex-wrap items-center justify-between gap-2 px-3 py-1 bg-[#0C1018] border-t border-[#252F45] text-[10px] font-mono shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-0.5 bg-[#1B2538] text-cyan-300 border border-cyan-500/60 rounded-xs font-bold">
-            BLOCK: TUNNEL CROSS-SECTION
-          </span>
-          <span className="text-slate-400">
-            Vertices: <strong className="text-white">{profile.controlPoints.length}</strong> ·
-            Segments: <strong className="text-white">{profile.segments.length}</strong> · Area:{' '}
-            <strong className="text-emerald-300">{evaluated.designAreaSqMeters.toFixed(2)} m²</strong> ·
-            Perimeter:{' '}
-            <strong className="text-cyan-300">{evaluated.totalPerimeterMeters.toFixed(2)} m</strong>
-          </span>
-        </div>
+      {mainTab === 'dxf_import' && (
+        <div className="flex-1 min-h-0 flex items-center justify-center p-6 overflow-y-auto">
+          <div className="w-full max-w-2xl p-6 rounded-2xl bg-[#111827] border border-slate-800 space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-white">
+                  Import Tunnel Cross-Section (DWG / DXF)
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Upload your AutoCAD `.dxf` or `.dwg` cross-section file to extract exact 1m-scaled dimensions for {settings.locationName || 'this location'}.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const sampleDxf = generateSampleTunnelDXF(8.4, 7.2, 4.2);
+                  const blob = new Blob([sampleDxf], { type: 'application/dxf' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'sample_tunnel_profile.dxf';
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-mono border border-slate-700 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Sample DXF
+              </button>
+            </div>
 
-        <div className="flex items-center gap-1.5">
-          <span className="px-2 py-0.5 bg-[#070A0F] border border-slate-800 rounded-xs text-slate-300">
-            {cursorMeters ? (
-              <>
-                X: <strong className="text-emerald-300">{cursorMeters.x.toFixed(2)}m</strong>, Y:{' '}
-                <strong className="text-emerald-300">{cursorMeters.y.toFixed(2)}m</strong>
-              </>
-            ) : (
-              <>X: 0.00m, Y: 0.00m</>
+            <input
+              ref={dxfFileInputRef}
+              type="file"
+              accept=".dxf,.dwg"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleUploadCadFile(file);
+                e.target.value = '';
+              }}
+            />
+
+            <button
+              type="button"
+              onClick={() => dxfFileInputRef.current?.click()}
+              className="w-full py-10 rounded-xl border-2 border-dashed border-cyan-500/50 hover:border-cyan-400 bg-slate-950/60 flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors"
+            >
+              <Upload className="w-8 h-8 text-cyan-400" />
+              <span className="text-sm font-semibold text-white">
+                Click to Select .DWG or .DXF File
+              </span>
+              <span className="text-xs font-mono text-slate-400">
+                Supports LINE, LWPOLYLINE, POLYLINE &amp; ARC entities
+              </span>
+            </button>
+
+            {dxfStatusMessage && (
+              <div className="p-3 rounded-xl bg-slate-950 border border-cyan-500/40 text-xs font-mono text-cyan-300">
+                {dxfStatusMessage}
+              </div>
             )}
-          </span>
-          <button
-            type="button"
-            onClick={() => setGridSnapStep((s) => (s === 0 ? 0.25 : 0))}
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              gridSnapStep > 0
-                ? 'bg-cyan-950 text-cyan-300 border-cyan-600/70'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-          >
-            SNAP {gridSnapStep > 0 ? `${gridSnapStep}m` : 'OFF'}
-          </button>
-          <button
-            type="button"
-            onClick={() => setAsideDockSide((prev) => (prev === 'right' ? 'left' : 'right'))}
-            className="px-1.5 py-0.5 rounded-xs bg-[#121824] hover:bg-slate-800 text-amber-300 border border-slate-700 font-bold cursor-pointer"
-          >
-            DOCK: {asideDockSide.toUpperCase()}
-          </button>
+
+            {dxfImportedGeometry && (
+              <div className="p-4 rounded-xl bg-slate-950/90 border border-emerald-500/40 space-y-3">
+                <div className="text-xs font-mono font-bold text-emerald-300">
+                  EXTRACTED CAD DIMENSIONS
+                </div>
+                <div className="grid grid-cols-3 gap-3 text-xs font-mono">
+                  <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                    <div className="text-slate-400">Width (W)</div>
+                    <div className="text-sm font-bold text-white mt-0.5">
+                      {dxfImportedGeometry.width.toFixed(2)} m
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                    <div className="text-slate-400">Height (H)</div>
+                    <div className="text-sm font-bold text-white mt-0.5">
+                      {dxfImportedGeometry.height.toFixed(2)} m
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded bg-slate-900 border border-slate-800">
+                    <div className="text-slate-400">Wall Height</div>
+                    <div className="text-sm font-bold text-emerald-300 mt-0.5">
+                      {dxfImportedGeometry.wallHeight.toFixed(2)} m
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleConfirmAndGoToPhotos}
+              className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              Save CAD Shape &amp; Go to Add Pictures →
+            </button>
+          </div>
         </div>
-      </footer>
+      )}
     </div>
   );
 };

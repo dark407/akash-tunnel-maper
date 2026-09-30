@@ -15,7 +15,7 @@ import {
 
 export type SheetLayoutArrangement = 'AUTO_INTELLIGENT' | 'MAXIMIZE_FACE';
 
-const SHEET_CONFIG_STORAGE_KEY = 'akash_tunnel_engineering_sheet_config_v2_fresh';
+const SHEET_CONFIG_STORAGE_KEY = 'eswa_tunnel_engineering_sheet_config_v5_clean';
 
 export function createDefaultEngineeringSheetConfig(
   settings?: Partial<TunnelSettings>
@@ -443,14 +443,12 @@ export function computeFinalSheetAutoLayout(params: {
 
   const roundLen = Math.max(1.5, settings.roundLength || 3.5);
   const crownSpan = Math.max(1.0, geometry.crownArcLength || geometry.width);
-  const leftWallSpan = Math.max(
-    0.5,
-    geometry.leftWallArcLength || geometry.leftWallHeight || geometry.wallHeight
+  const unifiedWallSpan = Math.max(
+    1.0,
+    geometry.wallHeight || geometry.leftWallHeight || geometry.rightWallHeight || 4.2
   );
-  const rightWallSpan = Math.max(
-    0.5,
-    geometry.rightWallArcLength || geometry.rightWallHeight || geometry.wallHeight
-  );
+  const leftWallSpan = unifiedWallSpan;
+  const rightWallSpan = unifiedWallSpan;
   const totalDevelopedWidthMeters = leftWallSpan + crownSpan + rightWallSpan;
 
   // Minimize empty white space around the Tunnel Face while reserving safe room for dimension lines & callout labels

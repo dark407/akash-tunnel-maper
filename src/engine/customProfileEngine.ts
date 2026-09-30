@@ -11,7 +11,7 @@ import {
   TunnelGeometry,
 } from '../types/tunnel';
 
-const CHAINAGE_PROFILE_SCHEDULE_KEY = 'akash_tunnel_chainage_profile_schedule_v2_fresh';
+const CHAINAGE_PROFILE_SCHEDULE_KEY = 'eswa_tunnel_chainage_profile_schedule_v5_clean';
 
 // ============================================================================
 // 1. MULTI-SPACE COORDINATE SYSTEM FOR CUSTOM PROFILE EDITOR
@@ -609,18 +609,20 @@ export function evaluateCustomProfileGeometry(
   const width = Number(Math.max(1.0, maxX - minX).toFixed(3));
   const height = Number(Math.max(1.0, maxY - minY).toFixed(3));
 
-  const leftWallHeight =
+  const rawLeftWallH =
     leftWallMaxY > leftWallMinY
       ? Number((leftWallMaxY - leftWallMinY).toFixed(3))
       : Number((height * 0.58).toFixed(3));
-  const rightWallHeight =
+  const rawRightWallH =
     rightWallMaxY > rightWallMinY
       ? Number((rightWallMaxY - rightWallMinY).toFixed(3))
       : Number((height * 0.58).toFixed(3));
-  const wallHeight = Number(((leftWallHeight + rightWallHeight) / 2).toFixed(3));
+  const wallHeight = Number(Math.max(1.0, (rawLeftWallH + rawRightWallH) / 2).toFixed(3));
+  const leftWallHeight = wallHeight;
+  const rightWallHeight = wallHeight;
 
-  if (leftWallArcLength < 0.2) leftWallArcLength = leftWallHeight;
-  if (rightWallArcLength < 0.2) rightWallArcLength = rightWallHeight;
+  leftWallArcLength = wallHeight;
+  rightWallArcLength = wallHeight;
   if (crownArcLength < 0.2) crownArcLength = width * 1.15;
 
   const totalPerimeterMeters = Number(

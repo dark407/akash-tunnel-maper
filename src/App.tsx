@@ -116,6 +116,7 @@ import {
 } from 'lucide-react';
 
 type ScreenStep =
+  | 'welcome'
   | 'start'
   | 'geometry_manual'
   | 'geometry_cad'
@@ -123,7 +124,34 @@ type ScreenStep =
   | 'drive_and_photos'
   | 'mapping';
 
-const OFFLINE_DRAFT_STORAGE_KEY = 'akash_tunnel_mapper_field_draft_v2_fresh';
+const OFFLINE_DRAFT_STORAGE_KEY = 'eswa_tunnel_mapper_field_draft_v5_clean';
+const CLEAN_RESET_FLAG_KEY = 'ESWA_CLEAN_FRESH_RESET_V5';
+
+// One-time clean storage reset so previously cached demo/example data is wiped on fresh startup
+if (typeof window !== 'undefined') {
+  try {
+    if (localStorage.getItem(CLEAN_RESET_FLAG_KEY) !== 'true') {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (
+          k &&
+          (k.startsWith('akash_') ||
+            k.startsWith('AKASH_') ||
+            k.startsWith('eswa_continuous_') ||
+            k.startsWith('eswa_tunnel_') ||
+            k.startsWith('eswa_3d_strip_'))
+        ) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
+      localStorage.setItem(CLEAN_RESET_FLAG_KEY, 'true');
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 interface AppProps {
   isMasterSoftware?: boolean;
@@ -137,7 +165,7 @@ export default function App({
   const { theme, toggleTheme } = useTheme();
   const isLight = theme === 'light';
   const responsive = useResponsiveLayout();
-  const [screen, setScreen] = useState<ScreenStep>('start');
+  const [screen, setScreen] = useState<ScreenStep>('welcome');
   const [isFirstOpening, setIsFirstOpening] = useState<boolean>(true);
   const [pendingRequestCount, setPendingRequestCount] = useState<number>(0);
   const [isBootLoading, setIsBootLoading] = useState<boolean>(true);
@@ -179,10 +207,10 @@ export default function App({
       projectName: initialSheetConfig.projectName || '',
       tunnelName: '',
       locationName: initialSheetConfig.location || '',
-      driveDirectionInput: 'N 000°',
+      driveDirectionInput: '',
       driveDirection: 0,
-      chainage: 'RD 0.00m - 3.50m',
-      faceChainage: 'RD 3.50m',
+      chainage: '',
+      faceChainage: '',
       roundLength: 3.5,
       date: new Date().toISOString().slice(0, 10),
       mappedBy: '',
@@ -291,7 +319,7 @@ export default function App({
     loadChainageProfileSchedule()
   );
   const [customEditorInitialTab, setCustomEditorInitialTab] =
-    useState<ProfileEditorMainTab>('freeform_canvas');
+    useState<ProfileEditorMainTab>('common_variants');
   const [returnScreenFromCustomEditor, setReturnScreenFromCustomEditor] =
     useState<ScreenStep>('start');
   const [isProjectMemoryModalOpen, setIsProjectMemoryModalOpen] = useState<boolean>(false);
@@ -299,10 +327,99 @@ export default function App({
     'projects' | 'sheet_settings' | 'volumes' | 'geometries'
   >('projects');
 
+  // Persisted Project -> Locations Directory for Practical Step-1 Workflow (Starts empty on fresh install)
+  const [projectDirectory, setProjectDirectory] = useState<Record<string, string[]>>(() => {
+    try {
+      const raw = localStorage.getItem('ESWA_PROJECT_LOCATION_DIRECTORY_V5_CLEAN');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    return {};
+  });
+  const [newProjectNameDraft, setNewProjectNameDraft] = useState<string>('');
+  const [newLocationNameDraft, setNewLocationNameDraft] = useState<string>('');
+  const [showNewProjectInput, setShowNewProjectInput] = useState<boolean>(false);
+  const [showNewLocationInput, setShowNewLocationInput] = useState<boolean>(false);
+
+  // Merge savedProjects & savedGeometries into projectDirectory so all known projects/locations appear
+  const allProjectsList = useMemo(() => {
+    const set = new Set<string>(Object.keys(projectDirectory));
+    for (const p of savedProjects) {
+      if (p.projectName?.trim()) set.add(p.projectName.trim());
+    }
+    if (settings.projectName?.trim()) set.add(settings.projectName.trim());
+    return Array.from(set);
+  }, [projectDirectory, savedProjects, settings.projectName]);
+
+  const activeProjectName =
+    settings.projectName?.trim() || allProjectsList[0] || '';
+
+  const locationsForSelectedProject = useMemo(() => {
+    if (!activeProjectName) return [];
+    const locSet = new Set<string>(projectDirectory[activeProjectName] || []);
+    for (const p of savedProjects) {
+      const pName = (p.projectName || '').trim();
+      if (!pName || pName === activeProjectName) {
+        if (p.location?.trim()) locSet.add(p.location.trim());
+        if (p.tunnelName?.trim()) locSet.add(p.tunnelName.trim());
+      }
+    }
+    for (const g of savedGeometries) {
+      if (g.location?.trim()) locSet.add(g.location.trim());
+    }
+    if (settings.locationName?.trim()) locSet.add(settings.locationName.trim());
+    return Array.from(locSet);
+  }, [
+    projectDirectory,
+    activeProjectName,
+    savedProjects,
+    savedGeometries,
+    settings.locationName,
+  ]);
+
+  const activeLocationName =
+    settings.locationName?.trim() ||
+    settings.tunnelName?.trim() ||
+    locationsForSelectedProject[0] ||
+    '';
+
+  const handleSaveProjectLocationPair = useCallback((proj: string, loc: string) => {
+    const cleanP = proj.trim();
+    const cleanL = loc.trim();
+    if (!cleanP) return;
+    setProjectDirectory((prev) => {
+      const existingLocs = prev[cleanP] || [];
+      const nextLocs =
+        cleanL && !existingLocs.includes(cleanL) ? [...existingLocs, cleanL] : existingLocs;
+      const next = { ...prev, [cleanP]: nextLocs };
+      try {
+        localStorage.setItem('ESWA_PROJECT_LOCATION_DIRECTORY_V5_CLEAN', JSON.stringify(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+
+  // Filter saved tunnel shapes & sizes that match the selected Location
+  const savedShapesForSelectedLocation = useMemo(() => {
+    const locLower = activeLocationName.toLowerCase();
+    const matching = savedGeometries.filter(
+      (g) =>
+        (g.location || '').toLowerCase() === locLower ||
+        (g.tunnelName || '').toLowerCase() === locLower
+    );
+    return matching;
+  }, [savedGeometries, activeLocationName]);
+
   // Session Learning Memory & Continuous Daily Learning Loop (Starts fresh with 0 pre-loaded records)
   const [sessionMemory, setSessionMemory] = useState<SessionLearningMemory>(() => {
     try {
-      const raw = localStorage.getItem('AKASH_AI_LEARNING_MEMORY_V3_FRESH');
+      const raw = localStorage.getItem('ESWA_AI_LEARNING_MEMORY_V5_CLEAN');
       if (raw) {
         const parsed = JSON.parse(raw) as SessionLearningMemory;
         if (parsed && Array.isArray(parsed.rejectedAngleRanges)) {
@@ -329,7 +446,7 @@ export default function App({
   // Automatically persist AI Learning Memory to localStorage & %APPDATA% on every update
   useEffect(() => {
     try {
-      localStorage.setItem('AKASH_AI_LEARNING_MEMORY_V3_FRESH', JSON.stringify(sessionMemory));
+      localStorage.setItem('ESWA_AI_LEARNING_MEMORY_V5_CLEAN', JSON.stringify(sessionMemory));
       if (typeof window !== 'undefined' && window.akashDesktop?.saveAILearningMemoryToDisk) {
         window.akashDesktop.saveAILearningMemoryToDisk(sessionMemory).catch(() => {});
       }
@@ -660,6 +777,86 @@ export default function App({
         `Saved project "${record.tunnelName} (${record.faceChainage}, ${record.date})" to Project File Memory.`
     );
   }, [
+    settings,
+    geometry,
+    photos,
+    clusteredJoints,
+    customJointSetOverrides,
+    qIndexParams,
+    selectedClassificationMethod,
+    rmrParams,
+    gsiParams,
+    qParamStatus,
+    rockMassSummary,
+    lithologyRegions,
+    controlPoints,
+    surveyProfile,
+    placedSymbols,
+    overbreakAnalysis,
+  ]);
+
+  // Automatically sync and fit the unfolded log into 3D Continuous Tunnel Logger based on Project, Location, Chainage RD, Pull, and Drive Direction whenever mapping updates
+  useEffect(() => {
+    if (screen !== 'mapping') return;
+    const chMeters = parseNumericChainageMeters(settings.faceChainage, settings.chainage);
+    const projName =
+      settings.projectName ||
+      settings.sheetConfig?.projectName ||
+      'Hydroelectric / Underground Tunnel Project';
+    const locName =
+      settings.locationName ||
+      settings.location ||
+      settings.sheetConfig?.location ||
+      'Main Underground Heading';
+    const record: SavedProjectRecord = {
+      id: `proj-${projName.replace(/\s+/g, '_')}-${locName.replace(/\s+/g, '_')}-${settings.tunnelName.replace(/\s+/g, '_')}-${settings.faceChainage.replace(/\s+/g, '_')}-${settings.date}`,
+      projectName: projName,
+      tunnelName: settings.tunnelName,
+      location: locName,
+      chainage: settings.chainage,
+      faceChainage: settings.faceChainage,
+      numericChainageMeters: chMeters,
+      date: settings.date,
+      savedAt: new Date().toISOString(),
+      mappingMode: 'TUNNEL_PROFILE',
+      geometry,
+      settings: {
+        ...settings,
+        projectName: projName,
+        locationName: locName,
+      },
+      sheetConfig: settings.sheetConfig,
+      photos,
+      joints: clusteredJoints,
+      customJointSetOverrides,
+      qIndexParams,
+      selectedClassificationMethod,
+      rmrParams,
+      gsiParams,
+      qParamStatus,
+      rockMassSummary,
+      lithologyRegions,
+      controlPoints,
+      surveyProfile,
+      placedSymbols,
+      quantitySummary: {
+        designAreaSqM: overbreakAnalysis.designAreaSqMeters,
+        surveyedAreaSqM: overbreakAnalysis.surveyedAreaSqMeters,
+        overbreakAreaSqM: overbreakAnalysis.overbreakAreaSqMeters,
+        undercutAreaSqM: overbreakAnalysis.undercutAreaSqMeters,
+        overbreakPct: overbreakAnalysis.overbreakPercentage,
+        undercutPct: overbreakAnalysis.undercutPercentage,
+        maxOverbreakM: overbreakAnalysis.maxRadialOverbreakMeters,
+        maxUndercutM: overbreakAnalysis.maxRadialUndercutMeters,
+        pullIntervalM: overbreakAnalysis.effectivePullIntervalMeters,
+        overbreakVolumeM3: overbreakAnalysis.overbreakVolumeCubicMeters,
+        undercutVolumeM3: overbreakAnalysis.undercutVolumeCubicMeters,
+      },
+    };
+    const { records } = saveProjectRecordToMemory(record);
+    setSavedProjects(records);
+  }, [
+    screen,
     settings,
     geometry,
     photos,
@@ -1671,7 +1868,136 @@ export default function App({
   };
 
   // ============================================================================
-  // SCREEN 1: ULTRA-SIMPLE START SCREEN (Section 2 exact contract)
+  // SCREEN 0: WELCOME WINDOW (Re-implemented opening Welcome Screen in Light Mode)
+  // ============================================================================
+  if (screen === 'welcome') {
+    return (
+      <main className={layoutStyles.viewportShell}>
+        {/* Architectural CAD Engineering Grid & Radial Backdrop */}
+        <svg
+          className="absolute inset-0 w-full h-full pointer-events-none opacity-45"
+          aria-hidden="true"
+        >
+          <defs>
+            <pattern
+              id="eswaWelcomeGrid"
+              width="56"
+              height="56"
+              patternUnits="userSpaceOnUse"
+            >
+              <path
+                d="M 56 0 L 0 0 0 56"
+                fill="none"
+                stroke="#CBD5E1"
+                strokeWidth="0.75"
+              />
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#eswaWelcomeGrid)" />
+        </svg>
+
+        {!isContinuous3DLoggerOpen && !isProjectMemoryModalOpen && (
+          <div className="absolute top-4 right-4 sm:top-6 sm:right-6 flex items-center gap-2 z-20">
+            {isMasterSoftware && isFirstOpening && onOpenAdminPortal && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFirstOpening(false);
+                  onOpenAdminPortal();
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 font-mono text-xs font-semibold rounded border bg-white hover:bg-slate-50 text-slate-800 border-slate-300 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
+                title="Open Master Admin Website (Shown on first opening only)"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-sky-600" />
+                <span>Master Admin Website</span>
+                {pendingRequestCount > 0 && (
+                  <span className="ml-1 px-1.5 py-0.2 rounded-full bg-amber-500 text-white font-bold text-[10px]">
+                    {pendingRequestCount}
+                  </span>
+                )}
+              </button>
+            )}
+          </div>
+        )}
+
+        <div
+          className={`${layoutStyles.majorPanel} max-w-[680px] items-center text-center justify-center`}
+        >
+          <EswaTunnelLogo
+            size={responsive.isCompactHeight ? 'md' : 'lg'}
+            animated
+            showBadge
+          />
+
+          <div className="space-y-1.5">
+            <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-wider text-slate-900">
+              ESWA TUNNEL MAPPER
+            </h1>
+          </div>
+
+          {/* Primary Welcome Action -> Practical Field Setup */}
+          <div className="w-full space-y-3 pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                setIsFirstOpening(false);
+                setScreen('start');
+              }}
+              className="w-full py-3.5 px-6 rounded-xl bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 font-semibold text-sm flex items-center justify-center gap-2.5 shadow-xs transition-all cursor-pointer"
+            >
+              <span>Tunnel Face logging</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFirstOpening(false);
+                  setIsContinuous3DLoggerOpen(true);
+                }}
+                className={layoutStyles.secondaryButton}
+              >
+                <Compass className="w-4 h-4 text-sky-600" />
+                <span>3D Continuous Tunnel Logger</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFirstOpening(false);
+                  handleOpenProjectMemoryModal('projects');
+                }}
+                className={layoutStyles.secondaryButton}
+              >
+                <Database className="w-4 h-4 text-emerald-600" />
+                <span>Saved Projects &amp; Memory ({savedProjects.length})</span>
+              </button>
+            </div>
+
+            {hasSavedDraft && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFirstOpening(false);
+                  handleResumeOfflineDraft();
+                }}
+                className="w-full py-2.5 px-4 rounded-xl text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 cursor-pointer"
+              >
+                Resume Saved Offline Field Draft
+              </button>
+            )}
+          </div>
+        </div>
+
+        {isBootLoading && <EswaLoadingScreen onComplete={() => setIsBootLoading(false)} />}
+        {projectMemoryModalNode}
+      </main>
+    );
+  }
+
+  // ============================================================================
+  // SCREEN 1: PRACTICAL FIELD SETUP (Project & Location -> Chainage/Pull -> Shape)
   // ============================================================================
   if (screen === 'start') {
     return (
@@ -1691,7 +2017,7 @@ export default function App({
               <path
                 d="M 56 0 L 0 0 0 56"
                 fill="none"
-                stroke={isLight ? '#CBD5E1' : '#1E293B'}
+                stroke="#CBD5E1"
                 strokeWidth="0.75"
               />
             </pattern>
@@ -1699,120 +2025,394 @@ export default function App({
           <rect width="100%" height="100%" fill="url(#eswaStartGrid)" />
         </svg>
 
-        {!isContinuous3DLoggerOpen && !isProjectMemoryModalOpen && (
-          <div className="absolute top-4 right-4 sm:top-6 sm:right-6 flex items-center gap-2 z-20">
-            {isMasterSoftware && isFirstOpening && onOpenAdminPortal && (
+        <div className={`${layoutStyles.majorPanel} max-w-5xl`}>
+          {/* Top Brand & Quick Database Row */}
+          <div className={layoutStyles.headerRow}>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setScreen('welcome')}
+                className={layoutStyles.backButton}
+                title="Return to Welcome Window"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Welcome</span>
+              </button>
+              <EswaTunnelLogo size="sm" animated={false} />
+              <div className="text-left">
+                <h1 className="font-display text-lg sm:text-xl font-bold tracking-wide text-slate-900">
+                  ESWA Tunnel Mapper · Practical Field Setup
+                </h1>
+                <p className={layoutStyles.labelMuted}>
+                  Step 1: Project &amp; Location → Chainage, Pull &amp; Drive Direction → Tunnel Shape &amp; Size
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => {
                   setIsFirstOpening(false);
-                  onOpenAdminPortal();
+                  handleOpenProjectMemoryModal('projects');
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 font-mono text-xs font-semibold rounded border transition-colors cursor-pointer whitespace-nowrap ${
-                  isLight
-                    ? 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300 shadow-xs'
-                    : 'bg-slate-800/90 hover:bg-slate-700 text-cyan-300 border-cyan-500/40'
-                }`}
-                title="Open Master Admin Website (Shown on first opening only)"
+                className={layoutStyles.secondaryButton}
               >
-                <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Master Admin Website</span>
-                {pendingRequestCount > 0 && (
-                  <span className="ml-1 px-1.5 py-0.2 rounded-full bg-amber-500 text-slate-950 font-bold text-[10px]">
-                    {pendingRequestCount}
+                <Database className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Saved Records ({savedProjects.length})</span>
+              </button>
+              {hasSavedDraft && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsFirstOpening(false);
+                    handleResumeOfflineDraft();
+                  }}
+                  className="px-3 py-2 rounded-xl text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 cursor-pointer"
+                >
+                  Resume Draft
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Main Step 1 Practical Setup Content */}
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-1 text-left">
+            {/* ROW 1: 1. CHOOSE OR CREATE PROJECT + 2. CHOOSE OR CREATE LOCATION */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* 1. PROJECT */}
+              <div className={`${layoutStyles.sectionSurface} space-y-2.5`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono uppercase tracking-wider font-bold text-cyan-400">
+                    1. Project Name
                   </span>
+                  {Object.keys(projectDirectory).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowNewProjectInput((v) => !v)}
+                      className="text-xs font-mono text-emerald-400 hover:text-emerald-300 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      {showNewProjectInput ? 'Choose Existing' : 'New Project'}
+                    </button>
+                  )}
+                </div>
+
+                {Object.keys(projectDirectory).length > 0 && !showNewProjectInput ? (
+                  <select
+                    value={activeProjectName}
+                    onChange={(e) => {
+                      const nextProj = e.target.value;
+                      const projLocs = projectDirectory[nextProj] || [];
+                      const firstLoc = projLocs[0] || '';
+                      setSettings((prev) => ({
+                        ...prev,
+                        projectName: nextProj,
+                        locationName: firstLoc,
+                        tunnelName: firstLoc,
+                      }));
+                    }}
+                    className={layoutStyles.inputControl}
+                  >
+                    <option value="">-- Select Project --</option>
+                    {allProjectsList.map((proj) => (
+                      <option key={proj} value={proj}>
+                        {proj}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="Enter Project Name..."
+                      value={settings.projectName || ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          projectName: val,
+                        }));
+                      }}
+                      className={layoutStyles.inputControl}
+                    />
+                    {showNewProjectInput && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const clean = (settings.projectName || '').trim();
+                          if (!clean) return;
+                          handleSaveProjectLocationPair(clean, settings.locationName || '');
+                          setShowNewProjectInput(false);
+                        }}
+                        className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold shrink-0 cursor-pointer"
+                      >
+                        Save
+                      </button>
+                    )}
+                  </div>
                 )}
-              </button>
-            )}
-            <ThemeToggleButton isMainWindow />
-          </div>
-        )}
+              </div>
 
-        <div className={`${layoutStyles.majorPanel} max-w-lg items-center text-center`}>
-          <EswaTunnelLogo size={responsive.isCompactHeight ? 'lg' : 'xl'} animated showBadge />
+              {/* 2. LOCATION (Based on Selected Project) */}
+              <div className={`${layoutStyles.sectionSurface} space-y-2.5`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono uppercase tracking-wider font-bold text-cyan-400">
+                    2. Location / Tunnel Heading
+                  </span>
+                  {locationsForSelectedProject.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowNewLocationInput((v) => !v)}
+                      className="text-xs font-mono text-emerald-400 hover:text-emerald-300 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      {showNewLocationInput ? 'Choose Existing' : 'Create Location'}
+                    </button>
+                  )}
+                </div>
 
-          <div className="space-y-1.5">
-            <h1
-              className={`font-display text-2xl sm:text-3xl font-bold tracking-wider ${
-                isLight ? 'text-slate-900' : 'text-slate-100'
-              }`}
-            >
-              ESWA Tunnel Mapper
-            </h1>
-          </div>
-
-          <div className="w-full flex flex-col gap-3">
-            <button
-              onClick={() => {
-                setIsFirstOpening(false);
-                setScreen('drive_and_photos');
-              }}
-              className={`w-full py-3 px-5 text-xs sm:text-sm ${layoutStyles.primaryButton} border !bg-[#fafafa] !text-[#060303] !border-[#ffffff]`}
-            >
-              Start Face &amp; Wall Surface Mapping
-            </button>
-
-            <button
-              onClick={() => {
-                setIsFirstOpening(false);
-                setIsContinuous3DLoggerOpen(true);
-              }}
-              className="w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-semibold rounded-xl border border-slate-300 !bg-white hover:!bg-slate-50 !text-slate-900 shadow-xs inline-flex items-center justify-center gap-2 transition-all cursor-pointer"
-            >
-              <Compass className="w-4 h-4 shrink-0 text-sky-600" />
-              <span>3D Continuous Logging</span>
-            </button>
-
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={() => {
-                  setIsFirstOpening(false);
-                  setCustomEditorInitialTab('freeform_canvas');
-                  setReturnScreenFromCustomEditor('start');
-                  setScreen('geometry_custom');
-                }}
-                className={layoutStyles.secondaryButton}
-              >
-                Create Tunnel Shape
-              </button>
-
-              <button
-                onClick={() => {
-                  setIsFirstOpening(false);
-                  setScreen('geometry_cad');
-                }}
-                className={layoutStyles.secondaryButton}
-              >
-                Upload DWG / DXF
-              </button>
+                {locationsForSelectedProject.length > 0 && !showNewLocationInput ? (
+                  <select
+                    value={activeLocationName}
+                    onChange={(e) => {
+                      const nextLoc = e.target.value;
+                      setSettings((prev) => ({
+                        ...prev,
+                        locationName: nextLoc,
+                        tunnelName: nextLoc,
+                      }));
+                      const match = savedGeometries.find(
+                        (g) =>
+                          (g.location || '').toLowerCase() === nextLoc.toLowerCase() ||
+                          (g.tunnelName || '').toLowerCase() === nextLoc.toLowerCase()
+                      );
+                      if (match) {
+                        setGeometry(match.geometry);
+                        setManWidth(String(match.geometry.width));
+                        setManHeight(String(match.geometry.height));
+                        setManWallHeight(String(match.geometry.wallHeight));
+                        setManCrownRadius(String(match.geometry.crownRadius));
+                      }
+                    }}
+                    className={layoutStyles.inputControl}
+                  >
+                    <option value="">-- Select Location --</option>
+                    {locationsForSelectedProject.map((loc) => (
+                      <option key={loc} value={loc}>
+                        {loc}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="Enter Location / Tunnel Heading..."
+                      value={settings.locationName || ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSettings((prev) => ({
+                          ...prev,
+                          locationName: val,
+                          tunnelName: val,
+                        }));
+                      }}
+                      className={layoutStyles.inputControl}
+                    />
+                    {showNewLocationInput && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cleanLoc = (settings.locationName || '').trim();
+                          if (!cleanLoc) return;
+                          handleSaveProjectLocationPair(
+                            settings.projectName || 'Project',
+                            cleanLoc
+                          );
+                          setShowNewLocationInput(false);
+                        }}
+                        className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold shrink-0 cursor-pointer"
+                      >
+                        Save
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
-            <button
-              onClick={() => {
-                setIsFirstOpening(false);
-                handleOpenProjectMemoryModal('projects');
-              }}
-              className={`w-full ${layoutStyles.secondaryButton}`}
-            >
-              <Database className={`w-3.5 h-3.5 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
-              <span>Project Database &amp; Saved Geometries ({savedProjects.length})</span>
-            </button>
+            {/* ROW 2: 3. CHAINAGE / RD, PULL & TUNNEL DRIVE DIRECTION */}
+            <div className={`${layoutStyles.sectionSurface} space-y-3`}>
+              <div className="text-xs font-mono uppercase tracking-wider font-bold text-cyan-400">
+                3. Chainage / RD, Pull Length &amp; Tunnel Drive Direction
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                <label className="block space-y-1">
+                  <span className={layoutStyles.labelMuted}>Chainage / RD Interval</span>
+                  <input
+                    type="text"
+                    placeholder="e.g. RD 120.0m - 123.5m"
+                    value={settings.chainage}
+                    onChange={(e) => setSettings((p) => ({ ...p, chainage: e.target.value }))}
+                    className={layoutStyles.inputControl}
+                  />
+                </label>
 
-            {hasSavedDraft && (
-              <button
-                onClick={() => {
-                  setIsFirstOpening(false);
-                  handleResumeOfflineDraft();
-                }}
-                className={`w-full py-2.5 px-4 text-xs font-medium border rounded-xl transition-colors cursor-pointer ${
-                  isLight
-                    ? 'bg-sky-50 hover:bg-sky-100 text-sky-900 border-sky-200'
-                    : 'bg-slate-900/80 hover:bg-slate-900 text-cyan-300 border-cyan-800/50'
-                }`}
-              >
-                Resume Saved Field Draft
-              </button>
-            )}
+                <label className="block space-y-1">
+                  <span className={layoutStyles.labelMuted}>Face Chainage / RD</span>
+                  <input
+                    type="text"
+                    placeholder="e.g. RD 123.50m"
+                    value={settings.faceChainage}
+                    onChange={(e) => setSettings((p) => ({ ...p, faceChainage: e.target.value }))}
+                    className={layoutStyles.inputControl}
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <span className={layoutStyles.labelMuted}>Pull / Round Length (m)</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.5"
+                    value={settings.roundLength}
+                    onChange={(e) =>
+                      setSettings((p) => ({
+                        ...p,
+                        roundLength: Math.max(0.5, parseFloat(e.target.value) || 3.5),
+                      }))
+                    }
+                    className={layoutStyles.inputControl}
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <span className={layoutStyles.labelMuted}>
+                    Tunnel Drive Direction (Azimuth: {Math.round(settings.driveDirection)}°)
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="e.g. N 045° or 45"
+                    value={settings.driveDirectionInput}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const norm = parseDriveDirectionAzimuth(val);
+                      setSettings((prev) => ({
+                        ...prev,
+                        driveDirectionInput: val,
+                        driveDirection: norm.azimuth,
+                      }));
+                    }}
+                    className={layoutStyles.inputControl}
+                  />
+                </label>
+              </div>
+            </div>
+
+            {/* ROW 3: 4. TUNNEL SHAPE & SIZE FOR THIS LOCATION */}
+            <div className={`${layoutStyles.sectionSurface} space-y-3`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span className="text-xs font-mono uppercase tracking-wider font-bold text-cyan-400">
+                    4. Tunnel Shape &amp; Size for &ldquo;{activeLocationName}&rdquo;
+                  </span>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {savedShapesForSelectedLocation.length > 0
+                      ? 'Choose an existing tunnel shape & size saved for this location, or create a new one.'
+                      : 'No saved shape found for this location yet — use the active shape below or click Create New Tunnel Shape.'}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsFirstOpening(false);
+                    handleSaveProjectLocationPair(activeProjectName, activeLocationName);
+                    setCustomEditorInitialTab('common_variants');
+                    setReturnScreenFromCustomEditor('start');
+                    setScreen('geometry_custom');
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-mono font-bold shadow-xs cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  Create / Edit Tunnel Shape (Variants · Custom · Import DWG)
+                </button>
+              </div>
+
+              {/* Saved Shapes for this Location (if any exist) */}
+              {savedShapesForSelectedLocation.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-1">
+                  {savedShapesForSelectedLocation.map((rec) => {
+                    const isCurrent =
+                      Math.abs(rec.geometry.width - geometry.width) < 0.02 &&
+                      Math.abs(rec.geometry.height - geometry.height) < 0.02 &&
+                      Math.abs(rec.geometry.wallHeight - geometry.wallHeight) < 0.02;
+                    return (
+                      <div
+                        key={rec.id}
+                        onClick={() => {
+                          setGeometry(rec.geometry);
+                          setManWidth(String(rec.geometry.width));
+                          setManHeight(String(rec.geometry.height));
+                          setManWallHeight(String(rec.geometry.wallHeight));
+                          setManCrownRadius(String(rec.geometry.crownRadius));
+                        }}
+                        className={`p-3 rounded-xl border cursor-pointer transition-all flex items-center justify-between gap-2 ${
+                          isCurrent
+                            ? 'bg-emerald-950/50 border-emerald-500 text-white'
+                            : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:border-cyan-500/50'
+                        }`}
+                      >
+                        <div className="space-y-0.5">
+                          <div className="text-xs font-bold flex items-center gap-1.5">
+                            {isCurrent && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                            <span>{rec.name}</span>
+                          </div>
+                          <div className="text-[11px] font-mono text-cyan-300">
+                            W: {rec.geometry.width.toFixed(2)}m × H: {rec.geometry.height.toFixed(2)}m · Wall:{' '}
+                            {rec.geometry.wallHeight.toFixed(2)}m
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Currently Selected Shape Summary Bar */}
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="px-2.5 py-1 rounded bg-sky-100 text-sky-800 border border-sky-300 text-xs font-mono font-bold">
+                    ACTIVE SHAPE
+                  </div>
+                  <div className="text-xs font-mono text-slate-700">
+                    <strong className="text-slate-900">
+                      {geometry.customProfile?.name ||
+                        geometry.crownGeometry.replace(/_/g, ' ').toUpperCase()}
+                    </strong>{' '}
+                    · Width = <strong className="text-sky-700">{geometry.width.toFixed(2)} m</strong> ·
+                    Height = <strong className="text-sky-700">{geometry.height.toFixed(2)} m</strong> ·
+                    Left &amp; Right Wall ={' '}
+                    <strong className="text-emerald-700">{geometry.wallHeight.toFixed(2)} m</strong> ·
+                    Pull = <strong className="text-amber-700">{settings.roundLength.toFixed(2)} m</strong>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsFirstOpening(false);
+                    handleSaveProjectLocationPair(activeProjectName, activeLocationName);
+                    setScreen('drive_and_photos');
+                  }}
+                  className={`py-2.5 px-5 text-xs sm:text-sm ${layoutStyles.primaryButton}`}
+                >
+                  <span>Continue with This Shape to Add Pictures</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -2272,7 +2872,7 @@ export default function App({
   }
 
   // ============================================================================
-  // SCREEN 2C: FREEFORM CUSTOM PROFILE, CAVERN & DRAWING TRACE EDITOR
+  // SCREEN 2C: UNIFIED TUNNEL SHAPE & SIZE CREATOR (VARIANTS / CUSTOM / DWG)
   // ============================================================================
   if (screen === 'geometry_custom') {
     return (
@@ -2281,8 +2881,10 @@ export default function App({
           <FreeformCustomProfileEditor
             geometry={geometry}
             settings={settings}
-            onUpdateSettings={setSettings}
-            onConfirmGeometry={(confirmedGeom, proceedToNext = true) => {
+            savedGeometries={savedGeometries}
+            chainageSchedule={chainageSchedule}
+            initialTab={customEditorInitialTab}
+            onApplyGeometry={(confirmedGeom, proceedToPhotos = true) => {
               setGeometry(confirmedGeom);
               setManWidth(String(confirmedGeom.width));
               setManHeight(String(confirmedGeom.height));
@@ -2290,45 +2892,35 @@ export default function App({
               setManCrownRadius(String(confirmedGeom.crownRadius));
               setManProfileType(confirmedGeom.crownGeometry);
               setStatusMessage(
-                `Confirmed authoritative custom profile "${confirmedGeom.customProfile?.name || confirmedGeom.profileName || 'Custom Profile'}" (${confirmedGeom.width.toFixed(3)}m W × ${confirmedGeom.height.toFixed(3)}m H · Area ${(confirmedGeom.designAreaSqMeters || 0).toFixed(2)}m² · Perim ${(confirmedGeom.totalPerimeterMeters || 0).toFixed(2)}m).`
+                `Saved tunnel shape (${confirmedGeom.width.toFixed(2)}m W × ${confirmedGeom.height.toFixed(
+                  2
+                )}m H, Wall ${confirmedGeom.wallHeight.toFixed(2)}m) for "${
+                  settings.locationName || 'Location'
+                }".`
               );
-              if (proceedToNext) {
+              if (proceedToPhotos) {
                 setScreen(
                   returnScreenFromCustomEditor === 'mapping' ? 'mapping' : 'drive_and_photos'
                 );
               }
             }}
-            onBack={() => setScreen(returnScreenFromCustomEditor)}
-            onUploadCADFile={handleCADFileUpload}
-            onDownloadSampleDXF={handleDownloadSampleDXF}
-            cadStatus={cadStatus}
-            savedGeometries={savedGeometries}
-            onSaveGeometryToLibrary={(customName, geomToSave) => {
+            onSaveToGeometryLibrary={(customName, geomToSave) => {
               const next = saveDesignGeometryToLibrary({
                 name: customName,
-                tunnelName: settings.tunnelName,
-                location: settings.locationName || 'Underground Tunnel Works',
+                tunnelName: settings.tunnelName || activeLocationName,
+                location: settings.locationName || activeLocationName,
                 chainage: settings.faceChainage || settings.chainage,
                 geometry: geomToSave,
               });
               setSavedGeometries(next);
             }}
-            onLoadSavedGeometry={(rec) => {
-              setGeometry(rec.geometry);
-              setManWidth(String(rec.geometry.width));
-              setManHeight(String(rec.geometry.height));
-              setManWallHeight(String(rec.geometry.wallHeight));
-              setManCrownRadius(String(rec.geometry.crownRadius));
-            }}
             onDeleteSavedGeometry={(id) => {
               const next = deleteSavedDesignGeometry(id);
               setSavedGeometries(next);
             }}
-            chainageSchedule={chainageSchedule}
             onUpdateChainageSchedule={handleUpdateChainageSchedule}
-            surveyControlPoints={controlPoints}
             onSyncProfileToSurveyControlPoints={handleSyncProfileToSurveyControlPoints}
-            initialTab={customEditorInitialTab}
+            onBack={() => setScreen(returnScreenFromCustomEditor)}
           />
         </div>
         {projectMemoryModalNode}
@@ -2337,7 +2929,7 @@ export default function App({
   }
 
   // ============================================================================
-  // SCREEN 3: TUNNEL DRIVE DIRECTION & SURFACE PHOTOGRAPH INPUT (Section 4 & 5)
+  // SCREEN 3: STEP 3 — ADD TUNNEL SURFACE PICTURES (Section 4 & 5)
   // ============================================================================
   if (screen === 'drive_and_photos') {
     const parsedDrive = parseDriveDirectionAzimuth(settings.driveDirectionInput);
@@ -2351,127 +2943,53 @@ export default function App({
               className={layoutStyles.backButton}
             >
               <ArrowLeft className="w-4 h-4" />
-              Back
+              Back to Project &amp; Location
             </button>
             <h2 className="font-display font-semibold text-base sm:text-lg tracking-wide">
-              02. Tunnel Drive Direction &amp; Surface Photographs
+              Step 3 · Add Tunnel Surface Pictures
             </h2>
-            <div className="flex items-center gap-3">
-              <span className={`text-xs font-mono hidden sm:inline ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                Master: {geometry.width}m × {geometry.height}m
-              </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setCustomEditorInitialTab('common_variants');
+                  setReturnScreenFromCustomEditor('drive_and_photos');
+                  setScreen('geometry_custom');
+                }}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-mono border border-slate-700 cursor-pointer"
+              >
+                Change Shape ({geometry.width.toFixed(1)}m × {geometry.height.toFixed(1)}m)
+              </button>
             </div>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto space-y-6 pr-1">
-            {/* Section 4: Tunnel Drive Direction + Essential Sheet Header Info */}
-            <div className={`${layoutStyles.sectionSurface} space-y-4`}>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-                <label className="block space-y-1.5">
-                  <span className={`text-xs font-semibold flex items-center gap-1.5 ${isLight ? 'text-sky-700' : 'text-cyan-400'}`}>
-                    <Compass className="w-3.5 h-3.5" />
-                    Tunnel Drive Direction
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="e.g. N 070° or 250°"
-                    value={settings.driveDirectionInput}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      const norm = parseDriveDirectionAzimuth(val);
-                      setSettings((prev) => ({
-                        ...prev,
-                        driveDirectionInput: val,
-                        driveDirection: norm.azimuth,
-                      }));
-                    }}
-                    className={layoutStyles.inputControl}
-                  />
-                </label>
-
-                <div className={`text-xs font-mono pb-2 ${isLight ? 'text-slate-600' : 'text-slate-300'}`}>
-                  Normalized Reference Azimuth:{' '}
-                  <strong className={isLight ? 'text-sky-700' : 'text-cyan-300'}>
-                    {parsedDrive.azimuth.toFixed(1)}°
-                  </strong>{' '}
-                  (0–360°)
-                </div>
-
-                <label className="block space-y-1.5">
-                  <span className={layoutStyles.labelMuted}>Tunnel Name / Heading</span>
-                  <input
-                    type="text"
-                    value={settings.tunnelName}
-                    onChange={(e) => setSettings((p) => ({ ...p, tunnelName: e.target.value }))}
-                    className={layoutStyles.inputControl}
-                  />
-                </label>
-              </div>
-
-              <div className={`grid grid-cols-2 sm:grid-cols-5 gap-3.5 pt-4 border-t ${layoutStyles.hairlineDivider}`}>
-                <label className="block space-y-1.5">
-                  <span className={layoutStyles.labelMuted}>Location / Project Site</span>
-                  <input
-                    type="text"
-                    value={settings.locationName || ''}
-                    placeholder="e.g. HRT Package-II"
-                    onChange={(e) => setSettings((p) => ({ ...p, locationName: e.target.value }))}
-                    className={layoutStyles.inputControl}
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className={layoutStyles.labelMuted}>Chainage / RD Interval</span>
-                  <input
-                    type="text"
-                    value={settings.chainage}
-                    onChange={(e) => setSettings((p) => ({ ...p, chainage: e.target.value }))}
-                    className={layoutStyles.inputControl}
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className={layoutStyles.labelMuted}>Face Chainage / RD</span>
-                  <input
-                    type="text"
-                    value={settings.faceChainage}
-                    onChange={(e) => setSettings((p) => ({ ...p, faceChainage: e.target.value }))}
-                    className={layoutStyles.inputControl}
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className={layoutStyles.labelMuted}>Round Length / Pull (m)</span>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0.5"
-                    value={settings.roundLength}
-                    onChange={(e) =>
-                      setSettings((p) => ({
-                        ...p,
-                        roundLength: Math.max(0.5, parseFloat(e.target.value) || 3.5),
-                      }))
-                    }
-                    className={layoutStyles.inputControl}
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className={`text-xs font-semibold ${isLight ? 'text-indigo-700' : 'text-indigo-300'}`}>
-                    Classification Method
-                  </span>
-                  <select
-                    value={selectedClassificationMethod}
-                    onChange={(e) =>
-                      setSelectedClassificationMethod(
-                        e.target.value as RockMassClassificationMethodId
-                      )
-                    }
-                    className={layoutStyles.inputControl}
-                  >
-                    <option value="RMR">RMR (Bieniawski)</option>
-                    <option value="Q_SYSTEM">Q-System (Barton NGI)</option>
-                    <option value="BOTH_RMR_AND_Q">Both (RMR + Q-System)</option>
-                    <option value="GSI">GSI (Hoek &amp; Marinos)</option>
-                  </select>
-                </label>
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-5 pr-1">
+            {/* Compact Summary Bar of Step 1 & Step 2 Selections */}
+            <div className={`${layoutStyles.sectionSurface} flex flex-wrap items-center justify-between gap-3 text-xs font-mono`}>
+              <div className="flex flex-wrap items-center gap-3">
+                <span>
+                  Project: <strong className="text-cyan-300">{activeProjectName}</strong>
+                </span>
+                <span>·</span>
+                <span>
+                  Location: <strong className="text-emerald-300">{activeLocationName}</strong>
+                </span>
+                <span>·</span>
+                <span>
+                  Chainage: <strong className="text-amber-300">{settings.faceChainage || settings.chainage}</strong>
+                </span>
+                <span>·</span>
+                <span>
+                  Pull: <strong>{settings.roundLength.toFixed(2)}m</strong>
+                </span>
+                <span>·</span>
+                <span>
+                  Drive: <strong>N {parsedDrive.azimuth.toFixed(0)}°</strong>
+                </span>
+                <span>·</span>
+                <span>
+                  Shape: <strong>{geometry.width.toFixed(2)}m W × {geometry.height.toFixed(2)}m H (Wall {geometry.wallHeight.toFixed(2)}m)</strong>
+                </span>
               </div>
             </div>
 
@@ -2745,6 +3263,7 @@ export default function App({
           canRedo={historyFuture.length > 0}
           onBackToSetup={() => setScreen('drive_and_photos')}
           onOpenExportSheet={(mode = 'FINAL_ENGINEERING_SHEET') => {
+            handleSaveCurrentProjectToMemory();
             setExportModalInitialMode(mode);
             setIsExportModalOpen(true);
           }}

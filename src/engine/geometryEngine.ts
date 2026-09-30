@@ -428,32 +428,16 @@ export function getSurfaceBoundsMeters(
         height: roundLen,
       };
     }
-    case 'leftWall': {
-      const leftH = Math.max(
-        1.0,
-        geometry.leftWallArcLength || geometry.leftWallHeight || geometry.wallHeight
-      );
-      return {
-        minX: 0,
-        maxX: roundLen,
-        minY: 0,
-        maxY: leftH,
-        width: roundLen,
-        height: leftH,
-      };
-    }
+    case 'leftWall':
     case 'rightWall': {
-      const rightH = Math.max(
-        1.0,
-        geometry.rightWallArcLength || geometry.rightWallHeight || geometry.wallHeight
-      );
+      const wallH = Math.max(1.0, geometry.wallHeight || geometry.leftWallHeight || geometry.rightWallHeight || 4.2);
       return {
         minX: 0,
         maxX: roundLen,
         minY: 0,
-        maxY: rightH,
+        maxY: wallH,
         width: roundLen,
-        height: rightH,
+        height: wallH,
       };
     }
   }

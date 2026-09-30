@@ -63,6 +63,7 @@ interface LithologyPanelProps {
   onRedo?: () => void;
   canUndo?: boolean;
   canRedo?: boolean;
+  embedded?: boolean;
   onClose: () => void;
   onStatusMessage?: (msg: string) => void;
 }
@@ -88,6 +89,7 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
   onRedo,
   canUndo,
   canRedo,
+  embedded = false,
   onClose,
   onStatusMessage,
 }) => {
@@ -104,19 +106,23 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
 
   useEffect(() => {
     if (!resizingState) return;
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: MouseEvent | PointerEvent) => {
       const dx = ev.clientX - resizingState.startX;
       const delta = dockSide === 'right' ? -dx : dx;
       setPanelWidthPx(
-        Math.max(260, Math.min(640, Math.round(resizingState.startWidth + delta)))
+        Math.max(260, Math.min(720, Math.round(resizingState.startWidth + delta)))
       );
     };
     const onUp = () => setResizingState(null);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
     return () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
     };
   }, [resizingState, dockSide]);
 
@@ -228,68 +234,64 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
 
   return (
     <aside
-      style={{ width: `${panelWidthPx}px` }}
-      className={`relative max-w-[52vw] bg-[#0D121B] ${
-        dockSide === 'left' ? 'order-first border-r' : 'order-last border-l'
-      } border-slate-800 flex flex-col shrink-0 z-20 select-none overflow-hidden transition-[width] duration-75`}
+      style={embedded ? undefined : { width: `${panelWidthPx}px` }}
+      className={
+        embedded
+          ? 'relative w-full flex-1 bg-[#0D121B] flex flex-col min-h-0 select-none overflow-hidden'
+          : `relative max-w-[52vw] bg-[#0D121B] ${
+              dockSide === 'left' ? 'order-first border-r' : 'order-last border-l'
+            } border-slate-800 flex flex-col shrink-0 z-20 select-none overflow-hidden transition-[width] duration-75`
+      }
     >
-      {/* Interactive Drag-to-Resize Handle (Extend Left or Right) */}
-      <div
-        onMouseDown={(e) => {
-          e.preventDefault();
-          setResizingState({ startX: e.clientX, startWidth: panelWidthPx });
-        }}
-        title="Drag Left or Right to Extend / Resize Panel"
-        className={`flex items-center justify-center absolute top-0 bottom-0 w-2.5 cursor-col-resize z-30 group ${
-          dockSide === 'left' ? '-right-1.5' : '-left-1.5'
-        }`}
-      >
-        <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-amber-400 transition-colors" />
-      </div>
+      {/* Interactive Drag-to-Resize Handle (Drag Edge to Expand or Shrink) */}
+      {!embedded && (
+        <div
+          onMouseDown={(e) => {
+            e.preventDefault();
+            setResizingState({ startX: e.clientX, startWidth: panelWidthPx });
+          }}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            setResizingState({ startX: e.clientX, startWidth: panelWidthPx });
+          }}
+          title="Drag edge left or right to expand or shrink panel"
+          className={`flex items-center justify-center absolute top-0 bottom-0 w-3 cursor-col-resize z-30 group hover:bg-sky-500/10 transition-colors ${
+            dockSide === 'left' ? '-right-1.5' : '-left-1.5'
+          }`}
+        >
+          <div className="h-20 w-1.5 rounded-full bg-slate-300 group-hover:bg-sky-500 transition-colors" />
+        </div>
+      )}
 
       {/* Header */}
-      <div className="px-3 py-2.5 bg-[#111826] border-b border-slate-800 flex items-center justify-between gap-1">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-1 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <Layers className="w-4 h-4 text-amber-400 shrink-0" />
+          <Layers className="w-4 h-4 text-amber-600 shrink-0" />
           <div className="truncate">
-            <div className="text-xs font-mono font-bold text-slate-100 tracking-wide truncate">
+            <div className="text-xs font-mono font-bold text-slate-900 tracking-wide truncate">
               LITHOLOGY &amp; AI DESCRIPTION
             </div>
-            <div className="text-[10px] font-mono text-slate-400 truncate">
-              Select Area → Lithology → AI Suggest → Approve
+            <div className="text-[10px] font-mono text-slate-500 truncate">
+              Select Area → Assign Lithology
             </div>
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          <button
-            type="button"
-            onClick={() => setDockSide((s) => (s === 'right' ? 'left' : 'right'))}
-            className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-[10px] flex items-center gap-0.5 cursor-pointer"
-            title="Move Panel to Left or Right Side"
-          >
-            {dockSide === 'right' ? <PanelLeft className="w-3 h-3" /> : <PanelRight className="w-3 h-3" />}
-          </button>
-          <button
-            type="button"
-            onClick={() => setPanelWidthPx((w) => Math.max(260, w - 45))}
-            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] cursor-pointer"
-            title="Narrow Panel"
-          >
-            −W
-          </button>
-          <button
-            type="button"
-            onClick={() => setPanelWidthPx((w) => Math.min(640, w + 45))}
-            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[10px] cursor-pointer"
-            title="Extend Panel Width"
-          >
-            +W
-          </button>
+          {!embedded && (
+            <button
+              type="button"
+              onClick={() => setDockSide((s) => (s === 'right' ? 'left' : 'right'))}
+              className="px-1.5 py-1 rounded bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-[10px] flex items-center gap-0.5 cursor-pointer"
+              title="Move Panel to Left or Right Side"
+            >
+              {dockSide === 'right' ? <PanelLeft className="w-3 h-3" /> : <PanelRight className="w-3 h-3" />}
+            </button>
+          )}
           {onUndo && (
             <button
               onClick={onUndo}
               disabled={!canUndo}
-              className="p-1 text-slate-300 hover:text-white disabled:opacity-35 rounded hover:bg-slate-800"
+              className="p-1 text-slate-600 hover:text-slate-900 disabled:opacity-35 rounded hover:bg-slate-200"
               title="Undo Lithology / Canvas Action"
             >
               <Undo2 className="w-3.5 h-3.5" />
@@ -299,7 +301,7 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
             <button
               onClick={onRedo}
               disabled={!canRedo}
-              className="p-1 text-slate-300 hover:text-white disabled:opacity-35 rounded hover:bg-slate-800"
+              className="p-1 text-slate-600 hover:text-slate-900 disabled:opacity-35 rounded hover:bg-slate-200"
               title="Redo Lithology / Canvas Action"
             >
               <Redo2 className="w-3.5 h-3.5" />
@@ -307,8 +309,8 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
           )}
           <button
             onClick={onClose}
-            className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
-            title="Close Lithology Panel"
+            className="p-1 text-slate-500 hover:text-slate-900 rounded hover:bg-slate-200"
+            title="Exit Lithology Tool"
           >
             <X className="w-4 h-4" />
           </button>

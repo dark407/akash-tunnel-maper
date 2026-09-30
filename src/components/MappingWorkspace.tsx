@@ -250,6 +250,7 @@ type ActiveTool =
   | 'geological_symbol';
 
 type JointDrawMode =
+  | 'two_point_line'
   | 'magnetic_livewire'
   | 'seed_autotrace'
   | 'polyline'
@@ -336,7 +337,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   // Industrial-Grade AutoCAD 2026 Workspace State
   const [cadRibbonTab, setCadRibbonTab] = useState<
     'HOME' | 'TUNNEL_PHOTO' | 'GEOLOGY_3D' | 'SURVEY_OVERBREAK' | 'CLASSIFICATION_SHEET'
-  >('HOME');
+  >('TUNNEL_PHOTO');
   const [cadRibbonCollapsed, setCadRibbonCollapsed] = useState<boolean>(false);
   const [cadCommandInput, setCadCommandInput] = useState<string>('');
   const [showCadPropertiesAlways, setShowCadPropertiesAlways] = useState<boolean>(true);
@@ -353,21 +354,30 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
 
   useEffect(() => {
     if (!resizingInspector) return;
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: MouseEvent | PointerEvent) => {
       const dx = ev.clientX - resizingInspector.startX;
       const delta = inspectorDockSide === 'right' ? -dx : dx;
       setInspectorWidthPx(
-        Math.max(260, Math.min(660, Math.round(resizingInspector.startWidth + delta)))
+        Math.max(260, Math.min(720, Math.round(resizingInspector.startWidth + delta)))
       );
     };
     const onUp = () => setResizingInspector(null);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
     return () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
     };
   }, [resizingInspector, inspectorDockSide]);
+
+  // Trigger layout recalculation when the Collapsible Property Palette is expanded or collapsed
+  useEffect(() => {
+    triggerGlobalLayoutRecalculation();
+  }, [showCadPropertiesAlways, activeTool]);
 
   // Canvas Viewport Zoom & Pan State (Sections 1, 2, 3, 4, 5, 15)
   // Never resets when switching tools!
@@ -449,10 +459,70 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   } | null>(null);
 
   // Drawing new or re-drawn joint polyline points in real-world meters (Sections 9, 10, 11, 12)
-  const [jointDrawMode, setJointDrawMode] = useState<JointDrawMode>('magnetic_livewire');
+  const [jointDrawMode, setJointDrawMode] = useState<JointDrawMode>('two_point_line');
   const [isFreehandDrawingJoint, setIsFreehandDrawingJoint] = useState<boolean>(false);
   const [draftJointPoints, setDraftJointPoints] = useState<Point2D[]>([]);
   const [draggingDraftJointIdx, setDraggingDraftJointIdx] = useState<number | null>(null);
+
+  // Automatically clear previous window/tool state when switching Ribbon Windows (cadRibbonTab)
+  useEffect(() => {
+    setActiveTool('select');
+    setSelectedJointId(null);
+    setSelectedJointVertexIdx(null);
+    setSelectedControlPointId(null);
+    setSelectedSymbolId(null);
+    setSelectedLithologyRegionId(null);
+    setIsDrawingLithologyPolygon(false);
+    setDraftLithologyPoints([]);
+    setDraftJointPoints([]);
+    setIsFreehandDrawingJoint(false);
+    setMeasurePts([]);
+    setAddingControlPointMode(false);
+    setDrawingCustomMaskMode(false);
+    if (cadRibbonTab !== 'CLASSIFICATION_SHEET') {
+      setShowSetTableDrawer(false);
+      setShowAILearningDrawer(false);
+    }
+  }, [cadRibbonTab]);
+
+  // Automatically clear unrelated selections and draft rubber-band lines when switching activeTool
+  useEffect(() => {
+    if (activeTool !== 'control_point' && activeTool !== 'overbreak') {
+      setSelectedControlPointId(null);
+    }
+    if (activeTool !== 'geological_symbol') {
+      setSelectedSymbolId(null);
+    }
+    if (activeTool !== 'lithology') {
+      setSelectedLithologyRegionId(null);
+      setIsDrawingLithologyPolygon(false);
+      setDraftLithologyPoints([]);
+    }
+    if (
+      activeTool !== 'add_joint' &&
+      activeTool !== 'redraw_joint' &&
+      activeTool !== 'append_joint'
+    ) {
+      setDraftJointPoints([]);
+      setIsFreehandDrawingJoint(false);
+    }
+    if (
+      activeTool !== 'select' &&
+      activeTool !== 'dip_probe' &&
+      activeTool !== 'redraw_joint' &&
+      activeTool !== 'append_joint'
+    ) {
+      setSelectedJointId(null);
+      setSelectedJointVertexIdx(null);
+    }
+    if (activeTool !== 'photo_fit') {
+      setAddingControlPointMode(false);
+      setDrawingCustomMaskMode(false);
+    }
+    if (activeTool !== 'measure') {
+      setMeasurePts([]);
+    }
+  }, [activeTool]);
   const [draftFeatureType, setDraftFeatureType] = useState<GeologicalFeatureType>('joint');
   const [draftSetId, setDraftSetId] = useState<string>('J1');
   const [syncFeaturesWithPhotoTransform, setSyncFeaturesWithPhotoTransform] =
@@ -1769,11 +1839,15 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
     // 3. Lithology Tool (Sections 7, 8, 11, 13)
     if (activeTool === 'lithology') {
       if (isDrawingLithologyPolygon) {
-        // Check if user clicked on the first point L1 to close the polygon
+        const hitTol = coordManager.getHitToleranceMeters(16);
+        // Check if user clicked on the first point L1 OR last point to close the polygon immediately without dragging
         if (draftLithologyPoints.length >= 3) {
           const firstPt = draftLithologyPoints[0];
-          const hitTol = coordManager.getHitToleranceMeters(14);
-          if (Math.hypot(pt.x - firstPt.x, pt.y - firstPt.y) <= hitTol) {
+          const lastPt = draftLithologyPoints[draftLithologyPoints.length - 1];
+          if (
+            Math.hypot(pt.x - firstPt.x, pt.y - firstPt.y) <= hitTol ||
+            Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) <= hitTol
+          ) {
             commitDraftLithologyPolygon(draftLithologyPoints);
             return;
           }
@@ -1818,6 +1892,35 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
         return;
       }
 
+      // If user clicks on or near the last placed vertex (or first vertex), immediately finish/close the line so it never drags!
+      if (draftJointPoints.length >= 1) {
+        const closeTol = coordManager.getHitToleranceMeters(16);
+        const lastPt = draftJointPoints[draftJointPoints.length - 1];
+        const firstPt = draftJointPoints[0];
+        if (
+          Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) <= closeTol ||
+          (draftJointPoints.length >= 2 &&
+            Math.hypot(pt.x - firstPt.x, pt.y - firstPt.y) <= closeTol)
+        ) {
+          if (draftJointPoints.length >= 2) {
+            finishDraftJoint(draftJointPoints);
+          } else {
+            setDraftJointPoints([]);
+          }
+          return;
+        }
+      }
+
+      // 2-Point Line Mode: Click 1st point (start) -> Click 2nd point (end) -> Immediately finishes line with zero extra dragging!
+      if (jointDrawMode === 'two_point_line') {
+        if (draftJointPoints.length === 0) {
+          setDraftJointPoints([pt]);
+        } else {
+          finishDraftJoint([...draftJointPoints, pt]);
+        }
+        return;
+      }
+
       // 1-Click Seed Auto-Follow Mode: Automatically propagates forward & backward along the rock fracture
       if (jointDrawMode === 'seed_autotrace' && activePhotoRidgeField) {
         const seedUV = surfaceMetersToImageUV(
@@ -1856,8 +1959,12 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           }
         }
         onUpdateStatusMessage?.(
-          'No strong fracture ridge directly under click — placed anchor vertex. Click second point to finish.'
+          'No strong fracture ridge directly under click — placed start point. Click 2nd point to finish.'
         );
+        if (draftJointPoints.length >= 1) {
+          finishDraftJoint([...draftJointPoints, pt]);
+          return;
+        }
       }
 
       // Magnetic Live-Wire Mode: Append the full Dijkstra geodesic path along the rock fracture
@@ -3119,43 +3226,43 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
       }`}
     >
       {/* ====================================================================
-          SLEEK ARCHITECTURAL CAD HEADER & CONTEXTUAL SINGLE-LINE TOOL STRIP
+          LIGHT MODE CAD HEADER & FOCUSED STEP-BY-STEP RIBBON TOOLBAR
          ==================================================================== */}
-      <header className="flex flex-col bg-[#0D121C] border-b border-slate-800/90 shrink-0">
-        {/* TOP ROW: Brand Identity + Quick Access + Clean Category Tabs + Workspace Controls */}
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-[#0A0E17] border-b border-slate-800/80">
-          {/* Left: Back + Brand Emblem + Quick Access */}
+      <header className="flex flex-col bg-white border-b border-slate-200 shrink-0">
+        {/* TOP ROW: Brand Identity + Surface Switcher + 5-Step Workflow Tabs + Workspace Controls */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-50 border-b border-slate-200">
+          {/* Left: Back + Brand Emblem + Quick Access + Step Tabs */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={onBackToSetup}
-              className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-200 font-mono text-[11px] font-medium rounded-lg border border-slate-700/80 transition-colors cursor-pointer"
-              title="Return to Project & Tunnel Geometry Setup"
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 font-mono text-[11px] font-semibold rounded-lg border border-slate-200 transition-colors cursor-pointer"
+              title="Return to Project & Tunnel Photo Setup"
             >
-              <ArrowLeft className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden sm:inline">Setup</span>
+              <ArrowLeft className="w-3.5 h-3.5 text-sky-600" />
+              <span className="hidden sm:inline">Photos &amp; Setup</span>
             </button>
 
             <EswaTunnelLogo size="xs" variant="inline" showBadge={false} />
 
             {/* Compact Quick Access Bar */}
-            <div className="flex items-center gap-0.5 px-1.5 py-0.5 bg-slate-900/90 border border-slate-800 rounded-lg">
+            <div className="flex items-center gap-0.5 px-1.5 py-0.5 bg-white border border-slate-200 rounded-lg">
               <button
                 onClick={onSaveOfflineDraft}
                 title="Save Field Draft Locally"
-                className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-slate-300 hover:text-white hover:bg-slate-800 rounded-md cursor-pointer"
+                className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-md cursor-pointer"
               >
-                <Save className="w-3 h-3 text-cyan-400" />
+                <Save className="w-3 h-3 text-sky-600" />
                 <span className="hidden md:inline">Save</span>
               </button>
               <button
                 onClick={() => onOpenProjectMemoryModal('projects')}
-                title="Project & Chainage Database"
-                className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-cyan-300 hover:text-white hover:bg-slate-800 rounded-md cursor-pointer"
+                title="Saved Projects & Memory"
+                className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-sky-700 hover:text-sky-900 hover:bg-slate-100 rounded-md cursor-pointer"
               >
-                <Database className="w-3 h-3 text-cyan-400" />
+                <Database className="w-3 h-3 text-sky-600" />
                 <span className="hidden md:inline">Projects</span>
               </button>
-              <div className="h-3 w-px bg-slate-800 mx-0.5" />
+              <div className="h-3 w-px bg-slate-200 mx-0.5" />
               <button
                 onClick={handleUndoLithology}
                 disabled={
@@ -3164,7 +3271,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   symbolPast.length === 0 &&
                   !canUndo
                 }
-                className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 rounded-md cursor-pointer"
+                className="p-1 text-slate-600 hover:text-slate-900 hover:bg-slate-100 disabled:opacity-30 rounded-md cursor-pointer"
                 title="Undo (Ctrl+Z)"
               >
                 <Undo2 className="w-3.5 h-3.5" />
@@ -3177,7 +3284,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   symbolFuture.length === 0 &&
                   !canRedo
                 }
-                className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 rounded-md cursor-pointer"
+                className="p-1 text-slate-600 hover:text-slate-900 hover:bg-slate-100 disabled:opacity-30 rounded-md cursor-pointer"
                 title="Redo (Ctrl+Y)"
               >
                 <Redo2 className="w-3.5 h-3.5" />
@@ -3189,21 +3296,21 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   else if (selectedJoint) handleDeleteSelectedJoint();
                 }}
                 disabled={!selectedJoint && !selectedControlPointId && !selectedSymbolId}
-                className="p-1 text-slate-300 hover:text-rose-300 hover:bg-rose-950/60 disabled:opacity-30 rounded-md cursor-pointer"
+                className="p-1 text-slate-600 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-30 rounded-md cursor-pointer"
                 title="Delete Selected Object (Del)"
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
             </div>
 
-            {/* Clean Segmented Ribbon Category Tabs (Each tab shows ONLY its own focused tools) */}
-            <div className="flex items-center gap-0.5 p-0.5 bg-slate-900/90 border border-slate-800 rounded-lg">
+            {/* 5-Step Sequential Workflow Tabs: 1. Photo & Profile -> 2. Core Mapping -> 3. Geology -> 4. Survey -> 5. Tables & Output */}
+            <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 border border-slate-200 rounded-lg">
               {(
                 [
-                  { id: 'HOME', label: '1. Core Mapping' },
-                  { id: 'TUNNEL_PHOTO', label: '2. Photo & Profile' },
-                  { id: 'GEOLOGY_3D', label: '3. Geology & 3D' },
-                  { id: 'SURVEY_OVERBREAK', label: '4. Survey & Support' },
+                  { id: 'TUNNEL_PHOTO', label: '1. Photo & Profile' },
+                  { id: 'HOME', label: '2. Core Mapping' },
+                  { id: 'GEOLOGY_3D', label: '3. Geology' },
+                  { id: 'SURVEY_OVERBREAK', label: '4. Survey' },
                   { id: 'CLASSIFICATION_SHEET', label: '5. Tables & Output' },
                 ] as const
               ).map((tab) => (
@@ -3216,8 +3323,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   }}
                   className={`px-2.5 py-1 text-[10px] font-mono font-semibold rounded-md transition-all cursor-pointer ${
                     cadRibbonTab === tab.id && !cadRibbonCollapsed
-                      ? 'bg-cyan-600 text-white shadow-xs'
-                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/70'
+                      ? 'bg-sky-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-white'
                   }`}
                 >
                   {tab.label}
@@ -3226,7 +3333,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={() => setCadRibbonCollapsed((p) => !p)}
-                className="px-1.5 py-1 text-[10px] font-mono text-slate-400 hover:text-white rounded-md cursor-pointer"
+                className="px-1.5 py-1 text-[10px] font-mono text-slate-500 hover:text-slate-900 rounded-md cursor-pointer"
                 title="Collapse / Expand Toolbar"
               >
                 {cadRibbonCollapsed ? '▼' : '▲'}
@@ -3234,297 +3341,149 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             </div>
           </div>
 
-          {/* Right: Primary 3D Strip Workspace Button + Active DWG Info + Layers + Props + Theme */}
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => onOpenProjectMemoryModal('continuous_3d_log')}
-              className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-[11px] font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
-              title="Open 3D Strip Workspace & Entire Project Multi-Tunnel Network CAD"
-            >
-              <Box className="w-3.5 h-3.5" />
-              <span>3D Strip CAD</span>
-            </button>
-
-            <span className="hidden 2xl:inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 border border-slate-800 rounded-lg font-mono text-[10px] text-slate-300">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <strong className="text-cyan-300">
-                {settings.locationName || settings.tunnelName || 'Tunnel'} · {settings.chainage || 'CH 0+000'}
-              </strong>
-              <span className="text-slate-600">|</span>
-              <span>
-                {geometry.width.toFixed(1)}×{geometry.height.toFixed(1)}m
-              </span>
-              <span className="text-slate-600">|</span>
-              <span className="text-amber-300">
-                N{String(Math.round(settings.driveDirection)).padStart(3, '0')}°E
-              </span>
-            </span>
-
-            {/* Vector Layer Manager Dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => setShowLayerMenu((prev) => !prev)}
-                className={`flex items-center gap-1 px-2 py-1 text-[10px] font-mono rounded-lg border transition-colors cursor-pointer ${
-                  showLayerMenu
-                    ? 'bg-cyan-600 text-white border-cyan-400'
-                    : 'bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800'
-                }`}
-                title="Layer Visibility Manager"
-              >
-                <Layers className="w-3 h-3 text-cyan-400" />
-                <span className="hidden sm:inline">Layers</span>
-              </button>
-              {showLayerMenu && (
-                <div className="absolute right-0 mt-1.5 w-60 p-2.5 bg-[#121824] border border-cyan-500/50 rounded-lg shadow-2xl z-50 text-xs font-mono space-y-1.5">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-1 text-[10px] text-cyan-400 font-bold">
-                    <span>ESWACAD LAYER MANAGER</span>
+          {/* Right: Surface Switcher (Face / Crown / Left / Right) + Layers + Property Palette Toggle (Shown only on Canvas Mapping Steps 1-4) */}
+          {cadRibbonTab !== 'CLASSIFICATION_SHEET' && (
+            <div className="flex items-center gap-1.5">
+              {/* Active Surface Selector */}
+              <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 border border-slate-200 rounded-lg">
+                {(
+                  [
+                    { id: 'face', label: '1. Face' },
+                    { id: 'crown', label: '2. Crown' },
+                    { id: 'leftWall', label: '3. Left Wall' },
+                    { id: 'rightWall', label: '4. Right Wall' },
+                  ] as { id: SurfaceType; label: string }[]
+                ).map((surf) => {
+                  const hasImg = Boolean(photos[surf.id].image);
+                  const isActive = activeSurface === surf.id;
+                  return (
                     <button
-                      onClick={() => setShowLayerMenu(false)}
-                      className="text-slate-400 hover:text-white"
+                      key={surf.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectSurface(surf.id);
+                        setSelectedJointId(null);
+                        setDraftJointPoints([]);
+                      }}
+                      className={`flex items-center gap-1 px-2 py-1 text-[10px] font-mono font-semibold rounded-md transition-colors cursor-pointer ${
+                        isActive
+                          ? 'bg-white text-sky-700 border border-sky-300 shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
                     >
-                      ✕
-                    </button>
-                  </div>
-                  {(
-                    [
-                      { key: 'photo', label: '0_PHOTO_BASE' },
-                      { key: 'lithology', label: 'G_LITHOLOGY_HATCH' },
-                      { key: 'overbreakUndercut', label: 'S_OVERBREAK_ASBUILT' },
-                      { key: 'controlPoints', label: 'S_SURVEY_CTRL_PTS' },
-                      { key: 'joints', label: 'G_JOINTS_J1_J5' },
-                      { key: 'fractures', label: 'G_FRACTURES' },
-                      { key: 'faults', label: 'G_FAULTS_SHEARS_F1' },
-                      { key: 'bedding', label: 'G_BEDDING_J0' },
-                      { key: 'foliation', label: 'G_FOLIATION' },
-                      { key: 'otherStructures', label: 'G_VEINS_WATER' },
-                      { key: 'annotations', label: 'A_DIP_LABELS' },
-                    ] as { key: keyof VectorLayerVisibility; label: string }[]
-                  ).map((item) => (
-                    <label
-                      key={item.key}
-                      className="flex items-center justify-between py-0.5 text-[10px] text-slate-200 cursor-pointer hover:text-cyan-300"
-                    >
-                      <span>{item.label}</span>
-                      <input
-                        type="checkbox"
-                        checked={layerVisibility[item.key]}
-                        onChange={(e) =>
-                          setLayerVisibility((prev) => ({
-                            ...prev,
-                            [item.key]: e.target.checked,
-                          }))
-                        }
-                        className="rounded-xs border-slate-700 bg-slate-800 text-cyan-500"
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          hasImg ? 'bg-emerald-500' : 'bg-slate-300'
+                        }`}
                       />
-                    </label>
-                  ))}
-                </div>
-              )}
+                      <span>{surf.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Vector Layer Manager Dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowLayerMenu((prev) => !prev)}
+                  className={`flex items-center gap-1 px-2 py-1 text-[10px] font-mono rounded-lg border transition-colors cursor-pointer ${
+                    showLayerMenu
+                      ? 'bg-sky-600 text-white border-sky-500'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                  }`}
+                  title="Layer Visibility Manager"
+                >
+                  <Layers className="w-3 h-3 text-sky-600" />
+                  <span className="hidden sm:inline">Layers</span>
+                </button>
+                {showLayerMenu && (
+                  <div className="absolute right-0 mt-1.5 w-60 p-2.5 bg-white border border-slate-200 rounded-lg shadow-xl z-50 text-xs font-mono space-y-1.5">
+                    <div className="flex items-center justify-between border-b border-slate-200 pb-1 text-[10px] text-sky-700 font-bold">
+                      <span>LAYER VISIBILITY</span>
+                      <button
+                        onClick={() => setShowLayerMenu(false)}
+                        className="text-slate-400 hover:text-slate-700"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    {(
+                      [
+                        { key: 'photo', label: 'Surface Photo' },
+                        { key: 'lithology', label: 'Lithology Zones' },
+                        { key: 'overbreakUndercut', label: 'Overbreak / Survey' },
+                        { key: 'controlPoints', label: 'Survey Control Points' },
+                        { key: 'joints', label: 'Joint Sets (J1-J5)' },
+                        { key: 'fractures', label: 'Fractures' },
+                        { key: 'faults', label: 'Faults & Shears (F1)' },
+                        { key: 'bedding', label: 'Bedding (J0)' },
+                        { key: 'foliation', label: 'Foliation' },
+                        { key: 'otherStructures', label: 'Veins & Water' },
+                        { key: 'annotations', label: 'Dip / Callout Labels' },
+                      ] as { key: keyof VectorLayerVisibility; label: string }[]
+                    ).map((item) => (
+                      <label
+                        key={item.key}
+                        className="flex items-center justify-between py-0.5 text-[10px] text-slate-700 cursor-pointer hover:text-sky-700"
+                      >
+                        <span>{item.label}</span>
+                        <input
+                          type="checkbox"
+                          checked={layerVisibility[item.key]}
+                          onChange={(e) =>
+                            setLayerVisibility((prev) => ({
+                              ...prev,
+                              [item.key]: e.target.checked,
+                            }))
+                          }
+                          className="rounded-xs border-slate-300 text-sky-600"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowCadPropertiesAlways((p) => !p)}
+                className={`flex items-center gap-1 px-2 py-1 text-[10px] font-mono rounded-lg border cursor-pointer ${
+                  showCadPropertiesAlways
+                    ? 'bg-sky-50 text-sky-700 border-sky-300 font-semibold'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+                title="Toggle Property Palette"
+              >
+                <Sliders className="w-3 h-3 text-sky-600" />
+                <span className="hidden sm:inline">Properties</span>
+              </button>
             </div>
-
-            <button
-              type="button"
-              onClick={() => setShowCadPropertiesAlways((p) => !p)}
-              className={`flex items-center gap-1 px-2 py-1 text-[10px] font-mono rounded-lg border cursor-pointer ${
-                showCadPropertiesAlways
-                  ? 'bg-cyan-950/90 text-cyan-200 border-cyan-500/60 font-semibold'
-                  : 'bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800'
-              }`}
-              title="Toggle Properties Inspector Dock"
-            >
-              <Sliders className="w-3 h-3 text-cyan-400" />
-              <span className="hidden sm:inline">Inspector</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                setInspectorDockSide((s) => (s === 'right' ? 'left' : 'right'))
-              }
-              className="hidden md:flex items-center gap-1 px-2 py-1 text-[10px] font-mono bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-lg cursor-pointer"
-              title="Dock Inspector Left or Right"
-            >
-              {inspectorDockSide === 'right' ? (
-                <PanelLeft className="w-3 h-3 text-amber-400" />
-              ) : (
-                <PanelRight className="w-3 h-3 text-amber-400" />
-              )}
-            </button>
-          </div>
+          )}
         </div>
 
         {/* ====================================================================
-            CLEAN SINGLE-LINE CONTEXTUAL TOOLBAR (Shows ONLY active tab's tools)
+            CLEAN SINGLE-LINE CONTEXTUAL TOOLBAR (Shows ONLY active window's tools)
            ==================================================================== */}
         {!cadRibbonCollapsed && (
-          <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 bg-[#111724] text-[11px]">
-            {/* TAB 1: HOME (Essential Everyday Workflow Only — Clean & Uncluttered) */}
-            {cadRibbonTab === 'HOME' && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-800/90 hover:bg-slate-700 text-cyan-200 rounded-md border border-slate-700 cursor-pointer"
-                >
-                  <Upload className="w-3.5 h-3.5 text-cyan-400" />
-                  {currentPhoto.image ? 'Replace Photo' : 'Upload Photo'}
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (activeTool !== 'photo_fit') {
-                      setInitialTransformSnapshot(currentPhoto.transform);
-                      setTransformPast([]);
-                      setTransformFuture([]);
-                      setActiveTool('photo_fit');
-                    } else {
-                      setActiveTool('select');
-                    }
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
-                    activeTool === 'photo_fit'
-                      ? 'bg-cyan-600 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
-                  }`}
-                >
-                  <Maximize2 className="w-3.5 h-3.5" />
-                  Fit Photo
-                </button>
-
-                <div className="h-4 w-px bg-slate-800 mx-0.5" />
-
-                <button
-                  onClick={onRunAITrace}
-                  disabled={isTracingAI}
-                  className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-bold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white rounded-md shadow-xs transition-colors cursor-pointer"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  {isTracingAI ? 'Tracing...' : 'AI Trace Joints'}
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (activeTool === 'add_joint' && jointDrawMode !== 'smooth_curve') {
-                      setActiveTool('select');
-                    } else {
-                      setJointDrawMode('magnetic_livewire');
-                      setActiveTool('add_joint');
-                    }
-                    setDraftJointPoints([]);
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
-                    activeTool === 'add_joint' && jointDrawMode !== 'smooth_curve'
-                      ? 'bg-amber-600 text-white border-amber-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
-                  }`}
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  Draw Joint
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (activeTool === 'add_joint' && jointDrawMode === 'smooth_curve') {
-                      setActiveTool('select');
-                    } else {
-                      setJointDrawMode('smooth_curve');
-                      setActiveTool('add_joint');
-                    }
-                    setDraftJointPoints([]);
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
-                    activeTool === 'add_joint' && jointDrawMode === 'smooth_curve'
-                      ? 'bg-cyan-600 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
-                  }`}
-                  title="ESWACAD SPLINE: Draw smooth Catmull-Rom spline curve through clicked control points"
-                >
-                  <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
-                  + Spline
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (activeTool === 'lithology') {
-                      setActiveTool('select');
-                      setIsDrawingLithologyPolygon(false);
-                      setDraftLithologyPoints([]);
-                    } else {
-                      setActiveTool('lithology');
-                    }
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
-                    activeTool === 'lithology'
-                      ? 'bg-amber-600 text-white border-amber-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
-                  }`}
-                >
-                  <Layers className="w-3.5 h-3.5 text-amber-400" />
-                  Lithology ({lithologyRegions.filter((r) => r.surface === activeSurface).length})
-                </button>
-
-                <button
-                  onClick={() =>
-                    setActiveTool(
-                      activeTool === 'geological_symbol' ? 'select' : 'geological_symbol'
-                    )
-                  }
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
-                    activeTool === 'geological_symbol'
-                      ? 'bg-purple-600 text-white border-purple-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
-                  }`}
-                >
-                  <Compass className="w-3.5 h-3.5 text-purple-400" />
-                  Symbols ({surfacePlacedSymbols.length})
-                </button>
-
-                <div className="h-4 w-px bg-slate-800 mx-0.5" />
-
-                <button
-                  onClick={() =>
-                    onOpenExportSheet(
-                      activeTool === 'overbreak'
-                        ? 'ENGINEERING_QUANTITY_SHEET'
-                        : 'FINAL_ENGINEERING_SHEET'
-                    )
-                  }
-                  className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded-md transition-colors cursor-pointer"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  Plot Sheet
-                </button>
-              </div>
-            )}
-
-            {/* TAB 2: TUNNEL & PHOTO CALIBRATION */}
+          <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 bg-white text-[11px]">
+            {/* STEP 1: PHOTO & PROFILE (First Step After Uploading Photos) */}
             {cadRibbonTab === 'TUNNEL_PHOTO' && (
               <div className="flex flex-wrap items-center gap-1.5">
-                {onOpenCustomProfileEditor && (
-                  <button
-                    onClick={onOpenCustomProfileEditor}
-                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-semibold bg-cyan-950/90 hover:bg-cyan-900 text-cyan-200 rounded-md border border-cyan-600/70 cursor-pointer"
-                  >
-                    <Ruler className="w-3.5 h-3.5 text-cyan-400" />
-                    Edit Tunnel Profile (W×H)
-                  </button>
-                )}
-
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-800/90 hover:bg-slate-700 text-cyan-200 rounded-md border border-slate-700 cursor-pointer"
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-md shadow-2xs cursor-pointer"
                 >
-                  <Upload className="w-3.5 h-3.5 text-cyan-400" />
-                  {currentPhoto.image ? 'Replace Primary Photo' : 'Upload Photo'}
+                  <Upload className="w-3.5 h-3.5" />
+                  {currentPhoto.image ? 'Replace Photo' : 'Upload Photo'}
                 </button>
 
                 {currentPhoto.image && (currentPhoto.supportingPhotos?.length || 0) < 5 && (
                   <button
                     onClick={() => stereoFileInputRef.current?.click()}
-                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-800/80 hover:bg-slate-700 text-emerald-300 rounded-md border border-slate-700 cursor-pointer"
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md border border-slate-200 cursor-pointer"
                   >
-                    <Camera className="w-3.5 h-3.5 text-emerald-400" />
-                    +Stereo Photo ({currentPhoto.supportingPhotos?.length || 0}/5)
+                    <Camera className="w-3.5 h-3.5 text-emerald-600" />
+                    +Supporting Photo ({currentPhoto.supportingPhotos?.length || 0}/5)
                   </button>
                 )}
 
@@ -3541,24 +3500,33 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
                     activeTool === 'photo_fit'
-                      ? 'bg-cyan-600 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                      ? 'bg-sky-600 text-white border-sky-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
                 >
                   <Maximize2 className="w-3.5 h-3.5" />
-                  Perspective &amp; Mesh Warp
+                  Fit Photo to Profile
                 </button>
 
-                <div className="flex items-center gap-1.5 px-2 py-0.5 bg-slate-900 rounded-md border border-slate-700">
-                  <Eye className="w-3.5 h-3.5 text-slate-400" />
-                  <span className="text-[10px] font-mono text-slate-400">Opacity</span>
+                <button
+                  onClick={onAutoFitCurrentPhoto}
+                  disabled={!currentPhoto.image}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 rounded-md border border-slate-200 cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                  Auto-Fit
+                </button>
+
+                <div className="flex items-center gap-1.5 px-2 py-0.5 bg-slate-100 rounded-md border border-slate-200">
+                  <Eye className="w-3.5 h-3.5 text-slate-500" />
+                  <span className="text-[10px] font-mono text-slate-600">Opacity</span>
                   <select
                     value={currentPhoto.opacity}
                     onChange={(e) => {
                       const val = Number(e.target.value);
                       onUpdatePhotoSurface(activeSurface, (prev) => ({ ...prev, opacity: val }));
                     }}
-                    className="bg-slate-950 text-slate-200 font-mono text-[10px] px-1.5 py-0.5 rounded border border-slate-800"
+                    className="bg-white text-slate-800 font-mono text-[10px] px-1.5 py-0.5 rounded border border-slate-200"
                   >
                     {[100, 75, 50, 25, 0].map((val) => (
                       <option key={val} value={val}>
@@ -3568,61 +3536,79 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   </select>
                 </div>
 
-                <button
-                  onClick={() => {
-                    setShowCrackXRayOverlay((prev) => {
-                      const next = !prev;
-                      if (next) setShowDepthReliefOverlay(false);
-                      return next;
-                    });
-                  }}
-                  disabled={!currentPhoto.image}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors disabled:opacity-40 cursor-pointer ${
-                    showCrackXRayOverlay
-                      ? 'bg-emerald-600 text-white border-emerald-400'
-                      : 'bg-slate-800/80 text-emerald-300 hover:bg-slate-700 border-slate-700'
-                  }`}
-                >
-                  <Wand2 className="w-3.5 h-3.5" />
-                  Crack X-Ray Filter
-                </button>
-
-                <button
-                  onClick={() => {
-                    setShowDepthReliefOverlay((prev) => {
-                      const next = !prev;
-                      if (next) setShowCrackXRayOverlay(false);
-                      return next;
-                    });
-                  }}
-                  disabled={!currentPhoto.image}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors disabled:opacity-40 cursor-pointer ${
-                    showDepthReliefOverlay
-                      ? 'bg-cyan-600 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-cyan-300 hover:bg-slate-700 border-slate-700'
-                  }`}
-                >
-                  <Layers className="w-3.5 h-3.5" />
-                  3D Depth Relief
-                </button>
+                {onOpenCustomProfileEditor && (
+                  <button
+                    onClick={onOpenCustomProfileEditor}
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md border border-slate-200 cursor-pointer"
+                  >
+                    <Ruler className="w-3.5 h-3.5 text-sky-600" />
+                    Edit Tunnel Shape ({geometry.width.toFixed(1)}×{geometry.height.toFixed(1)}m)
+                  </button>
+                )}
               </div>
             )}
 
-            {/* TAB 3: GEOLOGY & 3D */}
-            {cadRibbonTab === 'GEOLOGY_3D' && (
+            {/* STEP 2: CORE MAPPING (Strictly Joint & Fracture Tracing Tools Only) */}
+            {cadRibbonTab === 'HOME' && (
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
-                  onClick={onRunAITrace}
-                  disabled={isTracingAI}
-                  className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-bold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white rounded-md cursor-pointer"
+                  onClick={() => {
+                    setActiveTool('select');
+                    setDraftJointPoints([]);
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
+                    activeTool === 'select'
+                      ? 'bg-sky-600 text-white border-sky-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
+                  }`}
                 >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  {isTracingAI ? 'Tracing...' : 'AI Trace'}
+                  <MousePointer className="w-3.5 h-3.5" />
+                  Select / Edit
                 </button>
 
                 <button
                   onClick={() => {
-                    if (activeTool === 'add_joint' && jointDrawMode !== 'smooth_curve') {
+                    if (activeTool === 'add_joint' && jointDrawMode === 'two_point_line') {
+                      setActiveTool('select');
+                    } else {
+                      setJointDrawMode('two_point_line');
+                      setActiveTool('add_joint');
+                    }
+                    setDraftJointPoints([]);
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
+                    activeTool === 'add_joint' && jointDrawMode === 'two_point_line'
+                      ? 'bg-amber-600 text-white border-amber-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
+                  }`}
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  2-Pt Line
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (activeTool === 'add_joint' && jointDrawMode === 'polyline') {
+                      setActiveTool('select');
+                    } else {
+                      setJointDrawMode('polyline');
+                      setActiveTool('add_joint');
+                    }
+                    setDraftJointPoints([]);
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
+                    activeTool === 'add_joint' && jointDrawMode === 'polyline'
+                      ? 'bg-amber-600 text-white border-amber-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
+                  }`}
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Polyline
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (activeTool === 'add_joint' && jointDrawMode === 'magnetic_livewire') {
                       setActiveTool('select');
                     } else {
                       setJointDrawMode('magnetic_livewire');
@@ -3630,60 +3616,59 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                     }
                     setDraftJointPoints([]);
                   }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
-                    activeTool === 'add_joint' && jointDrawMode !== 'smooth_curve'
-                      ? 'bg-amber-600 text-white border-amber-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
+                    activeTool === 'add_joint' && jointDrawMode === 'magnetic_livewire'
+                      ? 'bg-sky-600 text-white border-sky-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  Draw Joint
+                  <Wand2 className="w-3.5 h-3.5 text-sky-600" />
+                  Snap Crack
                 </button>
 
                 <button
                   onClick={() => {
-                    if (activeTool === 'add_joint' && jointDrawMode === 'smooth_curve') {
+                    if (activeTool === 'add_joint' && jointDrawMode === 'freehand') {
                       setActiveTool('select');
                     } else {
-                      setJointDrawMode('smooth_curve');
+                      setJointDrawMode('freehand');
                       setActiveTool('add_joint');
                     }
                     setDraftJointPoints([]);
                   }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
-                    activeTool === 'add_joint' && jointDrawMode === 'smooth_curve'
-                      ? 'bg-cyan-600 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border transition-colors cursor-pointer ${
+                    activeTool === 'add_joint' && jointDrawMode === 'freehand'
+                      ? 'bg-amber-600 text-white border-amber-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
-                  title="ESWACAD SPLINE: Draw smooth Catmull-Rom spline curve through clicked control points"
                 >
-                  <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
-                  + Spline
+                  Freehand
                 </button>
 
-                <div className="flex items-center gap-0.5 p-0.5 bg-slate-900 rounded-md border border-slate-700">
-                  <button
-                    onClick={() => onChangeTraceFitMode('smart_fit')}
-                    className={`px-2 py-0.5 text-[10px] font-mono rounded cursor-pointer ${
-                      traceFitMode === 'smart_fit'
-                        ? 'bg-cyan-600 text-white font-semibold'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    Smart Curve
-                  </button>
-                  <button
-                    onClick={() => onChangeTraceFitMode('linear')}
-                    className={`px-2 py-0.5 text-[10px] font-mono rounded cursor-pointer ${
-                      traceFitMode === 'linear'
-                        ? 'bg-amber-600 text-white font-semibold'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    Linear
-                  </button>
-                </div>
+                <div className="h-4 w-px bg-slate-200 mx-0.5" />
 
+                <button
+                  onClick={onRunAITrace}
+                  disabled={isTracingAI}
+                  className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-bold bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-white rounded-md shadow-2xs transition-colors cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  {isTracingAI ? 'Tracing...' : 'AI Trace Joints'}
+                </button>
+
+                <button
+                  onClick={onRunAITraceAllSurfaces}
+                  disabled={isTracingAI}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium bg-slate-100 hover:bg-slate-200 disabled:opacity-60 text-slate-700 border border-slate-200 rounded-md cursor-pointer"
+                >
+                  Trace All 4 Surfaces
+                </button>
+              </div>
+            )}
+
+            {/* STEP 3: GEOLOGY (Strictly Lithology Zones, Structural Symbols & Dip Probe) */}
+            {cadRibbonTab === 'GEOLOGY_3D' && (
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   onClick={() => {
                     if (activeTool === 'lithology') {
@@ -3696,12 +3681,12 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
                     activeTool === 'lithology'
-                      ? 'bg-amber-600 text-white border-amber-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                      ? 'bg-amber-600 text-white border-amber-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
                 >
-                  <Layers className="w-3.5 h-3.5 text-amber-400" />
-                  Lithology ({lithologyRegions.filter((r) => r.surface === activeSurface).length})
+                  <Layers className="w-3.5 h-3.5 text-amber-600" />
+                  Lithology Zones ({lithologyRegions.filter((r) => r.surface === activeSurface).length})
                 </button>
 
                 <button
@@ -3712,41 +3697,31 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   }
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
                     activeTool === 'geological_symbol'
-                      ? 'bg-purple-600 text-white border-purple-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                      ? 'bg-purple-600 text-white border-purple-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
                 >
-                  <Compass className="w-3.5 h-3.5 text-purple-400" />
-                  ISRM Symbols ({surfacePlacedSymbols.length})
+                  <Compass className="w-3.5 h-3.5 text-purple-600" />
+                  Geological Symbols ({surfacePlacedSymbols.length})
                 </button>
 
                 <button
-                  onClick={() => setShowPhotogrammetryModal(true)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 border border-amber-700/60 rounded-md cursor-pointer"
+                  onClick={() =>
+                    setActiveTool(activeTool === 'dip_probe' ? 'select' : 'dip_probe')
+                  }
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
+                    activeTool === 'dip_probe'
+                      ? 'bg-sky-600 text-white border-sky-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
+                  }`}
                 >
-                  <Compass className="w-3.5 h-3.5 text-amber-400" />
-                  3D Stereonet &amp; Wedges
-                </button>
-
-                <button
-                  onClick={() => onOpenProjectMemoryModal('continuous_3d_log')}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-semibold bg-emerald-950/70 hover:bg-emerald-900/80 text-emerald-200 border border-emerald-600/60 rounded-md cursor-pointer"
-                >
-                  <Box className="w-3.5 h-3.5 text-emerald-400" />
-                  3D Strip Workspace &amp; Network
-                </button>
-
-                <button
-                  onClick={() => setShowUnfoldedRolloutModal(true)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-800/80 hover:bg-slate-700 text-cyan-200 border border-slate-700 rounded-md cursor-pointer"
-                >
-                  <Layers className="w-3.5 h-3.5 text-cyan-400" />
-                  Unfolded Rollout
+                  <Compass className="w-3.5 h-3.5 text-sky-600" />
+                  3D Dip Probe
                 </button>
               </div>
             )}
 
-            {/* TAB 4: SURVEY, OVERBREAK & SUPPORT */}
+            {/* STEP 4: SURVEY (Strictly Control Points, Overbreak & Distance Measurement) */}
             {cadRibbonTab === 'SURVEY_OVERBREAK' && (
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
@@ -3755,12 +3730,12 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   }
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
                     activeTool === 'control_point'
-                      ? 'bg-emerald-600 text-white border-emerald-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                      ? 'bg-emerald-600 text-white border-emerald-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
                 >
-                  <Crosshair className="w-3.5 h-3.5 text-emerald-400" />
-                  Control Points ({surfaceControlPoints.length})
+                  <Crosshair className="w-3.5 h-3.5 text-emerald-600" />
+                  Survey Control Points ({surfaceControlPoints.length})
                 </button>
 
                 <button
@@ -3773,14 +3748,14 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
                     activeTool === 'overbreak'
-                      ? 'bg-rose-600 text-white border-rose-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                      ? 'bg-rose-600 text-white border-rose-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
                 >
-                  <Layers className="w-3.5 h-3.5 text-rose-400" />
-                  Overbreak Analysis
+                  <Layers className="w-3.5 h-3.5 text-rose-600" />
+                  Overbreak / Undercut
                   {overbreakAnalysis.hasValidSurveyProfile && (
-                    <span className="px-1 py-0.2 bg-rose-950/80 text-rose-200 rounded text-[9px] font-mono">
+                    <span className="px-1 py-0.2 bg-rose-100 text-rose-700 rounded text-[9px] font-mono">
                       +{overbreakAnalysis.overbreakAreaSqMeters.toFixed(1)}m²
                     </span>
                   )}
@@ -3793,74 +3768,35 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
                     activeTool === 'measure'
-                      ? 'bg-cyan-600 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
+                      ? 'bg-sky-600 text-white border-sky-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
                   }`}
                 >
-                  <Ruler className="w-3.5 h-3.5" />
+                  <Ruler className="w-3.5 h-3.5 text-sky-600" />
                   Measure Distance
-                </button>
-
-                <button
-                  onClick={() =>
-                    setActiveTool(activeTool === 'dip_probe' ? 'select' : 'dip_probe')
-                  }
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
-                    activeTool === 'dip_probe'
-                      ? 'bg-cyan-600 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700 border-slate-700'
-                  }`}
-                >
-                  <Compass className="w-3.5 h-3.5" />
-                  3D Dip Probe
-                </button>
-
-                <button
-                  onClick={() => setShowRockSupportModal(true)}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono rounded-md border cursor-pointer ${
-                    supportConfig.enabledOnCanvas
-                      ? 'bg-emerald-700 text-white border-emerald-400 font-bold'
-                      : 'bg-slate-800/80 text-emerald-300 border-emerald-700/60 hover:bg-slate-700'
-                  }`}
-                >
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                  Rock Support ({rockSupportOverlay.boltsPerRing} Bolts)
                 </button>
               </div>
             )}
 
-            {/* TAB 5: CLASSIFICATION, TABLES & OUTPUT */}
+            {/* STEP 5: TABLES & OUTPUT (Strictly Discontinuity Tables, Rock Classification & Final Output Sheet) */}
             {cadRibbonTab === 'CLASSIFICATION_SHEET' && (
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   onClick={() => {
-                    if (showSetTableDrawer && geologyDrawerTab === 'geology_tables') {
-                      setShowSetTableDrawer(false);
-                    } else {
-                      setGeologyDrawerTab('geology_tables');
-                      setShowSetTableDrawer(true);
-                      setShowAILearningDrawer(false);
-                    }
+                    setGeologyDrawerTab('geology_tables');
+                    setShowAILearningDrawer(false);
                   }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono rounded-md border cursor-pointer ${
-                    showSetTableDrawer && geologyDrawerTab === 'geology_tables'
-                      ? 'bg-cyan-700 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-cyan-200 border-cyan-700/60 hover:bg-slate-700'
+                    geologyDrawerTab === 'geology_tables'
+                      ? 'bg-sky-600 text-white border-sky-500'
+                      : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
                   }`}
                 >
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-cyan-400" />
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-sky-600" />
                   1. Discontinuity Set Tables ({jointSets.length})
                 </button>
 
-                <button
-                  onClick={() => setShowPhotogrammetryModal(true)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 border border-amber-700/60 rounded-md cursor-pointer"
-                >
-                  <Compass className="w-3.5 h-3.5 text-amber-400" />
-                  2. 3D Kinematics
-                </button>
-
-                <div className="flex items-center bg-slate-900/90 border border-indigo-600/60 rounded-md overflow-hidden">
+                <div className="flex items-center bg-slate-100 border border-slate-200 rounded-md overflow-hidden">
                   <select
                     value={selectedClassificationMethod}
                     onChange={(e) => {
@@ -3868,10 +3804,9 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                         e.target.value as RockMassClassificationMethodId
                       );
                       setGeologyDrawerTab('q_index');
-                      setShowSetTableDrawer(true);
                       setShowAILearningDrawer(false);
                     }}
-                    className="bg-slate-950 text-indigo-300 text-[10px] font-mono font-bold px-2 py-1 border-r border-slate-700/80 outline-none cursor-pointer"
+                    className="bg-white text-indigo-700 text-[10px] font-mono font-bold px-2 py-1 border-r border-slate-200 outline-none cursor-pointer"
                   >
                     <option value="RMR">RMR</option>
                     <option value="Q_SYSTEM">Q-Sys</option>
@@ -3880,22 +3815,17 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   </select>
                   <button
                     onClick={() => {
-                      if (showSetTableDrawer && geologyDrawerTab === 'q_index') {
-                        setShowSetTableDrawer(false);
-                      } else {
-                        setGeologyDrawerTab('q_index');
-                        setShowSetTableDrawer(true);
-                        setShowAILearningDrawer(false);
-                      }
+                      setGeologyDrawerTab('q_index');
+                      setShowAILearningDrawer(false);
                     }}
                     className={`flex items-center gap-1 px-2.5 py-1 text-[11px] font-mono cursor-pointer ${
-                      showSetTableDrawer && geologyDrawerTab === 'q_index'
+                      geologyDrawerTab === 'q_index'
                         ? 'bg-indigo-600 text-white'
-                        : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                     }`}
                   >
-                    <Calculator className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>3.</span>
+                    <Calculator className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>2.</span>
                     {(() => {
                       const rmrEval = calculateBieniawskiRmr(rmrParams);
                       const qEval = evaluateQSystemWithValidation(
@@ -3923,37 +3853,6 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 </div>
 
                 <button
-                  onClick={() => onOpenProjectMemoryModal('sheet_settings')}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-800/80 hover:bg-slate-700 text-emerald-300 border border-slate-700 rounded-md cursor-pointer"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-                  Page Setup
-                </button>
-
-                <button
-                  onClick={() => setShowSheetSetModal(true)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono bg-slate-800/80 hover:bg-slate-700 text-amber-200 border border-amber-700/60 rounded-md cursor-pointer"
-                >
-                  <Layers className="w-3.5 h-3.5 text-amber-400" />
-                  Batch Sheet Set ({savedProjects.length})
-                </button>
-
-                <button
-                  onClick={() => {
-                    setShowAILearningDrawer((prev) => !prev);
-                    setShowSetTableDrawer(false);
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono rounded-md border cursor-pointer ${
-                    showAILearningDrawer
-                      ? 'bg-cyan-700 text-white border-cyan-400'
-                      : 'bg-slate-800/80 text-slate-300 border-slate-700 hover:bg-slate-700'
-                  }`}
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  AI Loop ({sessionMemory.correctionsLearnedCount ?? 0})
-                </button>
-
-                <button
                   onClick={() =>
                     onOpenExportSheet(
                       activeTool === 'overbreak'
@@ -3964,7 +3863,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded-md cursor-pointer"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  4. Plot Engineering Sheet
+                  3. Final Output Sheet
                 </button>
               </div>
             )}
@@ -3997,15 +3896,49 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
       />
 
       {/* ====================================================================
-          MAIN MAPPING CANVAS STAGE (Occupies ~85-90% of viewport)
+          STEP 5: FULL-WINDOW TABLES & OUTPUT (Shown instead of 2D Canvas when in Step 5)
          ==================================================================== */}
-      <div className="relative flex-1 flex min-w-0 min-h-0 overflow-hidden">
-        <div
-          ref={canvasContainerRef}
-          className={`relative flex-1 flex items-center justify-center min-w-0 min-h-0 overflow-hidden ${
-            isLight ? 'bg-[#E2E8F0]' : 'bg-[#090C12]'
-          }`}
-        >
+      {cadRibbonTab === 'CLASSIFICATION_SHEET' ? (
+        <GeologyAndQIndexDrawer
+          fullPage
+          activeTab={geologyDrawerTab}
+          onChangeTab={setGeologyDrawerTab}
+          onClose={() => setCadRibbonTab('HOME')}
+          geometry={geometry}
+          settings={settings}
+          activeSurface={activeSurface}
+          joints={joints}
+          jointSets={jointSets}
+          onUpdateJoints={onUpdateJointsWithHistory}
+          onUpdateJointSetAttribute={onUpdateJointSetAttribute}
+          onMergeJointSets={onMergeJointSets}
+          qIndexParams={qIndexParams}
+          onUpdateQIndexParams={onUpdateQIndexParams}
+          qParamStatus={qParamStatus}
+          onUpdateQParamStatus={onUpdateQParamStatus}
+          selectedMethod={selectedClassificationMethod}
+          onChangeSelectedMethod={onChangeSelectedClassificationMethod}
+          rmrParams={rmrParams}
+          onUpdateRmrParams={onUpdateRmrParams}
+          gsiParams={gsiParams}
+          onUpdateGsiParams={onUpdateGsiParams}
+          rockMassSummary={rockMassSummary}
+          onUpdateRockMassSummary={onUpdateRockMassSummary}
+          onOpenExportSheet={onOpenExportSheet}
+          onOpenKinematics={() => setShowPhotogrammetryModal(true)}
+          savedProjects={savedProjects}
+        />
+      ) : (
+        /* ====================================================================
+           STEPS 1-4: MAIN MAPPING CANVAS STAGE & CONTEXTUAL PROPERTY PALETTE
+           ==================================================================== */
+        <div className="relative flex-1 flex min-w-0 min-h-0 overflow-hidden">
+          <div
+            ref={canvasContainerRef}
+            className={`relative flex-1 flex items-center justify-center min-w-0 min-h-0 overflow-hidden ${
+              isLight ? 'bg-[#E2E8F0]' : 'bg-[#090C12]'
+            }`}
+          >
           <svg
             ref={svgCanvasRef}
             viewBox={`0 0 ${viewW} ${viewH}`}
@@ -4034,18 +3967,29 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 isDrawingLithologyPolygon &&
                 draftLithologyPoints.length >= 3
               ) {
-                const newReg = createLithologyRegionFromPolygon(
-                  activeSurface,
-                  draftLithologyPoints,
-                  'quartzite',
-                  undefined,
-                  joints,
-                  currentPhoto
-                );
-                handleUpdateLithologyWithHistory([...lithologyRegions, newReg]);
-                setSelectedLithologyRegionId(newReg.id);
-                setDraftLithologyPoints([]);
-                setIsDrawingLithologyPolygon(false);
+                commitDraftLithologyPolygon(draftLithologyPoints);
+              }
+            }}
+            onContextMenu={(e) => {
+              if (
+                activeTool === 'add_joint' ||
+                activeTool === 'redraw_joint' ||
+                activeTool === 'append_joint'
+              ) {
+                e.preventDefault();
+                if (draftJointPoints.length >= 2) {
+                  finishDraftJoint();
+                } else {
+                  setDraftJointPoints([]);
+                }
+              } else if (activeTool === 'lithology' && isDrawingLithologyPolygon) {
+                e.preventDefault();
+                if (draftLithologyPoints.length >= 3) {
+                  commitDraftLithologyPolygon(draftLithologyPoints);
+                } else {
+                  setDraftLithologyPoints([]);
+                  setIsDrawingLithologyPolygon(false);
+                }
               }
             }}
             className={`w-full h-full max-w-full max-h-full ${
@@ -4075,28 +4019,33 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 <path d={customMaskPolygonPath} />
               </clipPath>
 
-              {/* Subtle 1-meter Engineering Grid */}
-              <pattern
-                id="canvas-meter-grid"
-                width={pxPerMeter}
-                height={pxPerMeter}
-                patternUnits="userSpaceOnUse"
-                x={viewW / 2}
-                y={viewH / 2}
-              >
-                <path
-                  d={`M ${pxPerMeter} 0 L 0 0 0 ${pxPerMeter}`}
-                  fill="none"
-                  stroke={
-                    !showCadGrid
-                      ? 'transparent'
-                      : isLight
-                      ? 'rgba(71, 85, 105, 0.25)'
-                      : 'rgba(56, 189, 248, 0.16)'
-                  }
-                  strokeWidth="0.8"
-                />
-              </pattern>
+              {/* True 1.00-meter Engineering Scale Grid anchored at World Origin (0,0) */}
+              {(() => {
+                const originScreen = coordManager.worldToScreen({ x: 0, y: 0 });
+                return (
+                  <pattern
+                    id="canvas-meter-grid"
+                    width={pxPerMeter}
+                    height={pxPerMeter}
+                    patternUnits="userSpaceOnUse"
+                    x={originScreen.cx}
+                    y={originScreen.cy}
+                  >
+                    <path
+                      d={`M ${pxPerMeter} 0 L 0 0 0 ${pxPerMeter}`}
+                      fill="none"
+                      stroke={
+                        !showCadGrid
+                          ? 'transparent'
+                          : isLight
+                          ? 'rgba(30, 41, 59, 0.24)'
+                          : 'rgba(56, 189, 248, 0.22)'
+                      }
+                      strokeWidth="0.9"
+                    />
+                  </pattern>
+                );
+              })()}
 
               {/* Professional Geological & Lithological Hatch Patterns (Section 13: All 22 Lithologies) */}
               <LithologyPatternDefs prefix="lith-pat-" />
@@ -4553,60 +4502,20 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
               strokeWidth="2.2"
             />
 
-            {/* Real-World Master Dimension Annotations on Canvas */}
-            <g className="pointer-events-none">
-              <text
-                x={surfaceRectPx.centerX}
-                y={surfaceRectPx.y + surfaceRectPx.height + 24}
-                textAnchor="middle"
-                fill={isLight ? '#334155' : '#94A3B8'}
-                fontSize="11"
-                fontFamily="IBM Plex Mono, monospace"
-              >
-                {activeSurface === 'face'
-                  ? `TUNNEL WIDTH = ${geometry.width.toFixed(2)} m (CENTERLINE 0.00m)`
-                  : activeSurface === 'crown'
-                  ? `DEVELOPED CROWN ARCH WIDTH = ${surfaceBounds.width.toFixed(2)} m`
-                  : `ROUND LENGTH (PULL) = ${settings.roundLength.toFixed(2)} m`}
-              </text>
-
-              <text
-                x={surfaceRectPx.x - 16}
-                y={surfaceRectPx.centerY}
-                textAnchor="middle"
-                fill={isLight ? '#334155' : '#94A3B8'}
-                fontSize="11"
-                fontFamily="IBM Plex Mono, monospace"
-                transform={`rotate(-90, ${surfaceRectPx.x - 16}, ${surfaceRectPx.centerY})`}
-              >
-                {activeSurface === 'face'
-                  ? `HEIGHT = ${geometry.height.toFixed(2)} m (WALL = ${geometry.wallHeight.toFixed(2)} m)`
-                  : activeSurface === 'crown'
-                  ? `PULL = ${settings.roundLength.toFixed(2)} m (DRIVE N${String(
-                      Math.round(settings.driveDirection)
-                    ).padStart(3, '0')}°)`
-                  : `WALL HEIGHT = ${geometry.wallHeight.toFixed(2)} m`}
-              </text>
-            </g>
+            {/* Interior 1.00m × 1.00m Engineering Scale Grid Overlay inside Tunnel Surface */}
+            {showCadGrid && (
+              <path
+                d={surfaceBoundaryPath}
+                fill="url(#canvas-meter-grid)"
+                className="pointer-events-none"
+              />
+            )}
 
             {/* ==============================================================
                 VECTOR GEOLOGICAL DISCONTINUITY TRACES + DIP/DIP-DIRECTION SYMBOLS (Sections 10, 11, 12, 21)
                ============================================================== */}
             {(() => {
-              const canvasObstacles: LabelObstacleBox[] = [
-                {
-                  x: surfaceRectPx.centerX - 160,
-                  y: surfaceRectPx.y + surfaceRectPx.height + 8,
-                  width: 320,
-                  height: 22,
-                },
-                {
-                  x: surfaceRectPx.x - 28,
-                  y: surfaceRectPx.centerY - 110,
-                  width: 24,
-                  height: 220,
-                },
-              ];
+              const canvasObstacles: LabelObstacleBox[] = [];
               const canvasSegments: LabelObstacleSegment[] = [];
 
               return (
@@ -5405,22 +5314,30 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                           }
                           className="pointer-events-none"
                         />
-                        {ctrlCanvasPts.map((p, idx) => (
-                          <circle
-                            key={idx}
-                            cx={p.cx}
-                            cy={p.cy}
-                            r={idx === 0 ? '5.5' : '4.5'}
-                            fill={idx === 0 ? '#10B981' : '#F59E0B'}
-                            stroke="#0B0E14"
-                            strokeWidth="1.5"
-                            className="cursor-grab active:cursor-grabbing"
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              setDraggingDraftJointIdx(idx);
-                            }}
-                          />
-                        ))}
+                        {ctrlCanvasPts.map((p, idx) => {
+                          const isStartOrEnd =
+                            idx === 0 || idx === ctrlCanvasPts.length - 1;
+                          return (
+                            <circle
+                              key={idx}
+                              cx={p.cx}
+                              cy={p.cy}
+                              r={idx === 0 ? '6' : '5'}
+                              fill={idx === 0 ? '#10B981' : '#F59E0B'}
+                              stroke="#0B0E14"
+                              strokeWidth="1.5"
+                              className="cursor-pointer"
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                                if (isStartOrEnd && draftJointPoints.length >= 2) {
+                                  finishDraftJoint(draftJointPoints);
+                                  return;
+                                }
+                                setDraggingDraftJointIdx(idx);
+                              }}
+                            />
+                          );
+                        })}
                       </>
                     );
                   })()}
@@ -6156,104 +6073,23 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
             </g>
           </svg>
 
-          {/* Floating Add Joint / Re-draw / Append Joint Completion Prompt (Sections 9, 10, 11, 12) */}
+          {/* Compact Floating Action Pill when Drawing a Joint Trace (Full properties shown in Collapsible Sidebar) */}
           {(activeTool === 'add_joint' ||
             activeTool === 'redraw_joint' ||
             activeTool === 'append_joint') && (
-            <div className="absolute top-2.5 left-2.5 max-w-[calc(100%-1.25rem)] flex flex-wrap items-center gap-1.5 px-2.5 py-1.5 bg-slate-900/95 border border-amber-500/50 rounded shadow-lg text-xs z-20">
-              <span className="font-mono text-amber-300">
+            <div className="absolute top-2.5 left-2.5 max-w-[calc(100%-1.25rem)] flex flex-wrap items-center gap-2 px-3 py-1.5 bg-white/95 border border-amber-300 rounded-lg shadow-md text-xs z-20">
+              <span className="font-mono font-bold text-amber-800">
                 {activeTool === 'redraw_joint'
-                  ? `RE-DRAW TRACE ${selectedJoint?.set || ''}: (${draftJointPoints.length} pts)`
+                  ? `RE-DRAW ${selectedJoint?.set || ''}: ${draftJointPoints.length} pts`
                   : activeTool === 'append_joint'
-                  ? `CONTINUE / APPEND ${selectedJoint?.set || ''}: (${draftJointPoints.length} pts)`
-                  : `DRAW FEATURE (${draftJointPoints.length} pts)`}
+                  ? `APPEND ${selectedJoint?.set || ''}: ${draftJointPoints.length} pts`
+                  : `DRAWING ${draftSetId} (${draftJointPoints.length} pts)`}
               </span>
-
-              {/* Drawing Mode Selector: Magnetic Live-Wire | 1-Click Auto-Follow | Polyline | Freehand | Smooth Spline */}
-              <div className="flex items-center gap-0.5 p-0.5 bg-slate-950 rounded border border-slate-700">
-                {(
-                  [
-                    { id: 'magnetic_livewire', label: '⚡ Magnetic Crack' },
-                    { id: 'seed_autotrace', label: '🎯 1-Click Auto' },
-                    { id: 'polyline', label: 'Polyline' },
-                    { id: 'freehand', label: 'Freehand' },
-                    { id: 'smooth_curve', label: 'Smooth Spline' },
-                  ] as const
-                ).map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    onClick={() => setJointDrawMode(mode.id)}
-                    className={`px-2 py-0.5 text-[10px] font-mono rounded transition-colors ${
-                      jointDrawMode === mode.id
-                        ? 'bg-amber-600 text-white font-semibold'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-
-              {activeTool === 'add_joint' && (
-                <>
-                  <select
-                    value={draftFeatureType}
-                    onChange={(e) =>
-                      setDraftFeatureType(e.target.value as GeologicalFeatureType)
-                    }
-                    className="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-200"
-                  >
-                    <option value="joint">Joint</option>
-                    <option value="open_joint">Open Joint</option>
-                    <option value="closed_joint">Closed Joint</option>
-                    <option value="fracture">Fracture</option>
-                    <option value="discontinuity">Discontinuity</option>
-                    <option value="fault">Fault (F1)</option>
-                    <option value="shear">Shear Surface (F1)</option>
-                    <option value="shear_zone">Shear Zone (F1)</option>
-                    <option value="shear_plane">Shear Plane (F1)</option>
-                    <option value="slickenside">Slickenside</option>
-                    <option value="bedding">Bedding (J0)</option>
-                    <option value="foliation">Foliation (J0)</option>
-                    <option value="schistosity">Schistosity (J0)</option>
-                    <option value="cleavage">Cleavage</option>
-                    <option value="lineation">Lineation</option>
-                    <option value="fold">Fold Axis</option>
-                    <option value="anticline">Anticline</option>
-                    <option value="syncline">Syncline</option>
-                    <option value="vein">Vein</option>
-                    <option value="dyke">Dyke / Intrusive</option>
-                    <option value="contact">Contact</option>
-                    <option value="lithological_contact">Lithological Contact</option>
-                    <option value="clay_infill">Clay Infill</option>
-                    <option value="clay_band">Clay Band</option>
-                    <option value="seam">Weak Seam</option>
-                    <option value="weathered_zone">Weathered Zone</option>
-                    <option value="breccia_zone">Breccia Zone</option>
-                    <option value="crushed_zone">Crushed Zone</option>
-                    <option value="water_seepage">Water Seepage</option>
-                    <option value="water_flow">Water Flow</option>
-                  </select>
-                  <select
-                    value={draftSetId}
-                    onChange={(e) => setDraftSetId(e.target.value)}
-                    className="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-xs font-mono text-slate-200"
-                  >
-                    {['J0', 'J1', 'J2', 'J3', 'J4', 'J5', 'F1'].map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                </>
-              )}
               {draftJointPoints.length > 0 && (
                 <button
                   type="button"
                   onClick={() => setDraftJointPoints((prev) => prev.slice(0, -1))}
-                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 font-mono text-[11px]"
-                  title="Undo last draft vertex"
+                  className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded border border-slate-300 font-mono text-[11px] cursor-pointer"
                 >
                   Undo Pt
                 </button>
@@ -6262,7 +6098,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 <button
                   type="button"
                   onClick={() => finishDraftJoint()}
-                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded"
+                  className="px-2.5 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded cursor-pointer"
                 >
                   Finish Trace
                 </button>
@@ -6273,948 +6109,126 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   setDraftJointPoints([]);
                   setActiveTool('select');
                 }}
-                className="px-2 py-1 text-slate-400 hover:text-white"
+                className="px-1.5 py-0.5 text-slate-500 hover:text-slate-900 font-medium cursor-pointer"
               >
                 Cancel
               </button>
             </div>
           )}
 
-          {/* Floating Survey Control Point Editable Panel (Sections 5, 6, 7, 8) */}
-          {(activeTool === 'control_point' || selectedControlPointId) && (
-            <div className="absolute top-2.5 left-2.5 w-[var(--eswa-floating-panel-w,310px)] max-w-[calc(100%-1.25rem)] max-h-[calc(100%-1.5rem)] overflow-y-auto bg-slate-900/95 border border-emerald-500/50 rounded shadow-xl p-2.5 text-xs font-mono z-20 space-y-2">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                <span className="text-emerald-300 font-semibold flex items-center gap-1.5">
-                  <Crosshair className="w-3.5 h-3.5" />
-                  SURVEY CONTROL POINTS ({surfaceControlPoints.length})
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={handleUndoLithology}
-                    disabled={controlPointPast.length === 0}
-                    className="p-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded text-slate-300"
-                    title="Undo Control Point Change"
-                  >
-                    <Undo2 className="w-3 h-3" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleRedoLithology}
-                    disabled={controlPointFuture.length === 0}
-                    className="p-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded text-slate-300"
-                    title="Redo Control Point Change"
-                  >
-                    <Redo2 className="w-3 h-3" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedControlPointId(null);
-                      if (activeTool === 'control_point') setActiveTool('select');
-                    }}
-                    className="text-slate-400 hover:text-white px-1"
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-
-              {selectedControlPoint ? (
-                <div className="space-y-2 bg-slate-950/80 p-2.5 rounded border border-slate-800">
-                  <div className="flex items-center justify-between">
-                    <span className="text-emerald-400 font-bold">
-                      {selectedControlPoint.label}
-                    </span>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleUpdateControlPointsWithHistory((prev) =>
-                            prev.map((c) =>
-                              c.id === selectedControlPoint.id
-                                ? { ...c, visible: c.visible === false ? true : false }
-                                : c
-                            )
-                          )
-                        }
-                        className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-[10px] text-slate-300 flex items-center gap-1"
-                        title="Hide / Show Control Point"
-                      >
-                        {selectedControlPoint.visible === false ? (
-                          <>
-                            <EyeOff className="w-3 h-3 text-amber-400" /> Hidden
-                          </>
-                        ) : (
-                          <>
-                            <Eye className="w-3 h-3 text-emerald-400" /> Visible
-                          </>
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleUpdateControlPointsWithHistory((prev) =>
-                            prev.map((c) =>
-                              c.id === selectedControlPoint.id
-                                ? { ...c, locked: !c.locked }
-                                : c
-                            )
-                          )
-                        }
-                        className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-[10px] text-slate-300 flex items-center gap-1"
-                        title="Lock / Unlock Control Point"
-                      >
-                        {selectedControlPoint.locked ? (
-                          <>
-                            <Lock className="w-3 h-3 text-amber-400" /> Locked
-                          </>
-                        ) : (
-                          <>
-                            <Unlock className="w-3 h-3 text-slate-400" /> Unlocked
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Name</span>
-                      <input
-                        type="text"
-                        value={cpDraftLabel}
-                        disabled={selectedControlPoint.locked}
-                        onChange={(e) => setCpDraftLabel(e.target.value)}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-emerald-200 text-[11px]"
-                      />
-                    </label>
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">X (m)</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={cpDraftX}
-                        disabled={selectedControlPoint.locked}
-                        onChange={(e) => setCpDraftX(e.target.value)}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Y (m)</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={cpDraftY}
-                        disabled={selectedControlPoint.locked}
-                        onChange={(e) => setCpDraftY(e.target.value)}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                  </div>
-
-                  <div className="flex items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      disabled={selectedControlPoint.locked}
-                      onClick={() => {
-                        const nx = parseFloat(cpDraftX);
-                        const ny = parseFloat(cpDraftY);
-                        if (Number.isNaN(nx) || Number.isNaN(ny)) return;
-                        const nextPt = {
-                          x: Number(nx.toFixed(3)),
-                          y: Number(ny.toFixed(3)),
-                        };
-                        const proj = coordManager.worldToScreen(nextPt);
-                        handleUpdateControlPointsWithHistory((prev) =>
-                          prev.map((c) =>
-                            c.id === selectedControlPoint.id
-                              ? {
-                                  ...c,
-                                  label: cpDraftLabel.trim() || c.label,
-                                  point: nextPt,
-                                  imageUV: { u: proj.u, v: proj.v },
-                                }
-                              : c
-                          )
-                        );
-                        onUpdateStatusMessage?.(
-                          `Updated ${cpDraftLabel || selectedControlPoint.label} to X: ${nextPt.x.toFixed(
-                            2
-                          )} m, Y: ${nextPt.y.toFixed(2)} m.`
-                        );
-                      }}
-                      className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold rounded text-[11px]"
-                    >
-                      [Apply]
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteControlPoint(selectedControlPoint.id)}
-                      className="flex-1 py-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-700/60 rounded text-[11px]"
-                    >
-                      [Delete]
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-[11px] text-slate-300 leading-relaxed">
-                  Click anywhere on the tunnel surface to create a survey control point, or select/drag an existing point.
-                </div>
-              )}
-
-              {surfaceControlPoints.length > 0 && (
-                <div className="max-h-28 overflow-y-auto space-y-1 pt-1 border-t border-slate-800">
-                  {surfaceControlPoints.map((cp) => (
-                    <div
-                      key={cp.id}
-                      onClick={() => setSelectedControlPointId(cp.id)}
-                      className={`flex items-center justify-between px-2 py-1 rounded cursor-pointer text-[10px] ${
-                        selectedControlPointId === cp.id
-                          ? 'bg-emerald-950/70 border border-emerald-500/50 text-emerald-200'
-                          : 'bg-slate-950/60 hover:bg-slate-800 text-slate-300'
-                      }`}
-                    >
-                      <span>
-                        <strong>{cp.label}</strong> · X: {cp.point.x.toFixed(2)}m, Y:{' '}
-                        {cp.point.y.toFixed(2)}m
-                      </span>
-                      <div className="flex items-center gap-1">
-                        {cp.locked && <Lock className="w-2.5 h-2.5 text-amber-400" />}
-                        {cp.visible === false && (
-                          <EyeOff className="w-2.5 h-2.5 text-slate-500" />
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Floating Professional Geological Symbol Library & Interactive Editor (Sections 9, 10, 12, 15) */}
-          {(activeTool === 'geological_symbol' || selectedSymbol) && (
-            <div className="absolute top-2.5 left-2.5 w-[var(--eswa-floating-panel-w,330px)] max-w-[calc(100%-1.25rem)] max-h-[calc(100%-1.5rem)] overflow-y-auto bg-slate-900/95 border border-purple-500/50 rounded shadow-xl p-2.5 text-xs font-mono z-20 space-y-2">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                <span className="text-purple-300 font-semibold flex items-center gap-1.5">
-                  <Compass className="w-3.5 h-3.5" />
-                  GEOLOGICAL SYMBOL LIBRARY ({surfacePlacedSymbols.length})
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={handleUndoLithology}
-                    disabled={symbolPast.length === 0}
-                    className="p-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded text-slate-300"
-                    title="Undo Symbol Action"
-                  >
-                    <Undo2 className="w-3 h-3" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleRedoLithology}
-                    disabled={symbolFuture.length === 0}
-                    className="p-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded text-slate-300"
-                    title="Redo Symbol Action"
-                  >
-                    <Redo2 className="w-3 h-3" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSymbolId(null);
-                      if (activeTool === 'geological_symbol') setActiveTool('select');
-                    }}
-                    className="text-slate-400 hover:text-white px-1"
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-
-              {/* Symbol Type Selector for Placing New Symbols */}
-              <div className="space-y-1">
-                <span className="text-[10px] text-slate-400">
-                  Select Standard Engineering Geology Symbol (Click canvas to place):
-                </span>
-                <select
-                  value={
-                    selectedSymbol ? selectedSymbol.symbolType : activeSymbolTypeToPlace
-                  }
-                  onChange={(e) => {
-                    const nextType = e.target.value as GeologicalSymbolType;
-                    setActiveSymbolTypeToPlace(nextType);
-                    if (selectedSymbol && !selectedSymbol.locked) {
-                      const nextMeta = getStructuralSymbolMeta(nextType);
-                      handleUpdatePlacedSymbolsWithHistory((prev) =>
-                        prev.map((s) =>
-                          s.id === selectedSymbol.id
-                            ? {
-                                ...s,
-                                symbolType: nextType,
-                                color: nextMeta.defaultColor,
-                              }
-                            : s
-                        )
-                      );
-                    }
-                  }}
-                  className="w-full px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100 text-[11px]"
-                >
-                  {STRUCTURAL_GEOLOGICAL_SYMBOLS.map((item) => (
-                    <option key={item.type} value={item.type}>
-                      [{item.shortCode}] {item.label} — {item.category}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {selectedSymbol ? (
-                <div className="space-y-2 bg-slate-950/90 p-2.5 rounded border border-slate-800">
-                  <div className="flex items-center justify-between">
-                    <span className="text-purple-300 font-bold">
-                      EDIT SYMBOL: {selectedSymbol.label}
-                    </span>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleUpdatePlacedSymbolsWithHistory((prev) =>
-                            prev.map((s) =>
-                              s.id === selectedSymbol.id
-                                ? { ...s, locked: !s.locked }
-                                : s
-                            )
-                          )
-                        }
-                        className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-[10px] text-slate-300"
-                      >
-                        {selectedSymbol.locked ? 'Unlock' : 'Lock'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeletePlacedSymbol(selectedSymbol.id)}
-                        className="px-1.5 py-0.5 bg-rose-950/80 hover:bg-rose-900 text-rose-200 rounded text-[10px]"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Label</span>
-                      <input
-                        type="text"
-                        value={selectedSymbol.label}
-                        disabled={selectedSymbol.locked}
-                        onChange={(e) =>
-                          handleUpdatePlacedSymbolsWithHistory((prev) =>
-                            prev.map((s) =>
-                              s.id === selectedSymbol.id
-                                ? { ...s, label: e.target.value }
-                                : s
-                            )
-                          )
-                        }
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">X (m)</span>
-                      <input
-                        type="number"
-                        step="0.05"
-                        value={selectedSymbol.point.x}
-                        disabled={selectedSymbol.locked}
-                        onChange={(e) => {
-                          const nx = parseFloat(e.target.value);
-                          if (Number.isNaN(nx)) return;
-                          handleUpdatePlacedSymbolsWithHistory((prev) =>
-                            prev.map((s) =>
-                              s.id === selectedSymbol.id
-                                ? { ...s, point: { x: nx, y: s.point.y } }
-                                : s
-                            )
-                          );
-                        }}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Y (m)</span>
-                      <input
-                        type="number"
-                        step="0.05"
-                        value={selectedSymbol.point.y}
-                        disabled={selectedSymbol.locked}
-                        onChange={(e) => {
-                          const ny = parseFloat(e.target.value);
-                          if (Number.isNaN(ny)) return;
-                          handleUpdatePlacedSymbolsWithHistory((prev) =>
-                            prev.map((s) =>
-                              s.id === selectedSymbol.id
-                                ? { ...s, point: { x: s.point.x, y: ny } }
-                                : s
-                            )
-                          );
-                        }}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Rotate (°)</span>
-                      <input
-                        type="number"
-                        min="0"
-                        max="360"
-                        value={Math.round(selectedSymbol.rotationDeg)}
-                        disabled={selectedSymbol.locked}
-                        onChange={(e) => {
-                          const deg =
-                            ((Number(e.target.value) || 0) % 360 + 360) % 360;
-                          handleUpdatePlacedSymbolsWithHistory((prev) =>
-                            prev.map((s) =>
-                              s.id === selectedSymbol.id
-                                ? {
-                                    ...s,
-                                    rotationDeg: deg,
-                                    dipDirectionDeg: deg,
-                                    strikeDeg: (deg - 90 + 360) % 360,
-                                  }
-                                : s
-                            )
-                          );
-                        }}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Dip (0-90°)</span>
-                      <input
-                        type="number"
-                        min="0"
-                        max="90"
-                        value={selectedSymbol.dipDeg ?? 60}
-                        disabled={selectedSymbol.locked}
-                        onChange={(e) => {
-                          const d = Math.max(
-                            0,
-                            Math.min(90, Number(e.target.value) || 0)
-                          );
-                          handleUpdatePlacedSymbolsWithHistory((prev) =>
-                            prev.map((s) =>
-                              s.id === selectedSymbol.id
-                                ? {
-                                    ...s,
-                                    dipDeg: d,
-                                    dipDirectionDeg:
-                                      s.dipDirectionDeg ?? s.rotationDeg,
-                                  }
-                                : s
-                            )
-                          );
-                        }}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                    <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Size Scale</span>
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0.5"
-                        max="2.5"
-                        value={selectedSymbol.scale}
-                        disabled={selectedSymbol.locked}
-                        onChange={(e) => {
-                          const sc = Math.max(
-                            0.5,
-                            Math.min(2.5, Number(e.target.value) || 1)
-                          );
-                          handleUpdatePlacedSymbolsWithHistory((prev) =>
-                            prev.map((s) =>
-                              s.id === selectedSymbol.id
-                                ? { ...s, scale: sc }
-                                : s
-                            )
-                          );
-                        }}
-                        className="w-full px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100 text-[11px]"
-                      />
-                    </label>
-                  </div>
-
-                  <label className="flex items-center gap-2 text-[10px] text-slate-300 pt-0.5">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(selectedSymbol.uncertainOrientation)}
-                      onChange={(e) =>
-                        handleUpdatePlacedSymbolsWithHistory((prev) =>
-                          prev.map((s) =>
-                            s.id === selectedSymbol.id
-                              ? { ...s, uncertainOrientation: e.target.checked }
-                              : s
-                          )
-                        )
-                      }
-                    />
-                    Orientation Uncertain (Show &apos;?&apos; rather than false precision)
-                  </label>
-                </div>
-              ) : (
-                <div className="text-[10px] text-slate-400">
-                  Click on the tunnel canvas to place a{' '}
-                  <strong className="text-purple-300">
-                    {getStructuralSymbolMeta(activeSymbolTypeToPlace).label}
-                  </strong>{' '}
-                  symbol, or click an existing symbol to move, rotate, resize, or edit it.
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Complete Photo Fitting, Perspective, Piecewise Mesh Warp & Custom Polygon Mask Editor (Sections 1-5) */}
-          {activeTool === 'photo_fit' && (
-            <PhotoFittingPanel
-              activeSurface={activeSurface}
-              currentPhoto={currentPhoto}
-              geometry={geometry}
-              settings={settings}
-              subTab={photoEditSubTab}
-              onChangeSubTab={setPhotoEditSubTab}
-              showMeshGrid={showMeshGrid}
-              onToggleMeshGrid={setShowMeshGrid}
-              addingControlPointMode={addingControlPointMode}
-              onToggleAddingControlPointMode={setAddingControlPointMode}
-              drawingCustomMaskMode={drawingCustomMaskMode}
-              onToggleDrawingCustomMaskMode={setDrawingCustomMaskMode}
-              onUpdateTransform={handleUpdateTransformWithHistory}
-              onUpdateOpacity={(opacityVal) =>
-                onUpdatePhotoSurface(activeSurface, (prev) => ({
-                  ...prev,
-                  opacity: opacityVal,
-                }))
-              }
-              onUpdateCalibration={(focalMm, k1Val) =>
-                onUpdatePhotoSurface(activeSurface, (prev) => ({
-                  ...prev,
-                  calibration: prev.calibration
-                    ? {
-                        ...prev.calibration,
-                        focalLengthMm: focalMm,
-                        radialDistortionK1: k1Val,
-                      }
-                    : undefined,
-                }))
-              }
-              onFitToTunnel={onAutoFitCurrentPhoto}
-              onUndoTransform={handleUndoTransform}
-              onRedoTransform={handleRedoTransform}
-              canUndoTransform={transformPast.length > 0}
-              canRedoTransform={transformFuture.length > 0}
-              onApply={async () => {
-                if (currentPhoto.image) {
-                  const finalWarped = await generatePiecewiseWarpedPhotoDataUrl(
-                    currentPhoto.image,
-                    currentPhoto.transform
-                  );
-                  onUpdatePhotoSurface(activeSurface, (prev) => ({
-                    ...prev,
-                    warpedImage: finalWarped,
-                  }));
-                }
-                setAddingControlPointMode(false);
-                setDrawingCustomMaskMode(false);
-                setActiveTool('select');
-              }}
-              onCancel={() => {
-                if (initialTransformSnapshot) {
-                  onUpdatePhotoSurface(activeSurface, (prev) => ({
-                    ...prev,
-                    transform: initialTransformSnapshot,
-                  }));
-                }
-                setAddingControlPointMode(false);
-                setDrawingCustomMaskMode(false);
-                setActiveTool('select');
-              }}
-            />
-          )}
-
-          {/* Measure Tool Readout */}
+          {/* Compact Measure Tool Readout Pill on Canvas */}
           {activeTool === 'measure' && (
-            <div className="absolute top-10 left-3 px-3 py-2 bg-slate-900/95 border border-cyan-500/40 rounded-xs text-xs font-mono z-20">
+            <div className="absolute top-3 left-3 px-3 py-1.5 bg-white/95 border border-cyan-300 rounded-lg shadow-md text-xs font-mono z-20 text-slate-800">
               {measurementInfo ? (
                 <span>
-                  DIST = <strong className="text-cyan-300">{measurementInfo.distMeters} m</strong> ·
-                  ANGLE = <strong className="text-cyan-300">{measurementInfo.angleDeg}°</strong>
+                  DIST = <strong className="text-cyan-700">{measurementInfo.distMeters} m</strong> ·
+                  ANGLE = <strong className="text-cyan-700">{measurementInfo.angleDeg}°</strong>
                 </span>
               ) : (
-                <span className="text-slate-300">
-                  DIST: Specify first and second point on tunnel surface (meters &amp; angle).
+                <span className="text-slate-600">
+                  DIST: Click 1st and 2nd point on tunnel surface.
                 </span>
               )}
             </div>
           )}
 
-          {/* ==================================================================
-              AUTOCAD IN-CANVAS VIEWPORT CONTROLS (TOP-LEFT: [-][Top][2D Wireframe])
-             ================================================================== */}
-          <div className="absolute top-2 left-2.5 flex flex-wrap items-center gap-1 font-mono text-[10px] z-10 pointer-events-auto">
+          {/* Clean Light-Mode Zoom / Pan Navigation Pill (Top-Right) */}
+          <div className="hidden sm:flex flex-col items-center gap-1 p-1 bg-white/95 border border-slate-200 rounded-lg shadow-sm absolute top-2.5 right-2.5 z-10 pointer-events-auto">
             <button
               type="button"
-              onClick={() => setShowCadViewCube((v) => !v)}
-              className="px-1.5 py-0.5 bg-[#0D131F]/90 hover:bg-slate-800 text-cyan-300 border border-slate-700/80 rounded-xs cursor-pointer"
-              title="Toggle ESWACAD ViewCube & Navigation Bar"
+              onClick={() => setIsSpacePanning((p) => !p)}
+              className={`p-1.5 rounded-md cursor-pointer ${
+                isSpacePanning
+                  ? 'bg-cyan-600 text-white'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+              title="PAN (Spacebar or Middle-Mouse Drag)"
             >
-              [-]
+              <Hand className="w-3.5 h-3.5" />
             </button>
             <button
               type="button"
-              onClick={() => {
-                const order: SurfaceType[] = ['face', 'crown', 'leftWall', 'rightWall'];
-                const next = order[(order.indexOf(activeSurface) + 1) % order.length];
-                onSelectSurface(next);
-              }}
-              className="px-2 py-0.5 bg-[#0D131F]/90 hover:bg-slate-800 text-cyan-300 border border-slate-700/80 rounded-xs font-semibold cursor-pointer"
-              title="Click to cycle Model Space Surface Viewport"
+              onClick={() => zoomViewportAtScreenPoint(viewport.zoom * 1.25)}
+              className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md cursor-pointer"
+              title="ZOOM IN (+)"
             >
-              [{activeSurface === 'face'
-                ? '1. TUNNEL FACE'
-                : activeSurface === 'crown'
-                ? '2. CROWN ARCH'
-                : activeSurface === 'leftWall'
-                ? '3. LEFT WALL'
-                : '4. RIGHT WALL'}]
+              <ZoomIn className="w-3.5 h-3.5" />
             </button>
             <button
               type="button"
-              onClick={() => {
-                setShowCrackXRayOverlay((prev) => {
-                  const next = !prev;
-                  if (next) setShowDepthReliefOverlay(false);
-                  return next;
-                });
-              }}
-              className="px-2 py-0.5 bg-[#0D131F]/90 hover:bg-slate-800 text-emerald-300 border border-slate-700/80 rounded-xs cursor-pointer"
-              title="Click to cycle Visual Style (2D Photo + Vector / Crack X-Ray / 3D Relief)"
+              onClick={() => zoomViewportAtScreenPoint(viewport.zoom / 1.25)}
+              className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md cursor-pointer"
+              title="ZOOM OUT (-)"
             >
-              [
-              {showCrackXRayOverlay
-                ? 'X-Ray Fracture Style'
-                : showDepthReliefOverlay
-                ? '3D Relief Style'
-                : '2D Wireframe + Photo'}
-              ]
+              <ZoomOut className="w-3.5 h-3.5" />
             </button>
-            <span className="hidden md:inline-block px-2 py-0.5 bg-[#0D131F]/80 text-slate-400 border border-slate-800 rounded-xs pointer-events-none">
-              {geometry.customProfile?.name || 'Master'}: {geometry.width.toFixed(2)}m×
-              {geometry.height.toFixed(2)}m · Drive N
-              {String(Math.round(settings.driveDirection)).padStart(3, '0')}°E
-            </span>
-          </div>
-
-          {/* ==================================================================
-              AUTOCAD 3D VIEWCUBE & VERTICAL NAVIGATION BAR (TOP-RIGHT)
-             ================================================================== */}
-          {showCadViewCube && (
-            <div className="hidden sm:flex flex-col items-end gap-2 absolute top-2.5 right-2.5 z-10 pointer-events-auto">
-              {/* AutoCAD ViewCube with Compass Ring */}
-              <div className="w-24 bg-[#0E1420]/92 border border-[#28354E] rounded-xs p-1.5 shadow-xl flex flex-col items-center">
-                <div className="text-[8px] font-mono text-cyan-400 font-bold tracking-widest mb-1">
-                  N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E
-                </div>
-                <div className="grid grid-cols-2 gap-1 w-full text-[9px] font-mono">
-                  {(
-                    [
-                      { id: 'face', short: 'FACE' },
-                      { id: 'crown', short: 'CROWN' },
-                      { id: 'leftWall', short: 'L-WALL' },
-                      { id: 'rightWall', short: 'R-WALL' },
-                    ] as { id: SurfaceType; short: string }[]
-                  ).map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => onSelectSurface(s.id)}
-                      className={`py-1 rounded-xs border text-center font-bold transition-colors cursor-pointer ${
-                        activeSurface === s.id
-                          ? 'bg-cyan-600 text-white border-cyan-300'
-                          : 'bg-[#161F30] text-slate-300 border-slate-700 hover:text-white hover:border-cyan-500/50'
-                      }`}
-                      title={`Switch Model Space to ${s.short}`}
-                    >
-                      {s.short}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowPhotogrammetryModal(true)}
-                  className="mt-1 w-full py-0.5 bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border border-indigo-500/50 rounded-xs text-[8px] font-mono font-bold cursor-pointer"
-                  title="Open 3D Isometric Wedge & Stereonet View"
-                >
-                  3D WEDGE VIEW
-                </button>
-              </div>
-
-              {/* Vertical AutoCAD Floating Navigation Bar */}
-              <div className="flex flex-col items-center gap-1 p-1 bg-[#0E1420]/92 border border-[#28354E] rounded-xs shadow-xl">
-                <button
-                  type="button"
-                  onClick={() => setIsSpacePanning((p) => !p)}
-                  className={`p-1.5 rounded-xs cursor-pointer ${
-                    isSpacePanning
-                      ? 'bg-cyan-600 text-white'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                  }`}
-                  title="PAN (Spacebar or Middle-Mouse Drag)"
-                >
-                  <Hand className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => zoomViewportAtScreenPoint(viewport.zoom * 1.25)}
-                  className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded-xs cursor-pointer"
-                  title="ZOOM IN (+)"
-                >
-                  <ZoomIn className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => zoomViewportAtScreenPoint(viewport.zoom / 1.25)}
-                  className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded-xs cursor-pointer"
-                  title="ZOOM OUT (-)"
-                >
-                  <ZoomOut className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewport({ zoom: 1, panX: 0, panY: 0 })}
-                  className="px-1 py-0.5 text-[9px] font-mono font-bold text-amber-300 hover:text-white hover:bg-slate-800 rounded-xs cursor-pointer"
-                  title="ZOOM EXTENTS (1:1 Reset)"
-                >
-                  1:1
-                </button>
-                <div className="w-4 h-px bg-slate-800 my-0.5" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTool(activeTool === 'measure' ? 'select' : 'measure');
-                    setMeasurePts([]);
-                  }}
-                  className={`p-1.5 rounded-xs cursor-pointer ${
-                    activeTool === 'measure'
-                      ? 'bg-cyan-600 text-white'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                  }`}
-                  title="DIST — Measure Real-World Distance"
-                >
-                  <Ruler className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setActiveTool(activeTool === 'dip_probe' ? 'select' : 'dip_probe')
-                  }
-                  className={`p-1.5 rounded-xs cursor-pointer ${
-                    activeTool === 'dip_probe'
-                      ? 'bg-cyan-600 text-white'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                  }`}
-                  title="DIP — 3D Orientation Probe"
-                >
-                  <Compass className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ==================================================================
-              AUTOCAD UCS (USER COORDINATE SYSTEM) ICON (BOTTOM-LEFT)
-             ================================================================== */}
-          <div className="hidden sm:flex items-end absolute bottom-12 left-3 pointer-events-none z-10 opacity-85">
-            <svg width="54" height="54" viewBox="0 0 54 54">
-              {/* Origin Square */}
-              <rect
-                x="8"
-                y="38"
-                width="8"
-                height="8"
-                fill="none"
-                stroke="#38BDF8"
-                strokeWidth="1.5"
-              />
-              {/* Y Axis (Up / Elevation) */}
-              <line x1="12" y1="42" x2="12" y2="10" stroke="#10B981" strokeWidth="2" />
-              <polygon points="12,5 8.5,12 15.5,12" fill="#10B981" />
-              <text
-                x="17"
-                y="13"
-                fontSize="10"
-                fontWeight="700"
-                fontFamily="IBM Plex Mono, monospace"
-                fill="#10B981"
-              >
-                Y
-              </text>
-              {/* X Axis (Right / Offset) */}
-              <line x1="12" y1="42" x2="44" y2="42" stroke="#F43F5E" strokeWidth="2" />
-              <polygon points="49,42 42,38.5 42,45.5" fill="#F43F5E" />
-              <text
-                x="41"
-                y="35"
-                fontSize="10"
-                fontWeight="700"
-                fontFamily="IBM Plex Mono, monospace"
-                fill="#F43F5E"
-              >
-                X
-              </text>
-            </svg>
-          </div>
-
-          {/* ==================================================================
-              CLEAN AUTOCAD COMMAND LINE DOCK (NO LEFT-CLICK OPTIONS BAR)
-             ================================================================== */}
-          <div className="absolute bottom-2 left-3 right-3 flex flex-col items-center gap-1 pointer-events-none z-20">
-            {showLeftClickShortcutsBar ? (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleExecuteCadCommand(cadCommandInput);
-                }}
-                className="pointer-events-auto flex items-center justify-between gap-2 px-3 py-1 rounded-xs bg-[#0B0F17]/95 border border-[#2C3A55] shadow-2xl text-[11px] font-mono w-full max-w-xl"
-              >
-                <span className="text-[10px] font-bold text-amber-400 shrink-0">ESWACAD Command:</span>
-                <input
-                  type="text"
-                  value={cadCommandInput}
-                  onChange={(e) => setCadCommandInput(e.target.value)}
-                  placeholder={
-                    statusMessage
-                      ? statusMessage.slice(0, 56)
-                      : 'Type JOINT, SPLINE, AITRACE, SUPPORT, UNFOLD, SHEETSET, LITH, CP, 3D, PLOT...'
-                  }
-                  className="w-full bg-transparent text-[10px] font-mono text-white placeholder-slate-500 outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowLeftClickShortcutsBar(false)}
-                  className="text-slate-400 hover:text-white text-[10px] cursor-pointer"
-                  title="Minimize ESWACAD Command Line"
-                >
-                  ✕
-                </button>
-              </form>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setShowLeftClickShortcutsBar(true)}
-                className="pointer-events-auto px-3 py-0.5 rounded-xs bg-[#0B0F17]/95 hover:bg-slate-900 text-amber-300 border border-slate-700 text-[10px] font-mono shadow-lg cursor-pointer"
-              >
-                ESWACAD Command: _
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setViewport({ zoom: 1, panX: 0, panY: 0 })}
+              className="px-1 py-0.5 text-[9px] font-mono font-bold text-cyan-700 hover:bg-slate-100 rounded-md cursor-pointer"
+              title="Reset Zoom (1:1)"
+            >
+              1:1
+            </button>
           </div>
         </div>
 
         {/* ====================================================================
-            OVERBREAK & UNDERCUT ENGINEERING ANALYSIS PANEL
+            RESPONSIVE COLLAPSIBLE PROPERTY PALETTE SIDEBAR
+            - Collapses to a slim 40px edge rail to maximize workspace area
+            - Expands to display ONLY relevant property controls for the active tool
            ==================================================================== */}
-        {activeTool === 'overbreak' && (
-          <OverbreakAnalysisPanel
-            activeSurface={activeSurface}
-            geometry={geometry}
-            settings={settings}
-            controlPoints={controlPoints}
-            surveyProfile={surveyProfile}
-            analysis={overbreakAnalysis}
-            selectedControlPointId={selectedControlPointId}
-            onSelectControlPointId={setSelectedControlPointId}
-            onUpdateControlPoints={(next) => handleUpdateControlPointsWithHistory(() => next)}
-            onUpdateSurveyProfile={onUpdateSurveyProfile}
-            onGenerateSampleAsBuiltProfile={onGenerateSampleAsBuiltProfile}
-            onOpenProjectMemoryModal={() => onOpenProjectMemoryModal('volumes')}
-            onOpenExportSheet={onOpenExportSheet}
-            onClose={() => setActiveTool('select')}
-            onStatusMessage={onUpdateStatusMessage}
-          />
-        )}
+        {!showCadPropertiesAlways ? (
+          /* COLLAPSED SLIM RAIL: Maximizes Mapping Canvas Workspace Area */
+          <aside
+            className={`w-10 shrink-0 bg-white ${
+              inspectorDockSide === 'left' ? 'order-first border-r' : 'order-last border-l'
+            } border-slate-200 flex flex-col items-center py-2.5 gap-2.5 z-20 select-none shadow-xs`}
+          >
+            <button
+              type="button"
+              onClick={() => setShowCadPropertiesAlways(true)}
+              className="w-7 h-7 rounded-lg bg-sky-600 hover:bg-sky-500 text-white flex items-center justify-center shadow-2xs cursor-pointer transition-colors"
+              title="Expand Property Palette Sidebar"
+            >
+              {inspectorDockSide === 'right' ? (
+                <PanelLeft className="w-3.5 h-3.5" />
+              ) : (
+                <PanelRight className="w-3.5 h-3.5" />
+              )}
+            </button>
 
-        {/* ====================================================================
-            LITHOLOGY SELECTION, EDITING & AI DESCRIPTION PANEL (Sections 11–14)
-           ==================================================================== */}
-        {activeTool === 'lithology' && (
-          <LithologyPanel
-            activeSurface={activeSurface}
-            geometry={geometry}
-            settings={settings}
-            photoSurface={currentPhoto}
-            joints={joints}
-            lithologyRegions={lithologyRegions}
-            selectedRegionId={selectedLithologyRegionId}
-            onSelectRegionId={setSelectedLithologyRegionId}
-            onUpdateLithologyRegions={handleUpdateLithologyWithHistory}
-            isDrawingLithologyPolygon={isDrawingLithologyPolygon}
-            draftLithologyPoints={draftLithologyPoints}
-            onStartDrawingLithologyPolygon={() => {
-              setDraftLithologyPoints([]);
-              setIsDrawingLithologyPolygon(true);
-            }}
-            onUndoLastDraftPoint={() => {
-              setDraftLithologyPoints((prev) => prev.slice(0, -1));
-            }}
-            onReopenRegionAsDraft={(region) => {
-              setDraftLithologyPoints(region.polygon.map((p: Point2D) => ({ ...p })));
-              setReopenedLithologyRegionId(region.id);
-              setSelectedLithologyRegionId(region.id);
-              setIsDrawingLithologyPolygon(true);
-              onUpdateStatusMessage?.(
-                `Reopened "${region.lithologyName}" polygon (${region.polygon.length} pts) for interactive boundary editing.`
-              );
-            }}
-            onFinishDrawingLithologyPolygon={() => {
-              commitDraftLithologyPolygon();
-            }}
-            onCancelDrawingLithologyPolygon={() => {
-              setDraftLithologyPoints([]);
-              setReopenedLithologyRegionId(null);
-              setIsDrawingLithologyPolygon(false);
-            }}
-            canUndo={lithologyPast.length > 0 || canUndo}
-            canRedo={lithologyFuture.length > 0 || canRedo}
-            onUndo={handleUndoLithology}
-            onRedo={handleRedoLithology}
-            onClose={() => {
-              setIsDrawingLithologyPolygon(false);
-              setDraftLithologyPoints([]);
-              setReopenedLithologyRegionId(null);
-              setActiveTool('select');
-            }}
-            onStatusMessage={onUpdateStatusMessage}
-          />
-        )}
+            <div className="w-5 h-px bg-slate-200" />
 
-        {/* ====================================================================
-            AUTOCAD PROPERTIES & STRUCTURAL INSPECTOR PALETTE (EXTENDABLE LEFT / RIGHT)
-           ==================================================================== */}
-        {(selectedJoint ||
-          activeTool === 'dip_probe' ||
-          (showCadPropertiesAlways &&
-            activeTool !== 'overbreak' &&
-            activeTool !== 'lithology')) && (
+            {/* Active Tool Indicator Icon on Collapsed Rail */}
+            <button
+              type="button"
+              onClick={() => setShowCadPropertiesAlways(true)}
+              className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-sky-50 text-sky-700 border border-slate-200 flex items-center justify-center cursor-pointer"
+              title={`Active Tool: ${activeTool.replace(/_/g, ' ').toUpperCase()} (Click to Expand Properties)`}
+            >
+              <Sliders className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Vertical Label */}
+            <button
+              type="button"
+              onClick={() => setShowCadPropertiesAlways(true)}
+              className="mt-2 [writing-mode:vertical-rl] rotate-180 text-[10px] font-mono font-bold tracking-widest text-slate-500 hover:text-sky-700 uppercase cursor-pointer"
+              title="Click to Expand Tool Properties"
+            >
+              PROPERTIES · {activeTool.replace(/_/g, ' ').toUpperCase()}
+            </button>
+          </aside>
+        ) : (
+          /* EXPANDED RESPONSIVE COLLAPSIBLE SIDEBAR */
           <aside
             style={{ width: `${inspectorWidthPx}px` }}
-            className={`relative max-w-[52vw] bg-[#101520] ${
+            className={`relative w-[min(320px,86vw)] md:w-auto max-w-[86vw] md:max-w-[48vw] bg-white ${
               inspectorDockSide === 'left' ? 'order-first border-r' : 'order-last border-l'
-            } border-[#263147] p-2.5 overflow-y-auto text-xs space-y-2 shrink-0 z-20 transition-[width] duration-75`}
+            } border-slate-200 flex flex-col shrink-0 z-20 shadow-xs overflow-hidden transition-[width] duration-150`}
           >
-            {/* Interactive Drag-to-Resize Handle (Extend Left or Right) */}
+            {/* Interactive Drag-to-Expand Resize Handle on Edge */}
             <div
               onMouseDown={(e) => {
                 e.preventDefault();
@@ -7223,312 +6237,267 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   startWidth: inspectorWidthPx,
                 });
               }}
-              title="Drag Left or Right to Extend / Resize ESWACAD Properties Palette"
-              className={`flex items-center justify-center absolute top-0 bottom-0 w-2.5 cursor-col-resize z-30 group ${
-                inspectorDockSide === 'left' ? '-right-1.5' : '-left-1.5'
+              onPointerDown={(e) => {
+                e.preventDefault();
+                setResizingInspector({
+                  startX: e.clientX,
+                  startWidth: inspectorWidthPx,
+                });
+              }}
+              title="Drag edge left or right to resize Property Palette"
+              className={`hidden md:flex items-center justify-center absolute top-0 bottom-0 w-3.5 cursor-col-resize z-30 group select-none touch-none ${
+                inspectorDockSide === 'left' ? '-right-2' : '-left-2'
               }`}
             >
-              <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-cyan-400 transition-colors" />
+              <div className="h-24 w-1.5 rounded-full bg-slate-300 group-hover:bg-cyan-600 group-active:bg-cyan-700 transition-colors shadow-xs" />
             </div>
 
-            {/* AutoCAD Properties Title Bar (Move Left/Right & Resize Width) */}
-            <div className="flex items-center justify-between gap-1 px-2 py-1 bg-[#182132] border border-[#2B3854] rounded-xs text-[10px] font-mono">
-              <span className="text-cyan-300 font-bold tracking-wider uppercase flex items-center gap-1">
-                <Sliders className="w-3 h-3 text-cyan-400" />
-                PROPERTIES PALETTE
-              </span>
-              <div className="flex items-center gap-1">
+            {/* Collapsible Sidebar Header: Active Tool Context Badge + Dock Side + Collapse Button */}
+            <div className="flex items-center justify-between gap-1.5 px-3 py-2 bg-slate-100 border-b border-slate-200 text-[10px] font-mono shrink-0">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Sliders className="w-3.5 h-3.5 text-cyan-600 shrink-0" />
+                <div className="truncate">
+                  <span className="text-slate-900 font-bold tracking-wider uppercase">
+                    {activeTool === 'photo_fit'
+                      ? 'PHOTO FIT & WARP'
+                      : activeTool === 'add_joint' ||
+                        activeTool === 'redraw_joint' ||
+                        activeTool === 'append_joint'
+                      ? 'DRAW JOINT TOOL'
+                      : activeTool === 'lithology'
+                      ? 'LITHOLOGY ZONES'
+                      : activeTool === 'geological_symbol'
+                      ? 'ISRM SYMBOLS'
+                      : activeTool === 'dip_probe'
+                      ? '3D DIP PROBE'
+                      : activeTool === 'control_point'
+                      ? 'CONTROL POINTS'
+                      : activeTool === 'overbreak'
+                      ? 'OVERBREAK / SURVEY'
+                      : activeTool === 'measure'
+                      ? 'MEASURE DISTANCE'
+                      : selectedJoint
+                      ? `TRACE ${selectedJoint.set} PROPERTIES`
+                      : 'TOOL PROPERTIES'}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
                   onClick={() =>
                     setInspectorDockSide((s) => (s === 'right' ? 'left' : 'right'))
                   }
-                  className="px-1.5 py-0.5 rounded-xs bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 flex items-center gap-0.5 cursor-pointer"
-                  title="Dock Properties Palette on Left or Right Side"
+                  className="px-1.5 py-0.5 rounded bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-0.5 cursor-pointer font-semibold"
+                  title="Dock Property Sidebar on Left or Right Side"
                 >
                   {inspectorDockSide === 'right' ? (
                     <>
-                      <PanelLeft className="w-3 h-3" /> L
+                      <PanelLeft className="w-3 h-3 text-cyan-600" /> L
                     </>
                   ) : (
                     <>
-                      <PanelRight className="w-3 h-3" /> R
+                      <PanelRight className="w-3 h-3 text-cyan-600" /> R
                     </>
                   )}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setInspectorWidthPx((w) => Math.max(260, w - 45))}
-                  className="px-1 py-0.5 rounded-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
-                  title="Narrow Palette"
+                  onClick={() => setShowCadPropertiesAlways(false)}
+                  className="px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-500 text-white font-semibold cursor-pointer flex items-center gap-1"
+                  title="Collapse Property Sidebar to maximize canvas workspace"
                 >
-                  −W
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setInspectorWidthPx((w) => Math.min(660, w + 45))}
-                  className="px-1 py-0.5 rounded-xs bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 cursor-pointer"
-                  title="Extend Palette Width"
-                >
-                  +W
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedJointId(null);
-                    setShowCadPropertiesAlways(false);
-                    if (activeTool === 'dip_probe') setActiveTool('select');
-                  }}
-                  className="px-1 text-slate-400 hover:text-white cursor-pointer"
-                  title="Close Properties Palette"
-                >
-                  ✕
+                  <span>Collapse</span>
+                  <span>{inspectorDockSide === 'right' ? '»' : '«'}</span>
                 </button>
               </div>
             </div>
 
-            {selectedJoint ? (
+            {/* Embedded Full-Height Panels for Lithology & Overbreak */}
+            {activeTool === 'lithology' ? (
+              <LithologyPanel
+                embedded
+                activeSurface={activeSurface}
+                geometry={geometry}
+                settings={settings}
+                photoSurface={currentPhoto}
+                joints={joints}
+                lithologyRegions={lithologyRegions}
+                selectedRegionId={selectedLithologyRegionId}
+                onSelectRegionId={setSelectedLithologyRegionId}
+                onUpdateLithologyRegions={handleUpdateLithologyWithHistory}
+                isDrawingLithologyPolygon={isDrawingLithologyPolygon}
+                draftLithologyPoints={draftLithologyPoints}
+                onStartDrawingLithologyPolygon={() => {
+                  setDraftLithologyPoints([]);
+                  setIsDrawingLithologyPolygon(true);
+                }}
+                onUndoLastDraftPoint={() => {
+                  setDraftLithologyPoints((prev) => prev.slice(0, -1));
+                }}
+                onReopenRegionAsDraft={(region) => {
+                  setDraftLithologyPoints(region.polygon.map((p: Point2D) => ({ ...p })));
+                  setReopenedLithologyRegionId(region.id);
+                  setSelectedLithologyRegionId(region.id);
+                  setIsDrawingLithologyPolygon(true);
+                  onUpdateStatusMessage?.(
+                    `Reopened "${region.lithologyName}" polygon (${region.polygon.length} pts) for interactive boundary editing.`
+                  );
+                }}
+                onFinishDrawingLithologyPolygon={() => {
+                  commitDraftLithologyPolygon();
+                }}
+                onCancelDrawingLithologyPolygon={() => {
+                  setDraftLithologyPoints([]);
+                  setReopenedLithologyRegionId(null);
+                  setIsDrawingLithologyPolygon(false);
+                }}
+                canUndo={lithologyPast.length > 0 || canUndo}
+                canRedo={lithologyFuture.length > 0 || canRedo}
+                onUndo={handleUndoLithology}
+                onRedo={handleRedoLithology}
+                onClose={() => {
+                  setIsDrawingLithologyPolygon(false);
+                  setDraftLithologyPoints([]);
+                  setReopenedLithologyRegionId(null);
+                  setActiveTool('select');
+                }}
+                onStatusMessage={onUpdateStatusMessage}
+              />
+            ) : activeTool === 'overbreak' ? (
+              <OverbreakAnalysisPanel
+                embedded
+                activeSurface={activeSurface}
+                geometry={geometry}
+                settings={settings}
+                controlPoints={controlPoints}
+                surveyProfile={surveyProfile}
+                analysis={overbreakAnalysis}
+                selectedControlPointId={selectedControlPointId}
+                onSelectControlPointId={setSelectedControlPointId}
+                onUpdateControlPoints={(next) => handleUpdateControlPointsWithHistory(() => next)}
+                onUpdateSurveyProfile={onUpdateSurveyProfile}
+                onGenerateSampleAsBuiltProfile={onGenerateSampleAsBuiltProfile}
+                onOpenProjectMemoryModal={() => onOpenProjectMemoryModal('volumes')}
+                onOpenExportSheet={onOpenExportSheet}
+                onClose={() => setActiveTool('select')}
+                onStatusMessage={onUpdateStatusMessage}
+              />
+            ) : (
+              <div className="flex-1 overflow-y-auto p-3 text-xs space-y-2.5">
+                {activeTool === 'photo_fit' ? (
+              <PhotoFittingPanel
+                activeSurface={activeSurface}
+                currentPhoto={currentPhoto}
+                geometry={geometry}
+                settings={settings}
+                subTab={photoEditSubTab}
+                onChangeSubTab={setPhotoEditSubTab}
+                showMeshGrid={showMeshGrid}
+                onToggleMeshGrid={setShowMeshGrid}
+                addingControlPointMode={addingControlPointMode}
+                onToggleAddingControlPointMode={setAddingControlPointMode}
+                drawingCustomMaskMode={drawingCustomMaskMode}
+                onToggleDrawingCustomMaskMode={setDrawingCustomMaskMode}
+                onUpdateTransform={handleUpdateTransformWithHistory}
+                onUpdateOpacity={(opacityVal) =>
+                  onUpdatePhotoSurface(activeSurface, (prev) => ({
+                    ...prev,
+                    opacity: opacityVal,
+                  }))
+                }
+                onUpdateCalibration={(focalMm, k1Val) =>
+                  onUpdatePhotoSurface(activeSurface, (prev) => ({
+                    ...prev,
+                    calibration: prev.calibration
+                      ? {
+                          ...prev.calibration,
+                          focalLengthMm: focalMm,
+                          radialDistortionK1: k1Val,
+                        }
+                      : undefined,
+                  }))
+                }
+                onFitToTunnel={onAutoFitCurrentPhoto}
+                onUndoTransform={handleUndoTransform}
+                onRedoTransform={handleRedoTransform}
+                canUndoTransform={transformPast.length > 0}
+                canRedoTransform={transformFuture.length > 0}
+                onApply={async () => {
+                  if (currentPhoto.image) {
+                    const finalWarped = await generatePiecewiseWarpedPhotoDataUrl(
+                      currentPhoto.image,
+                      currentPhoto.transform
+                    );
+                    onUpdatePhotoSurface(activeSurface, (prev) => ({
+                      ...prev,
+                      warpedImage: finalWarped,
+                    }));
+                  }
+                  setAddingControlPointMode(false);
+                  setDrawingCustomMaskMode(false);
+                  setActiveTool('select');
+                }}
+                onCancel={() => {
+                  if (initialTransformSnapshot) {
+                    onUpdatePhotoSurface(activeSurface, (prev) => ({
+                      ...prev,
+                      transform: initialTransformSnapshot,
+                    }));
+                  }
+                  setAddingControlPointMode(false);
+                  setDrawingCustomMaskMode(false);
+                  setActiveTool('select');
+                }}
+              />
+            ) : selectedJoint ? (
               <>
-                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                   <div>
-                    <span className="font-mono font-bold text-slate-100">
+                    <span className="font-mono font-bold text-slate-900">
                       TRACE {selectedJoint.set} ({selectedJoint.surface.toUpperCase()})
                     </span>
-                    <div className="text-[11px] text-slate-400 font-mono">
+                    <div className="text-[11px] text-slate-500 font-mono">
                       Source: {selectedJoint.source} · Conf: {selectedJoint.confidence} (
                       {Math.round(selectedJoint.confidenceScore * 100)}%)
                     </div>
                   </div>
                   <button
                     onClick={() => setSelectedJointId(null)}
-                    className="text-slate-400 hover:text-white"
+                    className="text-slate-400 hover:text-slate-800"
                   >
                     ✕
                   </button>
                 </div>
 
-                {/* 4-Component Confidence Breakdown (Section 9) */}
-                {selectedJoint.confidenceBreakdown && (
-                  <div className="p-2 bg-slate-950/80 border border-slate-800/90 rounded font-mono text-[10px] space-y-1">
-                    <div className="text-slate-400 font-semibold">
-                      ACCURACY CONFIDENCE BREAKDOWN
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-slate-300">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">Detection:</span>
-                        <span>{selectedJoint.confidenceBreakdown.detection}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">Continuity:</span>
-                        <span>{selectedJoint.confidenceBreakdown.trace}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">Geom Fit:</span>
-                        <span>{selectedJoint.confidenceBreakdown.geometric}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">3D Orient:</span>
-                        <span>{selectedJoint.confidenceBreakdown.orientation}%</span>
-                      </div>
-                    </div>
+                {/* Orientation & Persistence Box */}
+                <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 space-y-2 font-mono">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-600">Surface Trace Angle:</span>
+                    <span className="text-slate-900 font-bold">
+                      {selectedJoint.traceAngle}°
+                    </span>
                   </div>
-                )}
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-600">Trace Length (Persist.):</span>
+                    <span className="text-slate-900 font-bold">
+                      {selectedJoint.persistenceMeters.toFixed(2)} m ({selectedJoint.geometry.length} pts)
+                    </span>
+                  </div>
 
-                 {/* Orientation, Triangulation & Error Propagation Box (Sections 7, 8, 21, 22, 24, 25, 29) */}
-                 <div className="p-2.5 bg-slate-900/90 rounded border border-slate-800 space-y-2 font-mono">
-                   <div className="flex items-center justify-between text-[10px]">
-                     <span className="text-slate-500">A. Image Trace Angle:</span>
-                     <span className="text-slate-300">
-                       {selectedJoint.imageTraceAngleDeg ?? selectedJoint.traceAngle}°
-                     </span>
-                   </div>
-                   <div className="flex items-center justify-between text-[11px]">
-                     <span className="text-slate-400">B. Surface Trace Angle:</span>
-                     <span className="text-slate-200 font-semibold">
-                       {selectedJoint.traceAngle}°
-                     </span>
-                   </div>
-                   <div className="flex items-center justify-between text-[11px]">
-                     <span className="text-slate-400">Trace Length (Persist.):</span>
-                     <span className="text-slate-200 font-semibold">
-                       {selectedJoint.persistenceMeters.toFixed(2)} m ({selectedJoint.geometry.length} pts)
-                     </span>
-                   </div>
-
-                   {/* Triangulation Residual, Reprojection Error & Geometric Confidence Level */}
-                   <div className="p-1.5 bg-slate-950/90 border border-slate-800/90 rounded space-y-1 text-[10px]">
-                     <div className="flex items-center justify-between">
-                       <span className="text-slate-500">Geom. Confidence:</span>
-                       <span
-                         className={
-                           selectedJoint.geometricConfidenceLevel === 'HIGH_GEOMETRIC_CONFIDENCE'
-                             ? 'text-emerald-400 font-semibold'
-                             : selectedJoint.geometricConfidenceLevel === 'LOW_GEOMETRIC_CONFIDENCE'
-                             ? 'text-rose-400 font-semibold'
-                             : 'text-amber-300 font-semibold'
-                         }
-                       >
-                         {(selectedJoint.geometricConfidenceLevel || 'MEDIUM_GEOMETRIC_CONFIDENCE').replace(/_/g, ' ')}
-                       </span>
-                     </div>
-                     <div className="flex items-center justify-between">
-                       <span className="text-slate-500">Triangulation Residual:</span>
-                       <span className="text-slate-300">
-                         {(selectedJoint.triangulationResidualMeters ?? 0.012).toFixed(3)} m ({selectedJoint.numObservingViews ?? 1} view{(selectedJoint.numObservingViews ?? 1) > 1 ? 's' : ''})
-                       </span>
-                     </div>
-                     <div className="flex items-center justify-between">
-                       <span className="text-slate-500">Reprojection Error:</span>
-                       <span
-                         className={
-                           (selectedJoint.reprojectionErrorPx ?? 1.2) > 3.2
-                             ? 'text-amber-300 font-semibold'
-                             : 'text-slate-300'
-                         }
-                       >
-                         {selectedJoint.reprojectionErrorByView &&
-                         selectedJoint.reprojectionErrorByView.length > 0
-                           ? selectedJoint.reprojectionErrorByView
-                               .map((v) => `${v.viewLabel}: ${v.errorPx}px`)
-                               .join(' · ')
-                           : `${(selectedJoint.reprojectionErrorPx ?? 1.2).toFixed(2)} px`}
-                       </span>
-                     </div>
-                     <div className="flex items-center justify-between">
-                       <span className="text-slate-500">Supporting Photos:</span>
-                       <span className="text-emerald-300">
-                         {selectedJoint.supportingPhotosCorroborated ?? 0} corroborated (Main Photo Anchor)
-                       </span>
-                     </div>
-                     <div className="flex items-center justify-between">
-                       <span className="text-slate-500">Continuity State:</span>
-                       <select
-                         value={selectedJoint.continuityStatus || 'OBSERVED'}
-                         onChange={(e) =>
-                           onUpdateJointsWithHistory(
-                             joints.map((j) =>
-                               j.id === selectedJoint.id
-                                 ? {
-                                     ...j,
-                                     continuityStatus: e.target.value as TraceContinuityStatus,
-                                   }
-                                 : j
-                             )
-                           )
-                         }
-                         className="bg-slate-900 border border-slate-700 rounded px-1 py-0.2 text-[10px] text-cyan-300"
-                       >
-                         <option value="OBSERVED">OBSERVED (Main Photo)</option>
-                         <option value="SUPPORTED">SUPPORTED (Main + Supporting)</option>
-                         <option value="INFERRED">INFERRED</option>
-                         <option value="UNCERTAIN">UNCERTAIN</option>
-                       </select>
-                     </div>
-                     {selectedJoint.topologyIntersections &&
-                       selectedJoint.topologyIntersections.length > 0 && (
-                         <div className="text-[10px] text-cyan-300 pt-0.5">
-                           Topology: {selectedJoint.topologyIntersections.length} node(s) (
-                           {selectedJoint.topologyIntersections.map((t) => t.type.replace('_', ' ')).join(', ')})
-                         </div>
-                       )}
-                   </div>
-
-                  {/* Multi-Vertex Local Angle Variation & Waviness Readout */}
-                  {selectedJoint.localAnglesDeg && selectedJoint.localAnglesDeg.length > 0 && (
-                    <div className="pt-1.5 border-t border-slate-800/80 space-y-1">
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-cyan-400 font-semibold">
-                          LOCAL SEGMENT ANGLES (P1→P{selectedJoint.geometry.length})
-                        </span>
-                        <span className="text-amber-300">
-                          Waviness ±{selectedJoint.wavinessAngleDeg ?? 0}°
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-slate-300 bg-slate-950/90 px-2 py-1 rounded border border-slate-800/80 leading-relaxed break-words">
-                        {selectedJoint.localAnglesDeg.map((a) => `${Math.round(a)}°`).join(' → ')}
-                      </div>
-                      <div className="grid grid-cols-2 gap-1.5 pt-0.5 text-[10px]">
-                        <label className="space-y-0.5">
-                          <span className="text-slate-500">Start Term.:</span>
-                          <select
-                            value={selectedJoint.terminationStart || 'ROCK_TERMINATION'}
-                            onChange={(e) =>
-                              onUpdateJointsWithHistory(
-                                joints.map((j) =>
-                                  j.id === selectedJoint.id
-                                    ? {
-                                        ...j,
-                                        terminationStart: e.target.value as TraceTerminationType,
-                                      }
-                                    : j
-                                )
-                              )
-                            }
-                            className="w-full bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[10px] text-slate-200"
-                          >
-                            <option value="ROCK_TERMINATION">In Rock (T-bar)</option>
-                            <option value="JOINT_ABUTMENT">Against Joint</option>
-                            <option value="BOUNDARY_EXIT">Excav. Boundary</option>
-                            <option value="OCCLUDED">Obscured</option>
-                          </select>
-                        </label>
-                        <label className="space-y-0.5">
-                          <span className="text-slate-500">End Term.:</span>
-                          <select
-                            value={selectedJoint.terminationEnd || 'ROCK_TERMINATION'}
-                            onChange={(e) =>
-                              onUpdateJointsWithHistory(
-                                joints.map((j) =>
-                                  j.id === selectedJoint.id
-                                    ? {
-                                        ...j,
-                                        terminationEnd: e.target.value as TraceTerminationType,
-                                      }
-                                    : j
-                                )
-                              )
-                            }
-                            className="w-full bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[10px] text-slate-200"
-                          >
-                            <option value="ROCK_TERMINATION">In Rock (T-bar)</option>
-                            <option value="JOINT_ABUTMENT">Against Joint</option>
-                            <option value="BOUNDARY_EXIT">Excav. Boundary</option>
-                            <option value="OCCLUDED">Obscured</option>
-                          </select>
-                        </label>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="border-t border-slate-800 pt-2 space-y-1.5">
+                  <div className="border-t border-slate-200 pt-2 space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-cyan-400 font-semibold">
+                      <span className="text-[10px] text-cyan-700 font-bold">
                         3D GEOLOGICAL ORIENTATION
                       </span>
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded ${
-                          selectedJoint.orientationStatus === 'DIRECTLY_MEASURED' ||
-                          selectedJoint.orientationStatus === 'CONFIRMED' ||
-                          selectedJoint.orientationStatus === 'GEOMETRICALLY_CALCULATED'
-                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                            : 'bg-amber-950 text-amber-300 border border-amber-800'
-                        }`}
-                      >
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
                         {selectedJoint.orientationStatus.replace(/_/g, ' ')}
                       </span>
                     </div>
 
-                    {selectedJoint.linkedJointIds &&
-                      selectedJoint.linkedJointIds.length > 0 && (
-                        <div className="text-[10px] text-emerald-400">
-                          ✓ Multi-Surface 3D Plane Solved ({selectedJoint.linkedJointIds.length}{' '}
-                          linked trace)
-                        </div>
-                      )}
-
                     <div className="grid grid-cols-2 gap-2 pt-1">
                       <label className="space-y-0.5">
-                        <span className="text-[10px] text-slate-400">Dip Dir (0-360°)</span>
+                        <span className="text-[10px] text-slate-600">Dip Dir (0-360°)</span>
                         <input
                           type="number"
                           min="0"
@@ -7552,11 +6521,11 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                               approvedSummary: `Measured ${Math.round(dd)}°/${Math.round(selectedJoint.dip)}°`,
                             });
                           }}
-                          className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded text-slate-100"
+                          className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-slate-900"
                         />
                       </label>
                       <label className="space-y-0.5">
-                        <span className="text-[10px] text-slate-400">Dip (0-90°)</span>
+                        <span className="text-[10px] text-slate-600">Dip (0-90°)</span>
                         <input
                           type="number"
                           min="0"
@@ -7572,27 +6541,18 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                               )
                             );
                           }}
-                          className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded text-slate-100"
+                          className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-slate-900"
                         />
                       </label>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Strike (RHR): {String(Math.round(selectedJoint.strike)).padStart(3, '0')}° ·
-                      Truthful 3D:{' '}
-                      <strong className="text-slate-200">
-                        {String(Math.round(selectedJoint.dipDirection)).padStart(3, '0')}° /{' '}
-                        {String(Math.round(selectedJoint.dip)).padStart(2, '0')}° ±
-                        {selectedJoint.dipUncertaintyDeg ?? 3}°
-                      </strong>
                     </div>
                   </div>
                 </div>
 
-                {/* Joint Number, Discontinuity Set, Feature Type & Engineering Attributes (Sections 10 & 11) */}
-                <div className="space-y-2 pt-1 border-t border-slate-800">
+                {/* Joint Number, Discontinuity Set, Feature Type & Engineering Attributes */}
+                <div className="space-y-2 pt-1 border-t border-slate-200">
                   <div className="grid grid-cols-3 gap-2">
                     <label className="space-y-1">
-                      <span className="text-[10px] text-slate-400">Joint No.</span>
+                      <span className="text-[10px] text-slate-600">Joint No.</span>
                       <input
                         type="text"
                         value={selectedJoint.jointNumber || ''}
@@ -7606,12 +6566,12 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                             )
                           )
                         }
-                        className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded font-mono text-xs text-slate-100"
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded font-mono text-xs text-slate-900"
                       />
                     </label>
 
                     <label className="space-y-1">
-                      <span className="text-[10px] text-slate-400">Joint Set</span>
+                      <span className="text-[10px] text-slate-600">Joint Set</span>
                       <select
                         value={selectedJoint.set}
                         onChange={(e) => {
@@ -7626,7 +6586,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                             approvedSummary: `Reclassified to Set ${nextSet}`,
                           });
                         }}
-                        className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded font-mono text-xs text-slate-100"
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded font-mono text-xs text-slate-900"
                       >
                         {['J0', 'J1', 'J2', 'J3', 'J4', 'J5', 'F1'].map((s) => (
                           <option key={s} value={s}>
@@ -7637,7 +6597,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                     </label>
 
                     <label className="space-y-1">
-                      <span className="text-[10px] text-slate-400">Confidence</span>
+                      <span className="text-[10px] text-slate-600">Confidence</span>
                       <select
                         value={selectedJoint.confidence}
                         onChange={(e) =>
@@ -7652,7 +6612,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                             )
                           )
                         }
-                        className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded font-mono text-xs text-slate-100"
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded font-mono text-xs text-slate-900"
                       >
                         <option value="High">High</option>
                         <option value="Medium">Medium</option>
@@ -7662,7 +6622,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   </div>
 
                   <label className="block space-y-1">
-                    <span className="text-[10px] text-slate-400">
+                    <span className="text-[10px] text-slate-600">
                       Structural Geological Feature Type
                     </span>
                     <select
@@ -7679,7 +6639,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                           approvedSummary: `Verified as ${nextType} (${selectedJoint.set})`,
                         });
                       }}
-                      className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-xs text-slate-100"
+                      className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-xs text-slate-900"
                     >
                       <option value="joint">Joint</option>
                       <option value="open_joint">Open Joint</option>
@@ -7717,10 +6677,10 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                     </select>
                   </label>
 
-                  {/* Editable Joint Engineering Attributes: Aperture, Roughness, Infill, Weathering (Section 11) */}
+                  {/* Editable Joint Engineering Attributes: Aperture, Roughness, Infill, Weathering */}
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Aperture</span>
+                      <span className="text-[10px] text-slate-600">Aperture</span>
                       <input
                         type="text"
                         value={selectedJoint.apertureMm || ''}
@@ -7733,11 +6693,11 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                             )
                           )
                         }
-                        className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded text-[11px] text-slate-100"
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-[11px] text-slate-900"
                       />
                     </label>
                     <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Roughness</span>
+                      <span className="text-[10px] text-slate-600">Roughness</span>
                       <input
                         type="text"
                         value={selectedJoint.roughness || ''}
@@ -7750,11 +6710,11 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                             )
                           )
                         }
-                        className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded text-[11px] text-slate-100"
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-[11px] text-slate-900"
                       />
                     </label>
                     <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Infilling</span>
+                      <span className="text-[10px] text-slate-600">Infilling</span>
                       <input
                         type="text"
                         value={selectedJoint.infilling || ''}
@@ -7767,11 +6727,11 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                             )
                           )
                         }
-                        className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded text-[11px] text-slate-100"
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-[11px] text-slate-900"
                       />
                     </label>
                     <label className="space-y-0.5">
-                      <span className="text-[10px] text-slate-400">Weathering</span>
+                      <span className="text-[10px] text-slate-600">Weathering</span>
                       <input
                         type="text"
                         value={selectedJoint.weathering || 'Slightly Weathered (W2)'}
@@ -7784,72 +6744,20 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                             )
                           )
                         }
-                        className="w-full px-2 py-1 bg-slate-800 border border-slate-700 rounded text-[11px] text-slate-100"
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-[11px] text-slate-900"
                       />
                     </label>
                   </div>
-
-                  {/* Quantitative Photogrammetric & Barton-Bandis JRC Telemetry Box */}
-                  {(() => {
-                    const liveJrc = computeBartonJRCProfileForPoints(
-                      selectedJoint.geometry,
-                      selectedJoint.reliefDepthMeters,
-                      selectedJoint.featureType,
-                      selectedJoint.wavinessAngleDeg
-                    );
-                    const liveWT =
-                      selectedJoint.terzaghiWeight ??
-                      computeTerzaghiWeight(
-                        selectedJoint.dip,
-                        selectedJoint.dipDirection,
-                        selectedJoint.surface,
-                        settings.driveDirection,
-                        geometry
-                      );
-                    return (
-                      <div className="mt-2 p-2 bg-slate-950/80 border border-cyan-900/60 rounded space-y-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-300">
-                            Photogrammetry &amp; Barton JRC (Z₂)
-                          </span>
-                          <button
-                            onClick={() => setShowPhotogrammetryModal(true)}
-                            className="text-[10px] font-mono text-indigo-300 hover:text-white underline"
-                          >
-                            3D Wedge &amp; PLY →
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
-                          <div className="bg-slate-900/90 px-1.5 py-1 rounded border border-slate-800">
-                            <div className="text-slate-400">Field JRCₙ</div>
-                            <div className="text-emerald-300 font-bold">
-                              {(selectedJoint.jrcValue ?? liveJrc.jrcNFieldScale).toFixed(1)}
-                            </div>
-                          </div>
-                          <div className="bg-slate-900/90 px-1.5 py-1 rounded border border-slate-800">
-                            <div className="text-slate-400">Z₂ / Rp</div>
-                            <div className="text-cyan-300 font-bold">
-                              {(selectedJoint.z2RootMeanSquare ?? liveJrc.z2RmsDerivative).toFixed(3)} / {(selectedJoint.roughnessProfileIndexRp ?? liveJrc.rpRoughnessIndex).toFixed(3)}
-                            </div>
-                          </div>
-                          <div className="bg-slate-900/90 px-1.5 py-1 rounded border border-slate-800">
-                            <div className="text-slate-400">Terzaghi W_T</div>
-                            <div className="text-amber-300 font-bold">{liveWT.toFixed(2)}×</div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()}
                 </div>
 
-                {/* Manual Correction Actions (Accept, Extend, Shorten, Add Vertex, Delete Vertex, Smooth Spline, Continue/Append, Re-draw, Split, Join, Delete) */}
-                <div className="space-y-1.5 pt-1 border-t border-slate-800">
+                {/* Manual Correction Actions (Without Empty Spline Button) */}
+                <div className="space-y-1.5 pt-1 border-t border-slate-200">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] text-slate-400">
-                      Control Points &amp; Curve Actions ({selectedJoint.geometry.length} pts)
+                    <span className="text-[11px] text-slate-600 font-semibold">
+                      Trace Actions ({selectedJoint.geometry.length} pts)
                     </span>
                     {selectedJointVertexIdx !== null && (
-                      <span className="text-[10px] font-mono text-amber-300">
+                      <span className="text-[10px] font-mono text-amber-700 font-bold">
                         Selected P{selectedJointVertexIdx + 1}
                       </span>
                     )}
@@ -7857,21 +6765,21 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   <div className="grid grid-cols-2 gap-1.5">
                     <button
                       onClick={handleConfirmSelectedJoint}
-                      className="flex items-center justify-center gap-1 px-2 py-1.5 bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-200 border border-emerald-500/40 rounded font-medium"
+                      className="flex items-center justify-center gap-1 px-2 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md font-semibold cursor-pointer"
                     >
                       <Check className="w-3.5 h-3.5" />
                       Accept / Confirm
                     </button>
                     <button
                       onClick={handleDeleteSelectedJoint}
-                      className="flex items-center justify-center gap-1 px-2 py-1.5 bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-700/50 rounded font-medium"
+                      className="flex items-center justify-center gap-1 px-2 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-md font-semibold cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       Delete Trace
                     </button>
                     <button
                       onClick={() => handleAddVertexToSelectedJoint()}
-                      className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700"
+                      className="px-2 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-md border border-slate-300 cursor-pointer"
                     >
                       + Add Control Pt
                     </button>
@@ -7883,512 +6791,825 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                         )
                       }
                       disabled={selectedJoint.geometry.length <= 2}
-                      className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-rose-200 rounded border border-slate-700"
+                      className="px-2 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-rose-700 rounded-md border border-slate-300 cursor-pointer"
                     >
                       - Delete Control Pt
-                    </button>
-                    <button
-                      onClick={handleSmoothSelectedJointCurve}
-                      disabled={selectedJoint.geometry.length < 3}
-                      className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-cyan-200 rounded border border-slate-700"
-                      title="Fit smooth Catmull-Rom spline through control points"
-                    >
-                      Smooth Curve / Spline
                     </button>
                     <button
                       onClick={() => {
                         setDraftJointPoints([]);
                         setActiveTool('append_joint');
                       }}
-                      className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-200 rounded border border-slate-700"
+                      className="px-2 py-1.5 bg-slate-100 hover:bg-slate-200 text-emerald-800 rounded-md border border-slate-300 cursor-pointer"
                       title="Continue drawing from the end of this joint trace"
                     >
                       Continue / Append
-                    </button>
-                    <button
-                      onClick={() => handleScaleSelectedJointLength(1.18)}
-                      className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700"
-                    >
-                      Extend (+18%)
-                    </button>
-                    <button
-                      onClick={() => handleScaleSelectedJointLength(0.82)}
-                      className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700"
-                    >
-                      Shorten (-18%)
                     </button>
                     <button
                       onClick={() => {
                         setDraftJointPoints([]);
                         setActiveTool('redraw_joint');
                       }}
-                      className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-200 rounded border border-slate-700"
+                      className="px-2 py-1.5 bg-slate-100 hover:bg-slate-200 text-amber-800 rounded-md border border-slate-300 cursor-pointer"
                     >
                       Re-draw Trace
                     </button>
                     <button
                       onClick={handleSplitSelectedJoint}
-                      className="flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700"
+                      className="flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-md border border-slate-300 cursor-pointer"
                     >
                       <Scissors className="w-3 h-3" />
                       Split Trace
                     </button>
                     <button
-                      onClick={handleSnapSelectedJointToRockRidge}
-                      disabled={!activePhotoRidgeField}
-                      className="col-span-2 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-cyan-950/80 hover:bg-cyan-900/80 disabled:opacity-40 text-cyan-200 border border-cyan-500/50 rounded font-medium"
-                      title="Snap all vertices of this trace onto the exact rock fracture valley using Dijkstra Geodesic Ridge Snapping"
-                    >
-                      <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
-                      Snap Trace to Rock Crack (Geodesic AI)
-                    </button>
-                    <button
                       onClick={() => setJoinTargetMode((prev) => !prev)}
-                      className={`col-span-2 px-2 py-1.5 rounded border ${
+                      className={`px-2 py-1.5 rounded-md border cursor-pointer ${
                         joinTargetMode
-                          ? 'bg-cyan-600 text-white border-cyan-400'
-                          : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                          ? 'bg-cyan-600 text-white border-cyan-500'
+                          : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300'
                       }`}
                     >
-                      {joinTargetMode ? 'Click 2nd Trace to Join' : 'Join with Another Trace'}
+                      {joinTargetMode ? 'Click 2nd Trace' : 'Join Trace'}
+                    </button>
+                    <button
+                      onClick={handleSnapSelectedJointToRockRidge}
+                      disabled={!activePhotoRidgeField}
+                      className="col-span-2 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-cyan-50 hover:bg-cyan-100 disabled:opacity-40 text-cyan-800 border border-cyan-300 rounded-md font-semibold cursor-pointer"
+                      title="Snap all vertices of this trace onto the exact rock fracture valley"
+                    >
+                      <Wand2 className="w-3.5 h-3.5 text-cyan-600" />
+                      Snap Trace to Rock Crack
                     </button>
                   </div>
                 </div>
               </>
-            ) : (
-              /* AutoCAD 2-Column Property Grid when no specific joint is selected */
-              <div className="space-y-2.5 font-mono text-[11px]">
-                <div className="px-2 py-1 bg-[#161E2E] border border-[#28354E] rounded-xs text-slate-200 font-bold flex items-center justify-between">
-                  <span>Object Type:</span>
-                  <span className="text-cyan-300">
-                    {activeSurface === 'face'
-                      ? 'MODEL_SURFACE (1. FACE)'
-                      : activeSurface === 'crown'
-                      ? 'MODEL_SURFACE (2. CROWN)'
-                      : activeSurface === 'leftWall'
-                      ? 'MODEL_SURFACE (3. L-WALL)'
-                      : 'MODEL_SURFACE (4. R-WALL)'}
-                  </span>
+            ) : activeTool === 'add_joint' ||
+              activeTool === 'redraw_joint' ||
+              activeTool === 'append_joint' ? (
+              /* TOOL-SPECIFIC CONTROLS: DRAW / REDRAW / APPEND JOINT TRACE */
+              <div className="space-y-3 font-mono text-[11px]">
+                <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
+                  <div className="font-bold text-amber-900 flex items-center justify-between">
+                    <span>
+                      {activeTool === 'redraw_joint'
+                        ? `RE-DRAW TRACE (${selectedJoint?.set || ''})`
+                        : activeTool === 'append_joint'
+                        ? `APPEND TRACE (${selectedJoint?.set || ''})`
+                        : 'DRAW JOINT TRACE'}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-amber-200 text-amber-950 text-[10px]">
+                      {draftJointPoints.length} pts
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setJointDrawMode('two_point_line')}
+                      className={`py-1.5 px-2 rounded border text-[10px] font-bold cursor-pointer ${
+                        jointDrawMode === 'two_point_line'
+                          ? 'bg-amber-500 text-white border-amber-600'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      2-Point Line
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setJointDrawMode('polyline')}
+                      className={`py-1.5 px-2 rounded border text-[10px] font-bold cursor-pointer ${
+                        jointDrawMode === 'polyline'
+                          ? 'bg-amber-500 text-white border-amber-600'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      Multi-Pt Polyline
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setJointDrawMode('magnetic_livewire')}
+                      className={`col-span-2 py-1.5 px-2 rounded border text-[10px] font-bold cursor-pointer ${
+                        jointDrawMode === 'magnetic_livewire'
+                          ? 'bg-cyan-600 text-white border-cyan-700'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      Magnetic Crack Livewire Snap
+                    </button>
+                  </div>
                 </div>
 
-                {/* Section 1: Tunnel Geometry Properties */}
-                <div className="border border-[#243047] rounded-xs overflow-hidden">
-                  <div className="px-2 py-1 bg-[#182234] text-[10px] font-bold text-cyan-300 uppercase tracking-wider flex items-center justify-between">
-                    <span>▾ 1. Tunnel Geometry</span>
-                    {onOpenCustomProfileEditor && (
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-600 font-bold">Joint Set ID</span>
+                    <select
+                      value={draftSetId}
+                      onChange={(e) => setDraftSetId(e.target.value)}
+                      className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-xs text-slate-900 font-bold"
+                    >
+                      {['J1', 'J2', 'J3', 'J4', 'J5', 'F1', 'J0'].map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-600 font-bold">Feature Type</span>
+                    <select
+                      value={draftFeatureType}
+                      onChange={(e) => setDraftFeatureType(e.target.value as GeologicalFeatureType)}
+                      className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-xs text-slate-900"
+                    >
+                      <option value="joint">Joint</option>
+                      <option value="open_joint">Open Joint</option>
+                      <option value="fracture">Fracture</option>
+                      <option value="fault">Fault</option>
+                      <option value="shear">Shear Surface</option>
+                      <option value="bedding">Bedding</option>
+                      <option value="foliation">Foliation</option>
+                      <option value="vein">Vein</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="flex gap-1.5 pt-1">
+                  {draftJointPoints.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setDraftJointPoints((prev) => prev.slice(0, -1))}
+                      className="flex-1 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-md font-bold cursor-pointer"
+                    >
+                      Undo Pt
+                    </button>
+                  )}
+                  {draftJointPoints.length >= 2 && (
+                    <button
+                      type="button"
+                      onClick={() => finishDraftJoint()}
+                      className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md font-bold cursor-pointer"
+                    >
+                      Finish Trace
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDraftJointPoints([]);
+                      setActiveTool('select');
+                    }}
+                    className="py-1.5 px-3 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-md font-bold cursor-pointer"
+                  >
+                    Exit Tool
+                  </button>
+                </div>
+              </div>
+            ) : activeTool === 'geological_symbol' ? (
+              /* TOOL-SPECIFIC CONTROLS: ISRM STRUCTURAL SYMBOLS */
+              <div className="space-y-3 font-mono text-[11px]">
+                <div className="p-2.5 bg-purple-50 border border-purple-200 rounded-lg space-y-2">
+                  <div className="font-bold text-purple-900 flex items-center justify-between">
+                    <span>PLACE ISRM SYMBOL</span>
+                    <span className="text-[10px] text-purple-700">Click canvas to place</span>
+                  </div>
+                  <label className="block space-y-1">
+                    <span className="text-[10px] text-slate-600 font-bold">Symbol Type</span>
+                    <select
+                      value={activeSymbolTypeToPlace}
+                      onChange={(e) =>
+                        setActiveSymbolTypeToPlace(e.target.value as GeologicalSymbolType)
+                      }
+                      className="w-full px-2 py-1.5 bg-white border border-purple-300 rounded text-xs text-slate-900 font-semibold"
+                    >
+                      {STRUCTURAL_GEOLOGICAL_SYMBOLS.map((sym) => (
+                        <option key={sym.type} value={sym.type}>
+                          {sym.name} ({sym.category})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                {selectedSymbol && (
+                  <div className="p-2.5 bg-white border border-purple-300 rounded-lg space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-purple-900">
+                        Selected: {selectedSymbol.symbolType.replace(/_/g, ' ').toUpperCase()}
+                      </span>
                       <button
                         type="button"
-                        onClick={onOpenCustomProfileEditor}
-                        className="text-[9px] px-1.5 py-0.2 bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-600/60 rounded-xs cursor-pointer"
+                        onClick={() => handleDeletePlacedSymbol(selectedSymbol.id)}
+                        className="text-rose-600 hover:text-rose-700 font-bold cursor-pointer"
                       >
-                        Edit W×H →
+                        Delete
                       </button>
-                    )}
-                  </div>
-                  <div className="divide-y divide-slate-800/80 bg-[#0C1018] text-[10px]">
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Shape Profile</span>
-                      <span className="text-slate-100 font-semibold text-right">
-                        {geometry.customProfile?.name || geometry.crownGeometry.toUpperCase()}
-                      </span>
                     </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Span Width (W)</span>
-                      <span className="text-emerald-300 font-bold text-right">
-                        {geometry.width.toFixed(2)} m
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Total Height (H)</span>
-                      <span className="text-emerald-300 font-bold text-right">
-                        {geometry.height.toFixed(2)} m
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Wall / Crown R</span>
-                      <span className="text-slate-200 text-right">
-                        {geometry.wallHeight.toFixed(2)}m / R={geometry.crownRadius.toFixed(2)}m
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Drive Azimuth</span>
-                      <span className="text-cyan-300 font-bold text-right">
-                        N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Chainage</span>
-                      <span className="text-amber-300 font-semibold text-right">
-                        {settings.chainage || 'CH 0+000'}
-                      </span>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="space-y-0.5">
+                        <span className="text-[10px] text-slate-500">Rotation (°)</span>
+                        <input
+                          type="number"
+                          value={Math.round(selectedSymbol.rotationDeg)}
+                          onChange={(e) => {
+                            const rot = Number(e.target.value) || 0;
+                            handleUpdatePlacedSymbolsWithHistory((prev) =>
+                              prev.map((s) =>
+                                s.id === selectedSymbol.id ? { ...s, rotationDeg: rot } : s
+                              )
+                            );
+                          }}
+                          className="w-full px-2 py-1 bg-slate-50 border border-slate-300 rounded text-slate-900"
+                        />
+                      </label>
+                      <label className="space-y-0.5">
+                        <span className="text-[10px] text-slate-500">Dip Angle (°)</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="90"
+                          value={selectedSymbol.dipAngle ?? 45}
+                          onChange={(e) => {
+                            const dip = Math.max(0, Math.min(90, Number(e.target.value) || 0));
+                            handleUpdatePlacedSymbolsWithHistory((prev) =>
+                              prev.map((s) =>
+                                s.id === selectedSymbol.id ? { ...s, dipAngle: dip } : s
+                              )
+                            );
+                          }}
+                          className="w-full px-2 py-1 bg-slate-50 border border-slate-300 rounded text-slate-900"
+                        />
+                      </label>
                     </div>
                   </div>
-                </div>
+                )}
 
-                {/* Section 2: Active Surface & Photo Calibration */}
-                <div className="border border-[#243047] rounded-xs overflow-hidden">
-                  <div className="px-2 py-1 bg-[#182234] text-[10px] font-bold text-cyan-300 uppercase tracking-wider flex items-center justify-between">
-                    <span>▾ 2. Surface &amp; Photo</span>
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="text-[9px] px-1.5 py-0.2 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded-xs cursor-pointer"
-                    >
-                      {currentPhoto.image ? 'Replace' : 'Upload'}
-                    </button>
+                <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                  <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-700 uppercase">
+                    Placed Symbols ({surfacePlacedSymbols.length})
                   </div>
-                  <div className="divide-y divide-slate-800/80 bg-[#0C1018] text-[10px]">
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Primary Photo</span>
-                      <span className="text-slate-200 truncate text-right">
-                        {currentPhoto.fileName || (currentPhoto.image ? 'Loaded' : 'None')}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Supporting Photos</span>
-                      <span className="text-emerald-300 text-right">
-                        {currentPhoto.supportingPhotos?.length || 0} / 5 stereo views
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Surface Traces</span>
-                      <span className="text-cyan-300 font-bold text-right">
-                        {joints.filter((j) => j.surface === activeSurface).length} active (
-                        {joints.length} total)
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 px-2 py-1">
-                      <span className="text-slate-400">Lithology / CPs</span>
-                      <span className="text-amber-300 text-right">
-                        {lithologyRegions.filter((r) => r.surface === activeSurface).length} zones ·{' '}
-                        {surfaceControlPoints.length} CPs
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Section 3: Discontinuity Sets Summary */}
-                <div className="border border-[#243047] rounded-xs overflow-hidden">
-                  <div className="px-2 py-1 bg-[#182234] text-[10px] font-bold text-cyan-300 uppercase tracking-wider flex items-center justify-between">
-                    <span>▾ 3. Discontinuity Sets ({jointSets.length})</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setGeologyDrawerTab('geology_tables');
-                        setShowSetTableDrawer(true);
-                      }}
-                      className="text-[9px] px-1.5 py-0.2 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 rounded-xs cursor-pointer"
-                    >
-                      Tables →
-                    </button>
-                  </div>
-                  <div className="divide-y divide-slate-800/80 bg-[#0C1018] text-[10px] max-h-36 overflow-y-auto">
-                    {jointSets.length === 0 ? (
-                      <div className="px-2 py-2 text-slate-500">
-                        No joint traces mapped yet. Click &quot;AI Trace&quot; or &quot;Draw Joint&quot;.
+                  <div className="divide-y divide-slate-100 max-h-44 overflow-y-auto">
+                    {surfacePlacedSymbols.length === 0 ? (
+                      <div className="p-2.5 text-[10px] text-slate-500">
+                        No symbols placed on this surface yet.
                       </div>
                     ) : (
-                      jointSets.map((js) => (
+                      surfacePlacedSymbols.map((sym) => (
                         <div
-                          key={js.id}
-                          className="flex items-center justify-between px-2 py-1 hover:bg-slate-900/70"
+                          key={sym.id}
+                          onClick={() => setSelectedSymbolId(sym.id)}
+                          className={`px-2.5 py-1.5 flex items-center justify-between cursor-pointer ${
+                            sym.id === selectedSymbolId ? 'bg-purple-50 font-bold' : 'hover:bg-slate-50'
+                          }`}
                         >
-                          <span className="font-bold text-cyan-300">{js.id}</span>
-                          <span className="text-slate-200">
-                            {String(Math.round(js.avgDipDirection ?? 0)).padStart(3, '0')}° /{' '}
-                            {String(Math.round(js.avgDip ?? 0)).padStart(2, '0')}°
+                          <span className="text-slate-800">
+                            {sym.symbolType.replace(/_/g, ' ')} ({Math.round(sym.rotationDeg)}°)
                           </span>
-                          <span className="text-slate-400">
-                            n={js.jointCount ?? joints.filter((j) => j.set === js.id).length}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeletePlacedSymbol(sym.id);
+                            }}
+                            className="text-rose-600 hover:text-rose-800 text-[10px]"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : activeTool === 'control_point' ? (
+              /* TOOL-SPECIFIC CONTROLS: SURVEY CONTROL POINTS */
+              <div className="space-y-3 font-mono text-[11px]">
+                <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg space-y-1.5">
+                  <div className="font-bold text-emerald-900">SURVEY CONTROL POINTS</div>
+                  <p className="text-[10px] text-emerald-800 leading-relaxed">
+                    Click anywhere on the tunnel surface to place a survey control point (CP), or select an existing CP to edit its coordinates.
+                  </p>
+                </div>
+
+                {selectedControlPoint && (
+                  <div className="p-2.5 bg-white border border-emerald-300 rounded-lg space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-emerald-900">
+                        Editing {selectedControlPoint.label}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteControlPoint(selectedControlPoint.id)}
+                        className="text-rose-600 hover:text-rose-700 font-bold cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <label className="space-y-0.5">
+                        <span className="text-[9px] text-slate-500">Label</span>
+                        <input
+                          type="text"
+                          value={cpDraftLabel}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCpDraftLabel(val);
+                            handleUpdateControlPointsWithHistory((prev) =>
+                              prev.map((cp) =>
+                                cp.id === selectedControlPoint.id ? { ...cp, label: val } : cp
+                              )
+                            );
+                          }}
+                          className="w-full px-1.5 py-1 bg-slate-50 border border-slate-300 rounded text-slate-900 font-bold"
+                        />
+                      </label>
+                      <label className="space-y-0.5">
+                        <span className="text-[9px] text-slate-500">X (m)</span>
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={cpDraftX}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCpDraftX(val);
+                            const num = parseFloat(val);
+                            if (!Number.isNaN(num)) {
+                              handleUpdateControlPointsWithHistory((prev) =>
+                                prev.map((cp) =>
+                                  cp.id === selectedControlPoint.id
+                                    ? { ...cp, point: { ...cp.point, x: num } }
+                                    : cp
+                                )
+                              );
+                            }
+                          }}
+                          className="w-full px-1.5 py-1 bg-slate-50 border border-slate-300 rounded text-slate-900"
+                        />
+                      </label>
+                      <label className="space-y-0.5">
+                        <span className="text-[9px] text-slate-500">Y (m)</span>
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={cpDraftY}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCpDraftY(val);
+                            const num = parseFloat(val);
+                            if (!Number.isNaN(num)) {
+                              handleUpdateControlPointsWithHistory((prev) =>
+                                prev.map((cp) =>
+                                  cp.id === selectedControlPoint.id
+                                    ? { ...cp, point: { ...cp.point, y: num } }
+                                    : cp
+                                )
+                              );
+                            }
+                          }}
+                          className="w-full px-1.5 py-1 bg-slate-50 border border-slate-300 rounded text-slate-900"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                  <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-700 uppercase">
+                    Control Points ({surfaceControlPoints.length})
+                  </div>
+                  <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                    {surfaceControlPoints.length === 0 ? (
+                      <div className="p-2.5 text-[10px] text-slate-500">
+                        No control points placed on this surface yet.
+                      </div>
+                    ) : (
+                      surfaceControlPoints.map((cp) => (
+                        <div
+                          key={cp.id}
+                          onClick={() => setSelectedControlPointId(cp.id)}
+                          className={`px-2.5 py-1.5 flex items-center justify-between cursor-pointer ${
+                            cp.id === selectedControlPointId
+                              ? 'bg-emerald-50 font-bold'
+                              : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="text-emerald-800 font-bold">{cp.label}</span>
+                          <span className="text-slate-600">
+                            ({cp.point.x.toFixed(2)}m, {cp.point.y.toFixed(2)}m)
                           </span>
                         </div>
                       ))
                     )}
                   </div>
                 </div>
-
-                {/* Quick ESWACAD Command Buttons */}
-                <div className="grid grid-cols-2 gap-1.5 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDraftJointPoints([]);
-                      setJointDrawMode('magnetic_livewire');
-                      setActiveTool('add_joint');
-                    }}
-                    className="px-2 py-1.5 bg-amber-600/25 hover:bg-amber-600/40 text-amber-200 border border-amber-500/50 rounded-xs text-[10px] font-bold cursor-pointer"
-                  >
-                    + Draw Joint (PLINE)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDraftJointPoints([]);
-                      setJointDrawMode('smooth_curve');
-                      setActiveTool('add_joint');
-                    }}
-                    className="px-2 py-1.5 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 border border-cyan-500/50 rounded-xs text-[10px] font-bold cursor-pointer"
-                  >
-                    + Draw Spline (SPL)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowPhotogrammetryModal(true)}
-                    className="px-2 py-1.5 bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border border-indigo-500/50 rounded-xs text-[10px] font-bold cursor-pointer"
-                  >
-                    3D Wedges &amp; Stereo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onOpenExportSheet('FINAL_ENGINEERING_SHEET')}
-                    className="px-2 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/50 rounded-xs text-[10px] font-bold cursor-pointer"
-                  >
-                    Plot Sheet (DWG/PDF)
-                  </button>
+              </div>
+            ) : activeTool === 'dip_probe' ? (
+              /* TOOL-SPECIFIC CONTROLS: 3D DIP PROBE */
+              <div className="space-y-3 font-mono text-[11px]">
+                <div className="p-2.5 bg-indigo-50 border border-indigo-200 rounded-lg space-y-1.5">
+                  <div className="font-bold text-indigo-900">3D ORIENTATION DIP PROBE</div>
+                  <p className="text-[10px] text-indigo-800 leading-relaxed">
+                    Click any joint trace or rock facet on the canvas to measure its true 3D Dip Direction and Dip Angle.
+                  </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPhotogrammetryModal(true)}
+                  className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold cursor-pointer"
+                >
+                  Open 3D Stereonet &amp; Wedge Analysis
+                </button>
+              </div>
+            ) : activeTool === 'measure' ? (
+              /* TOOL-SPECIFIC CONTROLS: DISTANCE & ANGLE MEASURE */
+              <div className="space-y-3 font-mono text-[11px]">
+                <div className="p-2.5 bg-cyan-50 border border-cyan-200 rounded-lg space-y-2">
+                  <div className="font-bold text-cyan-900">MEASURE DISTANCE &amp; ANGLE</div>
+                  {measurementInfo ? (
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <div className="p-2 bg-white rounded border border-cyan-200">
+                        <div className="text-[9px] text-slate-500">DISTANCE</div>
+                        <div className="text-sm font-bold text-cyan-700">
+                          {measurementInfo.distMeters} m
+                        </div>
+                      </div>
+                      <div className="p-2 bg-white rounded border border-cyan-200">
+                        <div className="text-[9px] text-slate-500">ANGLE</div>
+                        <div className="text-sm font-bold text-cyan-700">
+                          {measurementInfo.angleDeg}°
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-[10px] text-cyan-800">
+                      Click 1st and 2nd point on the tunnel surface to measure real-world distance and dip angle.
+                    </p>
+                  )}
+                  {measurePts.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setMeasurePts([])}
+                      className="w-full py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-bold cursor-pointer"
+                    >
+                      Clear Measurement
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              /* Window-Specific Property Grid — Shows ONLY what is needed for the current active window */
+              <div className="space-y-2.5 font-mono text-[11px]">
+                <div className="px-2.5 py-1.5 bg-slate-100 border border-slate-200 rounded-lg text-slate-800 font-bold flex items-center justify-between">
+                  <span className="text-slate-500">Current Step:</span>
+                  <span className="text-cyan-700">
+                    {cadRibbonTab === 'TUNNEL_PHOTO'
+                      ? '1. PHOTO & PROFILE'
+                      : cadRibbonTab === 'HOME'
+                      ? '2. CORE MAPPING'
+                      : cadRibbonTab === 'GEOLOGY_3D'
+                      ? '3. GEOLOGY'
+                      : cadRibbonTab === 'SURVEY_OVERBREAK'
+                      ? '4. SURVEY'
+                      : '5. TABLES & OUTPUT'}
+                  </span>
+                </div>
+
+                {/* WINDOW 1: PHOTO & PROFILE — Only Surface Photo & Tunnel Profile Properties */}
+                {cadRibbonTab === 'TUNNEL_PHOTO' && (
+                  <>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-800 uppercase tracking-wider flex items-center justify-between">
+                        <span>Tunnel Profile &amp; Dimensions</span>
+                        {onOpenCustomProfileEditor && (
+                          <button
+                            type="button"
+                            onClick={onOpenCustomProfileEditor}
+                            className="text-[9px] px-2 py-0.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded cursor-pointer font-semibold"
+                          >
+                            Edit Shape →
+                          </button>
+                        )}
+                      </div>
+                      <div className="divide-y divide-slate-100 text-[10px]">
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Shape Profile</span>
+                          <span className="text-slate-900 font-semibold text-right">
+                            {geometry.customProfile?.name || geometry.crownGeometry.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Span Width (W)</span>
+                          <span className="text-emerald-700 font-bold text-right">
+                            {geometry.width.toFixed(2)} m
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Total Height (H)</span>
+                          <span className="text-emerald-700 font-bold text-right">
+                            {geometry.height.toFixed(2)} m
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">L/R Wall Height</span>
+                          <span className="text-slate-800 font-semibold text-right">
+                            {geometry.wallHeight.toFixed(2)} m
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Round Pull</span>
+                          <span className="text-amber-700 font-bold text-right">
+                            {settings.roundLength.toFixed(2)} m
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-800 uppercase tracking-wider flex items-center justify-between">
+                        <span>Surface Photo ({activeSurface.toUpperCase()})</span>
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="text-[9px] px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-white rounded cursor-pointer font-semibold"
+                        >
+                          {currentPhoto.image ? 'Replace' : 'Upload'}
+                        </button>
+                      </div>
+                      <div className="divide-y divide-slate-100 text-[10px]">
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Primary Photo</span>
+                          <span className="text-slate-800 font-medium truncate text-right">
+                            {currentPhoto.fileName || (currentPhoto.image ? 'Loaded' : 'None')}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Opacity</span>
+                          <span className="text-cyan-700 font-bold text-right">{currentPhoto.opacity}%</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInitialTransformSnapshot(currentPhoto.transform);
+                        setTransformPast([]);
+                        setTransformFuture([]);
+                        setActiveTool('photo_fit');
+                      }}
+                      className="w-full py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-[11px] font-bold cursor-pointer shadow-xs"
+                    >
+                      Open Photo Fit &amp; Mesh Warp
+                    </button>
+                  </>
+                )}
+
+                {/* WINDOW 2: CORE MAPPING — Only Joint Trace & Discontinuity Sets for Active Surface */}
+                {cadRibbonTab === 'HOME' && (
+                  <>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-800 uppercase tracking-wider flex items-center justify-between">
+                        <span>Discontinuity Sets ({jointSets.length})</span>
+                        <span className="text-[9px] text-slate-500">
+                          {joints.filter((j) => j.surface === activeSurface).length} traces here
+                        </span>
+                      </div>
+                      <div className="divide-y divide-slate-100 text-[10px] max-h-48 overflow-y-auto">
+                        {jointSets.length === 0 ? (
+                          <div className="px-2.5 py-3 text-slate-500">
+                            Click &quot;Draw Joint&quot; (2-click start→end) or &quot;AI Trace&quot; to map discontinuities.
+                          </div>
+                        ) : (
+                          jointSets.map((js) => (
+                            <div
+                              key={js.id}
+                              className="flex items-center justify-between px-2.5 py-1.5 hover:bg-slate-50"
+                            >
+                              <span className="font-bold text-cyan-700">{js.id}</span>
+                              <span className="text-slate-800 font-semibold">
+                                {String(Math.round(js.avgDipDirection ?? 0)).padStart(3, '0')}° /{' '}
+                                {String(Math.round(js.avgDip ?? 0)).padStart(2, '0')}°
+                              </span>
+                              <span className="text-slate-500">
+                                n={js.jointCount ?? joints.filter((j) => j.set === js.id).length}
+                              </span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDraftJointPoints([]);
+                          setJointDrawMode('two_point_line');
+                          setActiveTool('add_joint');
+                        }}
+                        className="px-2 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-bold cursor-pointer shadow-xs"
+                      >
+                        + 2-Pt Joint Line
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDraftJointPoints([]);
+                          setJointDrawMode('polyline');
+                          setActiveTool('add_joint');
+                        }}
+                        className="px-2 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-[10px] font-bold cursor-pointer shadow-xs"
+                      >
+                        + Multi-Pt Polyline
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* WINDOW 3: GEOLOGY — Only Lithology, Structural Symbols & Stereonet */}
+                {cadRibbonTab === 'GEOLOGY_3D' && (
+                  <>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-800 uppercase tracking-wider">
+                        Surface Geology Summary
+                      </div>
+                      <div className="divide-y divide-slate-100 text-[10px]">
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Lithology Zones</span>
+                          <span className="text-amber-700 font-bold text-right">
+                            {lithologyRegions.filter((r) => r.surface === activeSurface).length}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">ISRM Symbols</span>
+                          <span className="text-purple-700 font-bold text-right">
+                            {surfacePlacedSymbols.length}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Mapped Traces</span>
+                          <span className="text-cyan-700 font-bold text-right">
+                            {joints.filter((j) => j.surface === activeSurface).length}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTool('lithology')}
+                        className="px-2.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Edit Lithology Polygons
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTool('geological_symbol')}
+                        className="px-2.5 py-2 bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Place ISRM Symbols
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowPhotogrammetryModal(true)}
+                        className="px-2.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Open Stereonet &amp; Wedges
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* WINDOW 4: SURVEY — Only Control Points & Overbreak */}
+                {cadRibbonTab === 'SURVEY_OVERBREAK' && (
+                  <>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-800 uppercase tracking-wider">
+                        Survey &amp; Overbreak
+                      </div>
+                      <div className="divide-y divide-slate-100 text-[10px]">
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Control Points</span>
+                          <span className="text-emerald-700 font-bold text-right">
+                            {surfaceControlPoints.length} CPs
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Overbreak Area</span>
+                          <span className="text-rose-700 font-bold text-right">
+                            +{overbreakAnalysis.overbreakAreaSqMeters.toFixed(2)} m²
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTool('control_point')}
+                        className="px-2.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Manage Survey Control Points
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTool('overbreak');
+                          setLayerVisibility((prev) => ({ ...prev, overbreakUndercut: true }));
+                        }}
+                        className="px-2.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Overbreak / Undercut Analysis
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* WINDOW 5: TABLES & OUTPUT — Classification, Auto-Fitted 3D Unfolded Log Status & Final Sheet Output */}
+                {cadRibbonTab === 'CLASSIFICATION_SHEET' && (
+                  <>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                      <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-800 uppercase tracking-wider">
+                        Classification &amp; Output
+                      </div>
+                      <div className="divide-y divide-slate-100 text-[10px]">
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Method</span>
+                          <span className="text-indigo-700 font-bold text-right">
+                            {selectedClassificationMethod}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Joint Sets</span>
+                          <span className="text-cyan-700 font-bold text-right">
+                            {jointSets.length} sets ({joints.length} traces)
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Automatic 3D Unfolded Log Fit Confirmation Card */}
+                    <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 space-y-1 text-[10px]">
+                      <div className="font-bold text-emerald-800 flex items-center justify-between">
+                        <span>✓ Auto-Fitted to 3D Tunnel Log</span>
+                        <span className="px-1.5 py-0.2 bg-emerald-600 text-white rounded text-[8px]">
+                          SYNCED
+                        </span>
+                      </div>
+                      <p className="text-emerald-700 leading-relaxed">
+                        Unfolded log for <strong>{settings.locationName || settings.tunnelName}</strong> at{' '}
+                        <strong>{settings.faceChainage}</strong> (Pull {settings.roundLength.toFixed(1)}m · Drive N
+                        {String(Math.round(settings.driveDirection)).padStart(3, '0')}°E) automatically fits into the 3D Continuous Tunnel Logger.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGeologyDrawerTab('geology_tables');
+                          setShowSetTableDrawer(true);
+                          setShowAILearningDrawer(false);
+                        }}
+                        className="px-2.5 py-2 bg-cyan-50 hover:bg-cyan-100 text-cyan-800 border border-cyan-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Open Discontinuity Set Tables
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGeologyDrawerTab('q_index');
+                          setShowSetTableDrawer(true);
+                          setShowAILearningDrawer(false);
+                        }}
+                        className="px-2.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Open RMR / Q / GSI Calculator
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowUnfoldedRolloutModal(true)}
+                        className="px-2.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                      >
+                        Preview Unfolded Log Rollout
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenExportSheet('FINAL_ENGINEERING_SHEET')}
+                        className="px-2.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[10px] font-bold cursor-pointer shadow-xs"
+                      >
+                        Plot Engineering Sheet (PDF/DWG)
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+                )}
               </div>
             )}
           </aside>
         )}
       </div>
-
-      {/* ====================================================================
-          AUTOCAD BOTTOM MODEL / PAPER SPACE LAYOUT TABS + CAD STATUS BAR
-         ==================================================================== */}
-      <footer className="flex flex-wrap items-center justify-between gap-2 px-2 py-1 bg-[#0C1018] border-t border-[#252F45] text-[10px] font-mono shrink-0 z-30">
-        {/* Left: AutoCAD Model Space Surface Tabs & Paper Space Layout Tabs */}
-        <div className="flex flex-wrap items-center gap-0.5">
-          {(
-            [
-              { id: 'face', label: 'MODEL: 1. FACE' },
-              { id: 'crown', label: 'MODEL: 2. CROWN' },
-              { id: 'leftWall', label: 'MODEL: 3. L-WALL' },
-              { id: 'rightWall', label: 'MODEL: 4. R-WALL' },
-            ] as { id: SurfaceType; label: string }[]
-          ).map((surf) => {
-            const hasImg = Boolean(photos[surf.id].image);
-            const count = joints.filter((j) => j.surface === surf.id).length;
-            const isActive = activeSurface === surf.id;
-            return (
-              <button
-                key={surf.id}
-                type="button"
-                onClick={() => {
-                  onSelectSurface(surf.id);
-                  setSelectedJointId(null);
-                  setDraftJointPoints([]);
-                }}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-t-xs border transition-colors cursor-pointer ${
-                  isActive
-                    ? 'bg-[#1B2538] text-cyan-300 border-cyan-500/60 font-bold'
-                    : 'bg-[#121824] text-slate-400 hover:text-slate-200 border-[#222C40]'
-                }`}
-              >
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    hasImg ? 'bg-emerald-400' : 'bg-slate-600'
-                  }`}
-                />
-                <span>{surf.label}</span>
-                <span className="text-[9px] text-slate-400">({count})</span>
-              </button>
-            );
-          })}
-
-          <div className="h-3.5 w-px bg-slate-800 mx-1" />
-
-          {/* Paper Space Layout Tabs */}
-          <button
-            type="button"
-            onClick={() => onOpenExportSheet('FINAL_ENGINEERING_SHEET')}
-            className="px-2 py-0.5 bg-[#131B29] hover:bg-emerald-950/80 text-emerald-300 border border-emerald-700/50 rounded-t-xs font-semibold cursor-pointer"
-            title="Switch to Paper Space Layout 1: Final Geological Mapping & Engineering Sheet"
-          >
-            LAYOUT 1: ENGINEERING SHEET
-          </button>
-          <button
-            type="button"
-            onClick={() => onOpenExportSheet('ENGINEERING_QUANTITY_SHEET')}
-            className="px-2 py-0.5 bg-[#131B29] hover:bg-rose-950/80 text-rose-300 border border-rose-700/50 rounded-t-xs font-semibold cursor-pointer"
-            title="Switch to Paper Space Layout 2: Overbreak & Excavation Quantity Sheet"
-          >
-            LAYOUT 2: QUANTITY SHEET
-          </button>
-          {onOpenCustomProfileEditor && (
-            <button
-              type="button"
-              onClick={onOpenCustomProfileEditor}
-              className="px-2 py-0.5 bg-[#131B29] hover:bg-cyan-950/80 text-cyan-300 border border-cyan-700/50 rounded-t-xs font-semibold cursor-pointer"
-              title="Open Tunnel Cross-Section CAD Graph Builder (W×H)"
-            >
-              BLOCK: TUNNEL PROFILE
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setShowUnfoldedRolloutModal(true)}
-            className="px-2 py-0.5 bg-[#131B29] hover:bg-cyan-950/80 text-cyan-200 border border-cyan-700/50 rounded-t-xs font-semibold cursor-pointer"
-            title="Open Unfolded 3D Tunnel Round Log (Left Wall + Crown + Right Wall + Face)"
-          >
-            UNFOLDED LOG
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowSheetSetModal(true)}
-            className="px-2 py-0.5 bg-[#131B29] hover:bg-amber-950/80 text-amber-300 border border-amber-700/50 rounded-t-xs font-semibold cursor-pointer"
-            title="Open ESWACAD Sheet Set Manager (Multi-Chainage Batch DXF & CSV Export)"
-          >
-            SHEET SET ({savedProjects.length})
-          </button>
-        </div>
-
-        {/* Right: Live ESWACAD Coordinates + CAD Drafting Status Toggles */}
-        <div className="flex flex-wrap items-center gap-1">
-          {/* Live X, Y, Z Coordinates Readout */}
-          <span className="px-2 py-0.5 bg-[#070A0F] border border-slate-800 rounded-xs text-slate-300">
-            {cursorMeters ? (
-              <>
-                X: <strong className="text-emerald-300">{cursorMeters.x.toFixed(2)}m</strong>, Y:{' '}
-                <strong className="text-emerald-300">{cursorMeters.y.toFixed(2)}m</strong>, Z:{' '}
-                <strong className="text-cyan-300">0.00m</strong>
-              </>
-            ) : (
-              <>X: 0.00m, Y: 0.00m, Z: 0.00m</>
-            )}
-          </span>
-
-          {/* ESWACAD Status Toggles (GRID, OSNAP, DYN, MAG-SNAP, SUPPORT, X-RAY, SMART, PROPS, ZOOM) */}
-          <button
-            type="button"
-            onClick={() => setShowCadGrid((g) => !g)}
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              showCadGrid
-                ? 'bg-cyan-950 text-cyan-300 border-cyan-600/70'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-            title="Toggle ESWACAD Reference Grid (GRID / F7)"
-          >
-            GRID
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCadOsnapEnabled((prev) => !prev)}
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              cadOsnapEnabled
-                ? 'bg-emerald-950 text-emerald-300 border-emerald-600/70'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-            title="Toggle ESWACAD Object Snap — Endpoint & Midpoint (OSNAP / F3)"
-          >
-            OSNAP
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCadDynInputEnabled((prev) => !prev)}
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              cadDynInputEnabled
-                ? 'bg-cyan-950 text-cyan-300 border-cyan-600/70'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-            title="Toggle ESWACAD Dynamic Input Length & Angle Tooltip (DYN / F12)"
-          >
-            DYN
-          </button>
-
-          <button
-            type="button"
-            onClick={() =>
-              setSupportConfig((prev) => ({
-                ...prev,
-                enabledOnCanvas: !prev.enabledOnCanvas,
-              }))
-            }
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              supportConfig.enabledOnCanvas
-                ? 'bg-emerald-950 text-emerald-300 border-emerald-500/80'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-            title="Toggle Rock Bolts & SFRS Support Pattern Overlay on Face Canvas"
-          >
-            BOLTS
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              const nextMode =
-                jointDrawMode === 'magnetic_livewire' ? 'polyline' : 'magnetic_livewire';
-              setJointDrawMode(nextMode);
-            }}
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              jointDrawMode === 'magnetic_livewire'
-                ? 'bg-amber-950 text-amber-300 border-amber-600/70'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-            title="Toggle Magnetic Live-Wire Crack Snap (OSNAP)"
-          >
-            MAG-SNAP
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setShowCrackXRayOverlay((prev) => {
-                const next = !prev;
-                if (next) setShowDepthReliefOverlay(false);
-                return next;
-              });
-            }}
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              showCrackXRayOverlay
-                ? 'bg-emerald-950 text-emerald-300 border-emerald-600/70'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-            title="Toggle Crack X-Ray Vision Filter"
-          >
-            X-RAY
-          </button>
-
-          <button
-            type="button"
-            onClick={() =>
-              onChangeTraceFitMode(traceFitMode === 'smart_fit' ? 'linear' : 'smart_fit')
-            }
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              traceFitMode === 'smart_fit'
-                ? 'bg-cyan-950 text-cyan-300 border-cyan-600/70'
-                : 'bg-[#121824] text-amber-300 border-slate-800'
-            }`}
-            title="Toggle Smart Curvature Fit vs Linear Polyline"
-          >
-            {traceFitMode === 'smart_fit' ? 'SMART-FIT' : 'ORTHO-LIN'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowCadPropertiesAlways((p) => !p)}
-            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
-              showCadPropertiesAlways
-                ? 'bg-cyan-950 text-cyan-300 border-cyan-600/70'
-                : 'bg-[#121824] text-slate-500 border-slate-800'
-            }`}
-            title="Toggle AutoCAD Properties Palette (PROPS)"
-          >
-            PROPS
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setViewport({ zoom: 1, panX: 0, panY: 0 })}
-            className="px-1.5 py-0.5 bg-[#121824] hover:bg-slate-800 text-white border border-slate-700 rounded-xs font-bold cursor-pointer"
-            title="Click to Reset Zoom to 100% (1:1)"
-          >
-            {Math.round(viewport.zoom * 100)}%
-          </button>
-        </div>
-      </footer>
+      )}
 
       {/* ====================================================================
           COLLAPSIBLE BOTTOM DRAWER: CONTINUOUS DAILY AI LEARNING LOOP (Section 26)
@@ -8514,7 +7735,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
       {/* ====================================================================
           COLLAPSIBLE BOTTOM DRAWER: GEOLOGICAL TABLES & BARTON Q-INDEX CALCULATOR
          ==================================================================== */}
-      {showSetTableDrawer && (
+      {showSetTableDrawer && cadRibbonTab !== 'CLASSIFICATION_SHEET' && (
         <GeologyAndQIndexDrawer
           activeTab={geologyDrawerTab}
           onChangeTab={setGeologyDrawerTab}

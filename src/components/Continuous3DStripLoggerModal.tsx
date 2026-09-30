@@ -16,6 +16,7 @@ import {
   Plus,
   Printer,
   RotateCcw,
+  Sliders,
   Sparkles,
   Trash2,
   Wand2,
@@ -89,7 +90,7 @@ export interface ContinuousSelfLearningAiBrain {
   lastTrainedAt: string;
 }
 
-const AI_BRAIN_STORAGE_KEY = 'eswa_continuous_ai_brain_v2_fresh';
+const AI_BRAIN_STORAGE_KEY = 'eswa_continuous_ai_brain_v5_clean';
 
 const DEFAULT_CAD_LAYERS: CadLayerVisibilityState = {
   grid1m: true,
@@ -3757,16 +3758,95 @@ export const Continuous3DStripLoggerModal: React.FC<
             </div>
 
             {/* ================================================================
-                COLLAPSIBLE RIGHT INSPECTOR DRAWER (AI Traces, Pulls & Location)
+                RESPONSIVE COLLAPSIBLE PROPERTY PALETTE SIDEBAR (3D LOGGING)
+                - Collapses to a slim 40px edge rail to maximize workspace area
+                - Expands to display ONLY relevant property controls for the active tool
                ================================================================ */}
-            {showRightInspector && (
+            {!showRightInspector ? (
               <aside
-                className={`w-88 border-l flex flex-col shrink-0 overflow-hidden transition-colors ${
+                className={`w-10 border-l flex flex-col items-center py-3 gap-2.5 shrink-0 select-none transition-colors ${
+                  isLight
+                    ? 'bg-white border-slate-200 text-slate-700'
+                    : 'bg-[#0E1628] border-[#253655] text-slate-200'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => setShowRightInspector(true)}
+                  className="w-7 h-7 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white flex items-center justify-center shadow-xs cursor-pointer"
+                  title="Expand Property Palette Sidebar"
+                >
+                  «
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowRightInspector(true)}
+                  className={`w-7 h-7 rounded-lg border flex items-center justify-center cursor-pointer ${
+                    isLight
+                      ? 'bg-slate-100 border-slate-200 text-cyan-700 hover:bg-cyan-50'
+                      : 'bg-[#131E36] border-[#283B60] text-cyan-300 hover:bg-slate-800'
+                  }`}
+                  title={`Active Tool: ${activeTool.replace(/_/g, ' ')}`}
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowRightInspector(true)}
+                  className="mt-2 [writing-mode:vertical-rl] rotate-180 text-[10px] font-mono font-bold tracking-widest text-slate-400 hover:text-cyan-400 uppercase cursor-pointer"
+                >
+                  PROPERTIES · {activeTool.replace(/_/g, ' ')}
+                </button>
+              </aside>
+            ) : (
+              <aside
+                className={`w-[min(352px,86vw)] border-l flex flex-col shrink-0 overflow-hidden transition-colors ${
                   isLight
                     ? 'bg-white border-slate-200 text-slate-800'
                     : 'bg-[#0E1628] border-[#253655] text-slate-100'
                 }`}
               >
+                {/* Collapsible Sidebar Header with Active Tool Context & Collapse Button */}
+                <div
+                  className={`px-3 py-2 border-b flex items-center justify-between gap-2 text-[10px] font-mono shrink-0 ${
+                    isLight
+                      ? 'bg-slate-100 border-slate-200 text-slate-800'
+                      : 'bg-[#070C17] border-[#253655] text-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 font-bold truncate">
+                    <Sliders className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                    <span className="truncate uppercase">
+                      {activeTool === 'DRAW_TRACE'
+                        ? 'DRAW JOINT TRACE PROPERTIES'
+                        : activeTool === 'DRAW_SPLINE'
+                        ? 'DRAW SPLINE TRACE PROPERTIES'
+                        : activeTool === 'DRAW_LITHOLOGY'
+                        ? 'LITHOLOGY ZONE PROPERTIES'
+                        : activeTool === 'PLACE_WATER'
+                        ? 'GROUNDWATER SYMBOL PROPERTIES'
+                        : activeTool === 'MEASURE_DIST'
+                        ? 'MEASURE DISTANCE PROPERTIES'
+                        : selectedTrace
+                        ? `TRACE ${selectedTrace.setId} PROPERTIES`
+                        : selectedLith
+                        ? `LITHOLOGY ${selectedLith.rockType} PROPERTIES`
+                        : selectedWater
+                        ? `GROUNDWATER ${selectedWater.condition} PROPERTIES`
+                        : '3D LOGGING PROPERTY PALETTE'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowRightInspector(false)}
+                    className="px-2 py-0.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-semibold cursor-pointer flex items-center gap-1 shrink-0"
+                    title="Collapse Property Sidebar to maximize 3D strip workspace"
+                  >
+                    <span>Collapse</span>
+                    <span>»</span>
+                  </button>
+                </div>
+
                 {/* Drawer Tabs */}
                 <div
                   className={`grid grid-cols-4 border-b text-[10px] font-bold ${
@@ -4044,123 +4124,156 @@ export const Continuous3DStripLoggerModal: React.FC<
                         </div>
                       </div>
 
-                      {/* New Trace / Lithology / Water Defaults */}
-                      <div
-                        className={`border rounded-lg p-2.5 space-y-2 ${
-                          isLight
-                            ? 'bg-slate-50 border-slate-200'
-                            : 'bg-[#131E36] border-[#283B60]'
-                        }`}
-                      >
+                      {/* Tool-Specific Drawing Controls: Shows ONLY relevant property controls for the currently selected tool */}
+                      {(activeTool === 'DRAW_TRACE' ||
+                        activeTool === 'DRAW_SPLINE' ||
+                        activeTool === 'DRAW_LITHOLOGY' ||
+                        activeTool === 'PLACE_WATER') && (
                         <div
-                          className={`font-bold text-[11px] uppercase ${
-                            isLight ? 'text-cyan-700' : 'text-cyan-300'
+                          className={`border rounded-lg p-2.5 space-y-2 ${
+                            isLight
+                              ? 'bg-slate-50 border-slate-200'
+                              : 'bg-[#131E36] border-[#283B60]'
                           }`}
                         >
-                          New Drawing Defaults
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <label className="block">
-                            <span className="text-[10px] text-slate-400">Structure Type</span>
-                            <select
-                              value={newTraceStructure}
-                              onChange={(e) =>
-                                setNewTraceStructure(
-                                  e.target.value as StripStructureTypeId
-                                )
-                              }
-                              className={`w-full px-2 py-1 border rounded-md text-[11px] ${
-                                isLight
-                                  ? 'bg-white border-slate-300 text-slate-900'
-                                  : 'bg-[#090E1A] border-slate-700 text-white'
-                              }`}
-                            >
-                              <option value="JS1 - Foliation">JS1 - Foliation</option>
-                              <option value="JS2 - Main Joint">JS2 - Main Joint</option>
-                              <option value="JS3 - Main Joint">JS3 - Main Joint</option>
-                              <option value="Secondary Joint">Secondary Joint</option>
-                              <option value="Shear Joint (5-30mm)">
-                                Shear Joint (5-30mm)
-                              </option>
-                              <option value="Shear Zone">Shear Zone</option>
-                              <option value="Fault">Fault</option>
-                              <option value="Gouge/Clay Seam">Gouge/Clay Seam</option>
-                              <option value="Geological Boundary">
-                                Geological Boundary
-                              </option>
-                            </select>
-                          </label>
-                          <label className="block">
-                            <span className="text-[10px] text-slate-400">
-                              Set &amp; Dip (Dir/Dip)
+                          <div
+                            className={`font-bold text-[11px] uppercase flex items-center justify-between ${
+                              isLight ? 'text-cyan-700' : 'text-cyan-300'
+                            }`}
+                          >
+                            <span>
+                              {activeTool === 'DRAW_TRACE' || activeTool === 'DRAW_SPLINE'
+                                ? 'Trace Tool Properties'
+                                : activeTool === 'DRAW_LITHOLOGY'
+                                ? 'Lithology Polygon Properties'
+                                : 'Groundwater Symbol Properties'}
                             </span>
-                            <div className="flex gap-1">
-                              <input
-                                type="text"
-                                value={newTraceSetId}
-                                onChange={(e) => setNewTraceSetId(e.target.value)}
-                                className={`w-12 px-1.5 py-1 border rounded-md font-bold text-[11px] ${
-                                  isLight
-                                    ? 'bg-white border-slate-300 text-amber-700'
-                                    : 'bg-[#090E1A] border-slate-700 text-amber-300'
-                                }`}
-                                placeholder="JS1"
-                              />
-                              <input
-                                type="text"
-                                value={newTraceOrientation}
-                                onChange={(e) => setNewTraceOrientation(e.target.value)}
-                                className={`flex-1 px-1.5 py-1 border rounded-md text-[11px] ${
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDraftPoints([]);
+                                setActiveTool('SELECT');
+                              }}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 cursor-pointer"
+                            >
+                              Exit Tool
+                            </button>
+                          </div>
+
+                          {/* ONLY shown when DRAW_TRACE or DRAW_SPLINE is selected */}
+                          {(activeTool === 'DRAW_TRACE' || activeTool === 'DRAW_SPLINE') && (
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="block">
+                                <span className="text-[10px] text-slate-400">Structure Type</span>
+                                <select
+                                  value={newTraceStructure}
+                                  onChange={(e) =>
+                                    setNewTraceStructure(
+                                      e.target.value as StripStructureTypeId
+                                    )
+                                  }
+                                  className={`w-full px-2 py-1 border rounded-md text-[11px] ${
+                                    isLight
+                                      ? 'bg-white border-slate-300 text-slate-900'
+                                      : 'bg-[#090E1A] border-slate-700 text-white'
+                                  }`}
+                                >
+                                  <option value="JS1 - Foliation">JS1 - Foliation</option>
+                                  <option value="JS2 - Main Joint">JS2 - Main Joint</option>
+                                  <option value="JS3 - Main Joint">JS3 - Main Joint</option>
+                                  <option value="Secondary Joint">Secondary Joint</option>
+                                  <option value="Shear Joint (5-30mm)">
+                                    Shear Joint (5-30mm)
+                                  </option>
+                                  <option value="Shear Zone">Shear Zone</option>
+                                  <option value="Fault">Fault</option>
+                                  <option value="Gouge/Clay Seam">Gouge/Clay Seam</option>
+                                  <option value="Geological Boundary">
+                                    Geological Boundary
+                                  </option>
+                                </select>
+                              </label>
+                              <label className="block">
+                                <span className="text-[10px] text-slate-400">
+                                  Set &amp; Dip (Dir/Dip)
+                                </span>
+                                <div className="flex gap-1">
+                                  <input
+                                    type="text"
+                                    value={newTraceSetId}
+                                    onChange={(e) => setNewTraceSetId(e.target.value)}
+                                    className={`w-12 px-1.5 py-1 border rounded-md font-bold text-[11px] ${
+                                      isLight
+                                        ? 'bg-white border-slate-300 text-amber-700'
+                                        : 'bg-[#090E1A] border-slate-700 text-amber-300'
+                                    }`}
+                                    placeholder="JS1"
+                                  />
+                                  <input
+                                    type="text"
+                                    value={newTraceOrientation}
+                                    onChange={(e) => setNewTraceOrientation(e.target.value)}
+                                    className={`flex-1 px-1.5 py-1 border rounded-md text-[11px] ${
+                                      isLight
+                                        ? 'bg-white border-slate-300 text-slate-900'
+                                        : 'bg-[#090E1A] border-slate-700 text-white'
+                                    }`}
+                                    placeholder="055/50"
+                                  />
+                                </div>
+                              </label>
+                            </div>
+                          )}
+
+                          {/* ONLY shown when DRAW_LITHOLOGY is selected */}
+                          {activeTool === 'DRAW_LITHOLOGY' && (
+                            <label className="block">
+                              <span className="text-[10px] text-slate-400">Lithology Rock Type</span>
+                              <select
+                                value={newLithRockType}
+                                onChange={(e) =>
+                                  setNewLithRockType(e.target.value as StripRockTypeId)
+                                }
+                                className={`w-full px-2 py-1.5 border rounded-md text-[11px] ${
                                   isLight
                                     ? 'bg-white border-slate-300 text-slate-900'
                                     : 'bg-[#090E1A] border-slate-700 text-white'
                                 }`}
-                                placeholder="055/50"
-                              />
-                            </div>
-                          </label>
-                          <label className="block">
-                            <span className="text-[10px] text-slate-400">Lithology Type</span>
-                            <select
-                              value={newLithRockType}
-                              onChange={(e) =>
-                                setNewLithRockType(e.target.value as StripRockTypeId)
-                              }
-                              className={`w-full px-2 py-1 border rounded-md text-[11px] ${
-                                isLight
-                                  ? 'bg-white border-slate-300 text-slate-900'
-                                  : 'bg-[#090E1A] border-slate-700 text-white'
-                              }`}
-                            >
-                              <option value="Quartz veins">Quartz veins (+ + +)</option>
-                              <option value="Quartzite">Quartzite (Qtz)</option>
-                              <option value="Phyllite">Phyllite (Phy)</option>
-                              <option value="Metasandstone">Metasandstone (Mss)</option>
-                              <option value="Gneiss">Gneiss (Gns)</option>
-                              <option value="Amphibolite">Amphibolite (Amp)</option>
-                            </select>
-                          </label>
-                          <label className="block">
-                            <span className="text-[10px] text-slate-400">Water Inflow</span>
-                            <select
-                              value={newWaterCondition}
-                              onChange={(e) =>
-                                setNewWaterCondition(e.target.value as StripGroundwaterId)
-                              }
-                              className={`w-full px-2 py-1 border rounded-md text-[11px] ${
-                                isLight
-                                  ? 'bg-white border-slate-300 text-slate-900'
-                                  : 'bg-[#090E1A] border-slate-700 text-white'
-                              }`}
-                            >
-                              <option value="Damp">Damp</option>
-                              <option value="Wet">Wet</option>
-                              <option value="Dripping">Dripping</option>
-                              <option value="Flowing">Flowing</option>
-                            </select>
-                          </label>
+                              >
+                                <option value="Quartz veins">Quartz veins (+ + +)</option>
+                                <option value="Quartzite">Quartzite (Qtz)</option>
+                                <option value="Phyllite">Phyllite (Phy)</option>
+                                <option value="Metasandstone">Metasandstone (Mss)</option>
+                                <option value="Gneiss">Gneiss (Gns)</option>
+                                <option value="Amphibolite">Amphibolite (Amp)</option>
+                              </select>
+                            </label>
+                          )}
+
+                          {/* ONLY shown when PLACE_WATER is selected */}
+                          {activeTool === 'PLACE_WATER' && (
+                            <label className="block">
+                              <span className="text-[10px] text-slate-400">Water Inflow Condition</span>
+                              <select
+                                value={newWaterCondition}
+                                onChange={(e) =>
+                                  setNewWaterCondition(e.target.value as StripGroundwaterId)
+                                }
+                                className={`w-full px-2 py-1.5 border rounded-md text-[11px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              >
+                                <option value="Damp">Damp</option>
+                                <option value="Wet">Wet</option>
+                                <option value="Dripping">Dripping</option>
+                                <option value="Flowing">Flowing</option>
+                              </select>
+                            </label>
+                          )}
                         </div>
-                      </div>
+                      )}
 
                       {/* Selected Trace Inspector */}
                       {selectedTrace && (
