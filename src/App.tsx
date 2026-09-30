@@ -92,6 +92,8 @@ import {
 import { generateSampleTunnelPhotograph } from './engine/sampleFieldData';
 import { MappingWorkspace } from './components/MappingWorkspace';
 import { EngineeringSheetModal } from './components/EngineeringSheetModal';
+import { Continuous3DStripLoggerModal } from './components/Continuous3DStripLoggerModal';
+import { EswaAiExecutiveChatbot } from './components/EswaAiExecutiveChatbot';
 import { loadSavedSheetConfig, saveSheetConfigToStorage } from './engine/sheetLayoutEngine';
 import { EswaLoadingScreen, EswaTunnelLogo } from './components/EswaBrandIdentity';
 import { ThemeToggleButton, useTheme } from './context/ThemeContext';
@@ -119,10 +121,10 @@ type ScreenStep =
   | 'drive_and_photos'
   | 'mapping';
 
-const OFFLINE_DRAFT_STORAGE_KEY = 'akash_tunnel_mapper_field_draft_v1';
+const OFFLINE_DRAFT_STORAGE_KEY = 'akash_tunnel_mapper_field_draft_v2_fresh';
 
 export default function App() {
-  const { theme } = useTheme();
+  const { theme, toggleTheme } = useTheme();
   const isLight = theme === 'light';
   const responsive = useResponsiveLayout();
   const [screen, setScreen] = useState<ScreenStep>('start');
@@ -149,9 +151,9 @@ export default function App() {
   const [settings, setSettings] = useState<TunnelSettings>(() => {
     const initialSheetConfig = loadSavedSheetConfig();
     return {
-      projectName: initialSheetConfig.projectName || 'Hydroelectric / Underground Tunnel Project',
-      tunnelName: 'Tunnel Section 01',
-      locationName: initialSheetConfig.location || 'Main Underground Heading',
+      projectName: initialSheetConfig.projectName || '',
+      tunnelName: '',
+      locationName: initialSheetConfig.location || '',
       driveDirectionInput: 'N 000°',
       driveDirection: 0,
       chainage: 'RD 0.00m - 3.50m',
@@ -272,67 +274,14 @@ export default function App() {
     'projects' | 'sheet_settings' | 'volumes' | 'geometries'
   >('projects');
 
-  // Session Learning Memory & Continuous Daily Learning Loop (Section 10 & Section 26)
-  // Hydrated from %APPDATA%\AKASH TUNNEL MAPPER\user-data\ai-learning-memory.json or localStorage
+  // Session Learning Memory & Continuous Daily Learning Loop (Starts fresh with 0 pre-loaded records)
   const [sessionMemory, setSessionMemory] = useState<SessionLearningMemory>(() => {
-    const defaultHistory = [
-      {
-        version: 'AKASH AI Engine 2.4 (Steger + Phase Congruency)',
-        updatedAt: new Date().toISOString().slice(0, 10),
-        trainingDataCount: 164,
-        verifiedExamplesCount: 48,
-        correctionsLearnedCount: 22,
-        validationScorePct: 96.8,
-        majorChanges:
-          'Steger 2nd-order Taylor sub-pixel ridge lock (±0.12 px), Log-Gabor Phase Congruency & Barton JRC (Z2) calibration',
-      },
-      {
-        version: 'AKASH AI Engine 2.2 (Multi-Surface 3D SVD)',
-        updatedAt: '2026-09-20',
-        trainingDataCount: 148,
-        verifiedExamplesCount: 41,
-        correctionsLearnedCount: 17,
-        validationScorePct: 95.4,
-        majorChanges:
-          'Huber IRLS + 3x3 SVD cross-surface plane orientation solver & ZNCC stereo disparity relief',
-      },
-      {
-        version: 'AKASH AI Engine 2.0 (Frangi Hessian)',
-        updatedAt: '2026-09-12',
-        trainingDataCount: 112,
-        verifiedExamplesCount: 30,
-        correctionsLearnedCount: 11,
-        validationScorePct: 93.1,
-        majorChanges:
-          'Multi-scale Frangi/Hessian dark-valley structure tensor & Dijkstra geodesic live-wire tracker',
-      },
-    ];
-
     try {
-      const desktopLoaded =
-        typeof window !== 'undefined' && window.akashDesktop?.loadAILearningMemorySync
-          ? (window.akashDesktop.loadAILearningMemorySync() as unknown as SessionLearningMemory | null)
-          : null;
-      if (desktopLoaded && Array.isArray(desktopLoaded.rejectedAngleRanges)) {
-        return {
-          ...desktopLoaded,
-          modelHistory:
-            Array.isArray(desktopLoaded.modelHistory) && desktopLoaded.modelHistory.length > 0
-              ? desktopLoaded.modelHistory
-              : defaultHistory,
-        };
-      }
-      const raw = localStorage.getItem('AKASH_AI_LEARNING_MEMORY_V2');
+      const raw = localStorage.getItem('AKASH_AI_LEARNING_MEMORY_V3_FRESH');
       if (raw) {
         const parsed = JSON.parse(raw) as SessionLearningMemory;
         if (parsed && Array.isArray(parsed.rejectedAngleRanges)) {
-          return {
-            ...parsed,
-            modelHistory:
-              Array.isArray(parsed.modelHistory) && parsed.modelHistory.length > 0
-                ? parsed.modelHistory
-                : defaultHistory,
-          };
+          return parsed;
         }
       }
     } catch {
@@ -342,12 +291,12 @@ export default function App() {
     return {
       rejectedAngleRanges: [],
       confirmedOrientations: [],
-      trainingSamplesTotal: 164,
-      verifiedExamplesCount: 48,
-      correctionsLearnedCount: 22,
+      trainingSamplesTotal: 0,
+      verifiedExamplesCount: 0,
+      correctionsLearnedCount: 0,
       lastUpdatedDate: new Date().toISOString().slice(0, 10),
-      currentModelVersion: 'AKASH AI Engine 2.4',
-      modelHistory: defaultHistory,
+      currentModelVersion: 'ESWA AI Engine 1.0',
+      modelHistory: [],
       verifiedRecords: [],
     };
   });
@@ -355,7 +304,7 @@ export default function App() {
   // Automatically persist AI Learning Memory to localStorage & %APPDATA% on every update
   useEffect(() => {
     try {
-      localStorage.setItem('AKASH_AI_LEARNING_MEMORY_V2', JSON.stringify(sessionMemory));
+      localStorage.setItem('AKASH_AI_LEARNING_MEMORY_V3_FRESH', JSON.stringify(sessionMemory));
       if (typeof window !== 'undefined' && window.akashDesktop?.saveAILearningMemoryToDisk) {
         window.akashDesktop.saveAILearningMemoryToDisk(sessionMemory).catch(() => {});
       }
@@ -370,6 +319,7 @@ export default function App() {
     'Ready. Upload or load surface photograph and press AI Trace.'
   );
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [isContinuous3DLoggerOpen, setIsContinuous3DLoggerOpen] = useState<boolean>(false);
   const [exportModalInitialMode, setExportModalInitialMode] =
     useState<OutputSheetMode>('FINAL_ENGINEERING_SHEET');
 
@@ -584,7 +534,18 @@ export default function App() {
   );
 
   const handleOpenProjectMemoryModal = useCallback(
-    (tab: 'projects' | 'sheet_settings' | 'volumes' | 'geometries' = 'projects') => {
+    (
+      tab:
+        | 'projects'
+        | 'sheet_settings'
+        | 'volumes'
+        | 'geometries'
+        | 'continuous_3d_log' = 'projects'
+    ) => {
+      if (tab === 'continuous_3d_log') {
+        setIsContinuous3DLoggerOpen(true);
+        return;
+      }
       setProjectMemoryTab(tab);
       setIsProjectMemoryModalOpen(true);
     },
@@ -1253,30 +1214,10 @@ export default function App() {
     let targetCalibration = photos[activeSurface].calibration;
 
     if (!targetImage) {
-      const generated = generateSampleTunnelPhotograph(activeSurface, geometry);
-      const fitRes = await analyzeAndAutoFitPhoto(generated, activeSurface, geometry);
-      const warpedUrl = await generatePiecewiseWarpedPhotoDataUrl(
-        fitRes.undistortedDataUrl,
-        fitRes.transform
+      setStatusMessage(
+        `Please upload a ${activeSurface} photograph first before running AI Trace.`
       );
-      targetImage = warpedUrl || fitRes.undistortedDataUrl;
-      targetTransform = fitRes.transform;
-      targetCalibration = fitRes.calibration;
-      setPhotos((prev) => ({
-        ...prev,
-        [activeSurface]: {
-          ...prev[activeSurface],
-          originalImage: generated,
-          image: fitRes.undistortedDataUrl,
-          warpedImage: warpedUrl,
-          fileName: `field_${activeSurface}.jpg`,
-          transform: fitRes.transform,
-          calibration: fitRes.calibration,
-          opacity: 100,
-          autoFitted: true,
-          qualityReport: fitRes.qualityReport,
-        },
-      }));
+      return;
     } else if (!photos[activeSurface].warpedImage && photos[activeSurface].image) {
       const warpedUrl = await generatePiecewiseWarpedPhotoDataUrl(
         photos[activeSurface].image!,
@@ -1491,149 +1432,319 @@ export default function App() {
   }, []);
 
   const projectMemoryModalNode = (
-    <ProjectMemoryModal
-      isOpen={isProjectMemoryModalOpen}
-      onClose={() => setIsProjectMemoryModalOpen(false)}
-      initialTab={projectMemoryTab}
-      geometry={geometry}
-      settings={settings}
-      onUpdateSettings={setSettings}
-      savedProjects={savedProjects}
-      onSaveCurrentProject={handleSaveCurrentProjectToMemory}
-      onLoadProjectRecord={handleLoadProjectRecord}
-      onDeleteProjectRecord={(id) => {
-        const next = deleteProjectRecordFromMemory(id);
-        setSavedProjects(next);
-      }}
-      onImportProjectRecordFile={handleImportProjectRecordFile}
-      onExportCurrentProjectFile={handleExportCurrentProjectFile}
-      savedGeometries={savedGeometries}
-      onSaveCurrentGeometryToLibrary={(customName) => {
-        const next = saveDesignGeometryToLibrary({
-          name: customName,
-          tunnelName: settings.tunnelName,
-          location: settings.locationName || 'Underground Tunnel Works',
-          chainage: settings.faceChainage || settings.chainage,
-          geometry,
-        });
-        setSavedGeometries(next);
-        setStatusMessage(`Saved tunnel design profile "${customName}" to Geometry Library.`);
-      }}
-      onLoadDesignGeometry={(rec) => {
-        setGeometry(rec.geometry);
-        setManWidth(String(rec.geometry.width));
-        setManHeight(String(rec.geometry.height));
-        setManWallHeight(String(rec.geometry.wallHeight));
-        setManCrownRadius(String(rec.geometry.crownRadius));
-        setIsProjectMemoryModalOpen(false);
-        setStatusMessage(
-          `Loaded saved design geometry "${rec.name}" (${rec.geometry.width}m × ${rec.geometry.height}m).`
-        );
-      }}
-      onDeleteDesignGeometry={(id) => {
-        const next = deleteSavedDesignGeometry(id);
-        setSavedGeometries(next);
-      }}
-      onCreateCompanionSectionForVolumeTest={handleCreateCompanionSectionForVolumeTest}
-    />
+    <>
+      <ProjectMemoryModal
+        isOpen={isProjectMemoryModalOpen}
+        onClose={() => setIsProjectMemoryModalOpen(false)}
+        initialTab={projectMemoryTab}
+        geometry={geometry}
+        settings={settings}
+        onUpdateSettings={setSettings}
+        savedProjects={savedProjects}
+        onSaveCurrentProject={handleSaveCurrentProjectToMemory}
+        onLoadProjectRecord={handleLoadProjectRecord}
+        onDeleteProjectRecord={(id) => {
+          const next = deleteProjectRecordFromMemory(id);
+          setSavedProjects(next);
+        }}
+        onImportProjectRecordFile={handleImportProjectRecordFile}
+        onExportCurrentProjectFile={handleExportCurrentProjectFile}
+        savedGeometries={savedGeometries}
+        onSaveCurrentGeometryToLibrary={(customName) => {
+          const next = saveDesignGeometryToLibrary({
+            name: customName,
+            tunnelName: settings.tunnelName,
+            location: settings.locationName || 'Underground Tunnel Works',
+            chainage: settings.faceChainage || settings.chainage,
+            geometry,
+          });
+          setSavedGeometries(next);
+          setStatusMessage(`Saved tunnel design profile "${customName}" to Geometry Library.`);
+        }}
+        onLoadDesignGeometry={(rec) => {
+          setGeometry(rec.geometry);
+          setManWidth(String(rec.geometry.width));
+          setManHeight(String(rec.geometry.height));
+          setManWallHeight(String(rec.geometry.wallHeight));
+          setManCrownRadius(String(rec.geometry.crownRadius));
+          setIsProjectMemoryModalOpen(false);
+          setStatusMessage(
+            `Loaded saved design geometry "${rec.name}" (${rec.geometry.width}m × ${rec.geometry.height}m).`
+          );
+        }}
+        onDeleteDesignGeometry={(id) => {
+          const next = deleteSavedDesignGeometry(id);
+          setSavedGeometries(next);
+        }}
+        onCreateCompanionSectionForVolumeTest={handleCreateCompanionSectionForVolumeTest}
+      />
+      <Continuous3DStripLoggerModal
+        isOpen={isContinuous3DLoggerOpen}
+        onClose={() => setIsContinuous3DLoggerOpen(false)}
+        geometry={geometry}
+        settings={settings}
+        joints={clusteredJoints}
+        lithologyRegions={lithologyRegions}
+        placedSymbols={placedSymbols}
+        savedProjects={savedProjects}
+        onLoadProjectRecord={handleLoadProjectRecord}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+      <EswaAiExecutiveChatbot
+        geometry={geometry}
+        settings={settings}
+        joints={clusteredJoints}
+        jointSets={jointSets}
+        qIndexParams={qIndexParams}
+        rmrParams={rmrParams}
+        rockMassSummary={rockMassSummary}
+        lithologyRegions={lithologyRegions}
+        placedSymbols={placedSymbols}
+        overbreakAnalysis={overbreakAnalysis}
+        savedProjects={savedProjects}
+        onNavigateScreen={(target) => setScreen(target)}
+        onOpenContinuous3DLogger={() => setIsContinuous3DLoggerOpen(true)}
+        onOpenProjectDatabase={() => handleOpenProjectMemoryModal('projects')}
+        onOpenExportSheet={() => {
+          setExportModalInitialMode('FINAL_ENGINEERING_SHEET');
+          setIsExportModalOpen(true);
+        }}
+        onUpdateGeometryDimensions={(w, h, wh) => {
+          const constrained = enforceStrictTunnelGeometryConstraints(
+            w,
+            h,
+            wh,
+            geometry.crownGeometry
+          );
+          const nextGeom = createTunnelGeometry(
+            w,
+            h,
+            constrained.wallHeight,
+            geometry.crownGeometry,
+            constrained.crownRadius,
+            'manual'
+          );
+          setGeometry(nextGeom);
+          setManWidth(String(w));
+          setManHeight(String(h));
+          setManWallHeight(String(constrained.wallHeight));
+          setManCrownRadius(String(constrained.crownRadius));
+        }}
+        onUpdateSettings={setSettings}
+        onAddExecutiveJoint={(partial) => {
+          const newJ: Joint = {
+            id: `J-AI-${Date.now().toString().slice(-4)}`,
+            surface: activeSurface,
+            geometry: [
+              { x: -1.4, y: 2.1 },
+              { x: -0.3, y: 2.9 },
+              { x: 0.9, y: 3.6 },
+              { x: 1.8, y: 4.1 },
+            ],
+            traceAngle: 48,
+            strike: ((partial.dipDirection || 65) - 90 + 360) % 360,
+            dip: partial.dip || 52,
+            dipDirection: partial.dipDirection || 65,
+            orientationStatus: 'DIRECTLY_MEASURED',
+            set: partial.set || 'J1',
+            featureType: 'joint',
+            confidence: 'High',
+            confidenceScore: 0.95,
+            confidenceBreakdown: {
+              detection: 95,
+              trace: 94,
+              geometric: 96,
+              orientation: 95,
+            },
+            source: 'AI_HYBRID',
+            accepted: true,
+            persistenceMeters: 3.65,
+            roughness: partial.roughness || 'Rough / Stepped',
+            infilling: partial.infilling || 'Quartz / Tight',
+            apertureMm: '1-3 mm',
+            waterCondition: 'Dry',
+          };
+          updateJointsWithHistory([...clusteredJoints, newJ]);
+        }}
+        onSaveCurrentSection={handleSaveCurrentProjectToMemory}
+      />
+    </>
   );
+
+  // Theme-aware spacing, radius, and elevation utility to eliminate boxy hardcoded containers
+  const layoutStyles = {
+    viewportShell: `h-dvh w-full flex flex-col items-center justify-center relative overflow-hidden transition-colors duration-200 ${
+      responsive.isCompactHeight ? 'p-3 sm:p-5' : 'p-4 sm:p-6 lg:p-8'
+    } ${isLight ? 'bg-slate-100/90 text-slate-900' : 'bg-[#080C14] text-slate-100'}`,
+
+    workspaceShell: `h-dvh w-full flex flex-col overflow-hidden transition-colors duration-200 ${
+      isLight ? 'bg-slate-200/70 text-slate-900 sm:p-2 lg:p-3' : 'bg-[#060911] text-slate-100 sm:p-2 lg:p-3'
+    }`,
+
+    workspacePanel: `flex-1 min-h-0 w-full flex flex-col overflow-hidden sm:rounded-2xl border transition-all duration-200 ${
+      isLight
+        ? 'bg-white border-slate-200/90 shadow-[0_16px_40px_-12px_rgba(15,23,42,0.10),0_4px_16px_-4px_rgba(15,23,42,0.05)]'
+        : 'bg-[#0B0E14] border-slate-800/80 shadow-[0_24px_56px_-12px_rgba(0,0,0,0.75),0_4px_20px_-4px_rgba(2,6,23,0.60)]'
+    }`,
+
+    majorPanel: `relative z-10 w-full max-h-full flex flex-col rounded-2xl border overflow-hidden transition-all duration-200 ${
+      responsive.isCompactHeight ? 'p-5 sm:p-6 gap-4' : 'p-6 sm:p-8 gap-6'
+    } ${
+      isLight
+        ? 'bg-white/95 border-slate-200/80 shadow-[0_20px_50px_-12px_rgba(15,23,42,0.10),0_4px_18px_-4px_rgba(15,23,42,0.05)]'
+        : 'bg-[#0F1624]/95 border-slate-800/80 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.72),0_6px_24px_-4px_rgba(2,6,23,0.55)]'
+    }`,
+
+    sectionSurface: `rounded-xl p-4 sm:p-5 transition-colors duration-200 ${
+      isLight
+        ? 'bg-slate-50/90 shadow-[0_2px_10px_-2px_rgba(15,23,42,0.04)]'
+        : 'bg-[#141D2E]/65 shadow-[0_4px_16px_-4px_rgba(0,0,0,0.35)]'
+    }`,
+
+    previewStage: `flex flex-col items-center justify-center rounded-xl p-4 sm:p-5 h-full min-h-[190px] transition-colors duration-200 ${
+      isLight
+        ? 'bg-slate-50 shadow-[inset_0_1px_4px_rgba(15,23,42,0.05)]'
+        : 'bg-[#090D16] shadow-[inset_0_1px_6px_rgba(0,0,0,0.45)]'
+    }`,
+
+    headerRow: `flex items-center justify-between pb-4 border-b shrink-0 ${
+      isLight ? 'border-slate-200/70' : 'border-slate-800/70'
+    }`,
+
+    footerRow: `flex items-center justify-between pt-4 border-t shrink-0 ${
+      isLight ? 'border-slate-200/70' : 'border-slate-800/70'
+    }`,
+
+    hairlineDivider: isLight ? 'border-slate-200/70' : 'border-slate-800/70',
+
+    labelMuted: `text-xs font-medium ${isLight ? 'text-slate-600' : 'text-slate-400'}`,
+
+    inputControl: `w-full px-3.5 py-2 rounded-xl border text-xs font-mono transition-all focus:outline-none focus:ring-2 ${
+      isLight
+        ? 'bg-white border-slate-200/90 text-slate-900 focus:border-sky-500 focus:ring-sky-500/20 shadow-2xs'
+        : 'bg-[#0B101B] border-slate-700/80 text-slate-100 focus:border-cyan-400 focus:ring-cyan-400/20'
+    }`,
+
+    primaryButton: `inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-xl transition-all duration-150 cursor-pointer ${
+      isLight
+        ? 'bg-sky-600 hover:bg-sky-500 text-white shadow-[0_6px_16px_-4px_rgba(2,132,199,0.35)]'
+        : 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-[0_6px_18px_-4px_rgba(8,145,178,0.40)]'
+    }`,
+
+    secondaryButton: `inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl border transition-all duration-150 cursor-pointer ${
+      isLight
+        ? 'bg-white hover:bg-slate-50 text-slate-800 border-slate-200/90 shadow-2xs'
+        : 'bg-[#131C2E] hover:bg-[#19253D] text-slate-200 border-slate-700/80 shadow-2xs'
+    }`,
+
+    backButton: `inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+      isLight
+        ? 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+        : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+    }`,
+  };
 
   // ============================================================================
   // SCREEN 1: ULTRA-SIMPLE START SCREEN (Section 2 exact contract)
-  // Only show:
-  // AKASH TUNNEL JOINT TRACER
-  // [ Create Tunnel Shape ]
-  // [ Upload DWG/DXF ]
-  // [ Start Mapping ]
   // ============================================================================
   if (screen === 'start') {
     return (
-      <main
-        className={`h-dvh w-full flex flex-col items-center justify-center px-4 py-3 relative overflow-hidden transition-colors ${
-          isLight ? 'bg-slate-100 text-slate-900' : 'bg-[#0B0E14] text-slate-100'
-        }`}
-      >
-        <div className="absolute top-3 right-3 sm:top-4 sm:right-4 flex items-center gap-2 z-20">
+      <main className={layoutStyles.viewportShell}>
+        {/* Architectural CAD Engineering Grid & Radial Backdrop */}
+        <svg
+          className="absolute inset-0 w-full h-full pointer-events-none opacity-45"
+          aria-hidden="true"
+        >
+          <defs>
+            <pattern
+              id="eswaStartGrid"
+              width="56"
+              height="56"
+              patternUnits="userSpaceOnUse"
+            >
+              <path
+                d="M 56 0 L 0 0 0 56"
+                fill="none"
+                stroke={isLight ? '#CBD5E1' : '#1E293B'}
+                strokeWidth="0.75"
+              />
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#eswaStartGrid)" />
+        </svg>
+
+        <div className="absolute top-4 right-4 sm:top-6 sm:right-6 flex items-center gap-2 z-20">
           <ThemeToggleButton />
         </div>
 
-        <div
-          className={`relative z-10 w-full max-w-md max-h-[calc(100dvh-24px)] flex flex-col items-center text-center rounded-2xl border transition-colors ${
-            responsive.isCompactHeight ? 'space-y-3.5 p-5' : 'space-y-5 p-6 sm:p-8'
-          } ${
-            isLight
-              ? 'bg-white border-slate-300 shadow-xl shadow-slate-300/60'
-              : 'bg-[#111621] border-slate-800 shadow-[0_0_50px_rgba(8,145,178,0.12)]'
-          }`}
-        >
+        <div className={`${layoutStyles.majorPanel} max-w-lg items-center text-center`}>
           <EswaTunnelLogo size={responsive.isCompactHeight ? 'lg' : 'xl'} animated showBadge />
 
-          <h1
-            className={`font-display text-xl sm:text-2xl md:text-3xl font-bold tracking-wider ${
-              isLight ? 'text-slate-900' : 'text-slate-100'
-            }`}
-          >
-            ESWA TUNNEL MAPPER
-          </h1>
-
-          <div className="w-full flex flex-col gap-2.5">
-            <button
-              onClick={() => {
-                setCustomEditorInitialTab('freeform_canvas');
-                setReturnScreenFromCustomEditor('start');
-                setScreen('geometry_custom');
-              }}
-              className={`w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-mono font-semibold border rounded-lg transition-colors cursor-pointer ${
-                isLight
-                  ? 'bg-sky-50 hover:bg-sky-100 text-sky-950 border-sky-400'
-                  : 'bg-[#131924] hover:bg-[#1A2232] text-cyan-200 border-cyan-600/70'
+          <div className="space-y-1.5">
+            <h1
+              className={`font-display text-2xl sm:text-3xl font-bold tracking-wider ${
+                isLight ? 'text-slate-900' : 'text-slate-100'
               }`}
             >
-              [ Create Tunnel Shape ]
-            </button>
+              ESWA Tunnel Mapper
+            </h1>
+          </div>
 
-            <button
-              onClick={() => setScreen('geometry_cad')}
-              className={`w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-mono font-semibold border rounded-lg transition-colors cursor-pointer ${
-                isLight
-                  ? 'bg-slate-100 hover:bg-slate-200 text-slate-900 border-slate-300 hover:border-cyan-600'
-                  : 'bg-[#131924] hover:bg-[#1A2232] text-slate-100 border-slate-700 hover:border-cyan-500/60'
-              }`}
-            >
-              [ Upload DWG/DXF ]
-            </button>
-
+          <div className="w-full flex flex-col gap-3">
             <button
               onClick={() => setScreen('drive_and_photos')}
-              className="w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-mono font-semibold text-white bg-cyan-600 hover:bg-cyan-500 border border-cyan-400/50 rounded-lg shadow-md transition-all cursor-pointer"
+              className={`w-full py-3 px-5 text-xs sm:text-sm ${layoutStyles.primaryButton}`}
             >
-              [ Start Mapping ]
+              Start Face &amp; Wall Surface Mapping
             </button>
 
-            <div className="pt-0.5">
+            <button
+              onClick={() => setIsContinuous3DLoggerOpen(true)}
+              className="w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-semibold rounded-xl border border-slate-300 !bg-white hover:!bg-slate-50 !text-slate-900 shadow-xs inline-flex items-center justify-center gap-2 transition-all cursor-pointer"
+            >
+              <Compass className="w-4 h-4 shrink-0 text-sky-600" />
+              <span>3D Continuous Logging</span>
+            </button>
+
+            <div className="grid grid-cols-2 gap-3">
               <button
-                onClick={() => handleOpenProjectMemoryModal('projects')}
-                className={`w-full py-2 px-3 text-xs font-mono border rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer ${
-                  isLight
-                    ? 'bg-slate-100 hover:bg-slate-200 text-sky-800 border-slate-300'
-                    : 'bg-slate-900/90 hover:bg-slate-800 text-cyan-300 hover:text-white border-slate-700'
-                }`}
+                onClick={() => {
+                  setCustomEditorInitialTab('freeform_canvas');
+                  setReturnScreenFromCustomEditor('start');
+                  setScreen('geometry_custom');
+                }}
+                className={layoutStyles.secondaryButton}
               >
-                <Database className={`w-3.5 h-3.5 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
-                Project Memory &amp; Saved Geometries ({savedProjects.length})
+                Create Tunnel Shape
+              </button>
+
+              <button
+                onClick={() => setScreen('geometry_cad')}
+                className={layoutStyles.secondaryButton}
+              >
+                Upload DWG / DXF
               </button>
             </div>
+
+            <button
+              onClick={() => handleOpenProjectMemoryModal('projects')}
+              className={`w-full ${layoutStyles.secondaryButton}`}
+            >
+              <Database className={`w-3.5 h-3.5 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
+              <span>Project Database &amp; Saved Geometries ({savedProjects.length})</span>
+            </button>
 
             {hasSavedDraft && (
               <button
                 onClick={handleResumeOfflineDraft}
-                className={`w-full py-2 px-4 text-xs font-mono border rounded-lg transition-colors cursor-pointer ${
+                className={`w-full py-2.5 px-4 text-xs font-medium border rounded-xl transition-colors cursor-pointer ${
                   isLight
-                    ? 'bg-sky-50 hover:bg-sky-100 text-sky-900 border-sky-300'
-                    : 'bg-slate-900/80 hover:bg-slate-900 text-cyan-300 hover:text-cyan-200 border-cyan-800/50'
+                    ? 'bg-sky-50 hover:bg-sky-100 text-sky-900 border-sky-200'
+                    : 'bg-slate-900/80 hover:bg-slate-900 text-cyan-300 border-cyan-800/50'
                 }`}
               >
-                [ Resume Saved Field Draft (Process Later) ]
+                Resume Saved Field Draft
               </button>
             )}
           </div>
@@ -1669,29 +1780,31 @@ export default function App() {
         .join(' ') + ' Z';
 
     return (
-      <main className="h-dvh w-full flex flex-col items-center justify-center bg-[#0B0E14] text-slate-100 p-2 sm:p-4 overflow-hidden">
-        <div className="w-full max-w-[min(96vw,880px)] max-h-[calc(100dvh-16px)] bg-[#111621] border border-slate-800 rounded p-4 sm:p-5 flex flex-col gap-4 overflow-hidden">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 shrink-0">
+      <main className={layoutStyles.viewportShell}>
+        <div className={`${layoutStyles.majorPanel} max-w-[920px]`}>
+          <div className={layoutStyles.headerRow}>
             <button
               onClick={() => setScreen('start')}
-              className="flex items-center gap-1.5 text-xs font-mono text-slate-400 hover:text-white"
+              className={layoutStyles.backButton}
             >
               <ArrowLeft className="w-4 h-4" />
               Back
             </button>
-            <h2 className="font-display font-bold text-sm sm:text-base tracking-wide">
-              STEP 1: CREATE MASTER TUNNEL GEOMETRY
+            <h2 className="font-display font-semibold text-base sm:text-lg tracking-wide">
+              01. Create Master Tunnel Geometry
             </h2>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono text-cyan-400 hidden sm:inline">UNITS: METERS (m)</span>
+            <div className="flex items-center gap-3">
+              <span className={`text-xs font-mono hidden sm:inline ${isLight ? 'text-sky-700' : 'text-cyan-400'}`}>
+                Units: meters (m)
+              </span>
               <ThemeToggleButton compact />
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5 items-center flex-1 min-h-0 overflow-y-auto pr-0.5">
-            <div className="space-y-3 text-xs font-mono">
-              <label className="block space-y-1">
-                <span className="text-slate-400">Tunnel / Cavern Excavation Shape</span>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center flex-1 min-h-0 overflow-y-auto pr-1">
+            <div className={`${layoutStyles.sectionSurface} space-y-4`}>
+              <label className="block space-y-1.5">
+                <span className={layoutStyles.labelMuted}>Tunnel / Cavern Excavation Shape</span>
                 <select
                   value={manProfileType}
                   onChange={(e) => {
@@ -1736,7 +1849,7 @@ export default function App() {
                     setManWallHeight(c.wallHeight.toFixed(2));
                     setManCrownRadius(c.crownRadius.toFixed(2));
                   }}
-                  className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+                  className={layoutStyles.inputControl}
                 >
                   <option value="d_shaped">D-Shaped (Vertical Walls + Arch Crown)</option>
                   <option value="horseshoe">Horseshoe Profile (Curved Sidewalls)</option>
@@ -1760,7 +1873,7 @@ export default function App() {
                 </select>
               </label>
 
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-2.5">
                 <button
                   type="button"
                   onClick={() => {
@@ -1768,7 +1881,11 @@ export default function App() {
                     setReturnScreenFromCustomEditor('geometry_manual');
                     setScreen('geometry_custom');
                   }}
-                  className="flex-1 py-1.5 px-2.5 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 border border-cyan-600/70 rounded text-[11px] font-semibold cursor-pointer"
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
+                    isLight
+                      ? 'bg-sky-50 hover:bg-sky-100 text-sky-800 border-sky-200'
+                      : 'bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-200 border-cyan-700/60'
+                  }`}
                 >
                   Open Freeform Custom Profile &amp; Cavern Editor
                 </button>
@@ -1779,15 +1896,19 @@ export default function App() {
                     setReturnScreenFromCustomEditor('geometry_manual');
                     setScreen('geometry_custom');
                   }}
-                  className="py-1.5 px-2.5 bg-amber-950/70 hover:bg-amber-900/80 text-amber-200 border border-amber-600/70 rounded text-[11px] font-semibold cursor-pointer"
+                  className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
+                    isLight
+                      ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-200'
+                      : 'bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 border-amber-700/60'
+                  }`}
                 >
                   Trace Engineering Drawing
                 </button>
               </div>
 
-              <div className="grid grid-cols-2 gap-2.5">
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Tunnel Width (m)</span>
+              <div className="grid grid-cols-2 gap-3.5">
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Tunnel Width (m)</span>
                   <input
                     type="number"
                     step="0.1"
@@ -1809,12 +1930,12 @@ export default function App() {
                         setManCrownRadius(c.crownRadius.toFixed(2));
                       }
                     }}
-                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
 
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Total Height (m)</span>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Total Height (m)</span>
                   <input
                     type="number"
                     step="0.1"
@@ -1836,12 +1957,12 @@ export default function App() {
                         setManCrownRadius(c.crownRadius.toFixed(2));
                       }
                     }}
-                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
 
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Wall Height (m)</span>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Wall Height (m)</span>
                   <input
                     type="number"
                     step="0.1"
@@ -1863,12 +1984,12 @@ export default function App() {
                         setManCrownRadius(c.crownRadius.toFixed(2));
                       }
                     }}
-                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
 
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Crown Radius (m)</span>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Crown Radius (m)</span>
                   <input
                     type="number"
                     step="0.1"
@@ -1876,21 +1997,21 @@ export default function App() {
                     value={previewGeom.crownRadius.toFixed(2)}
                     readOnly
                     title="Automatically constrained from Tunnel Width, Height, and Wall Height to prevent arch distortion"
-                    className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-cyan-300 cursor-not-allowed"
+                    className={`${layoutStyles.inputControl} opacity-75 cursor-not-allowed`}
                   />
                 </label>
               </div>
 
-              <div className="p-2 bg-slate-900/80 border border-slate-800 rounded text-[11px] text-slate-400 space-y-1">
+              <div className={`pt-3 border-t ${layoutStyles.hairlineDivider} text-xs space-y-1 ${isLight ? 'text-slate-600' : 'text-slate-400'}`}>
                 <div>
                   Master Geometry Rule: Photographs &amp; Developed Perimeter strictly follow{' '}
-                  <strong className="text-slate-200">
+                  <strong className={isLight ? 'text-slate-900' : 'text-slate-200'}>
                     {previewGeom.width.toFixed(2)}m W × {previewGeom.height.toFixed(2)}m H
                   </strong>
                   .
                 </div>
-                <div className="text-cyan-300">
-                  Left/Right Wall = <strong>{previewGeom.wallHeight.toFixed(2)}m</strong> · Face &amp; Perimeter Crown Arc ={' '}
+                <div className={`font-mono text-[11px] ${isLight ? 'text-sky-700' : 'text-cyan-300'}`}>
+                  Left/Right Wall = <strong>{previewGeom.wallHeight.toFixed(2)}m</strong> · Crown Arc ={' '}
                   <strong>{previewGeom.crownArcLength.toFixed(2)}m</strong> · Total Perimeter ={' '}
                   <strong>{(previewGeom.wallHeight * 2 + previewGeom.crownArcLength).toFixed(2)}m</strong>
                 </div>
@@ -1898,11 +2019,7 @@ export default function App() {
             </div>
 
             {/* Live Vector Cross-Section Preview */}
-            <div
-              className={`flex flex-col items-center justify-center border border-slate-800 rounded p-2.5 h-full min-h-[180px] ${
-                isLight ? 'bg-slate-50' : 'bg-[#090C12]'
-              }`}
-            >
+            <div className={layoutStyles.previewStage}>
               <svg viewBox="0 0 320 270" className="w-full h-[clamp(160px,28dvh,235px)]">
                 <line
                   x1="160"
@@ -1943,17 +2060,17 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-2.5 border-t border-slate-800 shrink-0">
+          <div className={layoutStyles.footerRow}>
             <button
               onClick={() => handleOpenProjectMemoryModal('geometries')}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono text-cyan-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded"
+              className={layoutStyles.secondaryButton}
             >
-              <Database className="w-3.5 h-3.5 text-cyan-400" />
+              <Database className={`w-3.5 h-3.5 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
               Saved Tunnel Geometries ({savedGeometries.length})
             </button>
             <button
               onClick={() => handleApplyManualGeometry(true)}
-              className="flex items-center gap-2 px-4 sm:px-5 py-2 text-xs font-mono font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded transition-colors"
+              className={layoutStyles.primaryButton}
             >
               Save Master Geometry &amp; Continue
               <ArrowRight className="w-4 h-4" />
@@ -1976,18 +2093,18 @@ export default function App() {
         .join(' ') + ' Z';
 
     return (
-      <main className="h-dvh w-full flex flex-col items-center justify-center bg-[#0B0E14] text-slate-100 p-2 sm:p-4 overflow-hidden">
-        <div className="w-full max-w-[min(96vw,700px)] max-h-[calc(100dvh-16px)] bg-[#111621] border border-slate-800 rounded p-4 sm:p-5 flex flex-col gap-3.5 overflow-hidden">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 shrink-0">
+      <main className={layoutStyles.viewportShell}>
+        <div className={`${layoutStyles.majorPanel} max-w-[740px]`}>
+          <div className={layoutStyles.headerRow}>
             <button
               onClick={() => setScreen('start')}
-              className="flex items-center gap-1.5 text-xs font-mono text-slate-400 hover:text-white"
+              className={layoutStyles.backButton}
             >
               <ArrowLeft className="w-4 h-4" />
               Back
             </button>
-            <h2 className="font-display font-bold text-sm sm:text-base tracking-wide">
-              UPLOAD MASTER TUNNEL DWG / DXF
+            <h2 className="font-display font-semibold text-base sm:text-lg tracking-wide">
+              Upload Master Tunnel DWG / DXF
             </h2>
             <div className="flex items-center gap-2">
               <ThemeToggleButton compact />
@@ -2006,31 +2123,31 @@ export default function App() {
             }}
           />
 
-          <div className="flex-1 min-h-0 overflow-y-auto space-y-3.5 pr-0.5">
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-5 pr-1">
             <div
               onClick={() => cadInputRef.current?.click()}
-              className="flex flex-col items-center justify-center p-5 sm:p-6 border-2 border-dashed border-slate-700 hover:border-cyan-500/60 rounded bg-slate-900/50 cursor-pointer transition-colors text-center space-y-1.5"
+              className={`flex flex-col items-center justify-center p-6 sm:p-8 border-2 border-dashed rounded-xl cursor-pointer transition-all text-center space-y-2 ${
+                isLight
+                  ? 'border-slate-300 hover:border-sky-500 bg-slate-50/70 hover:bg-sky-50/40'
+                  : 'border-slate-700 hover:border-cyan-500/60 bg-[#141D2E]/50 hover:bg-[#141D2E]/80'
+              }`}
             >
-              <Upload className="w-6 h-6 text-cyan-400" />
-              <div className="text-xs sm:text-sm font-mono font-medium text-slate-200">
+              <Upload className={`w-6 h-6 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
+              <div className={`text-xs sm:text-sm font-semibold ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>
                 Click to select Tunnel Profile (.DXF or .DWG)
               </div>
-              <div className="text-[11px] text-slate-400">
+              <div className={`text-xs ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
                 Extracts LINE, ARC, and LWPOLYLINE master cross-section geometry in real-world meters.
               </div>
             </div>
 
             {cadStatus && (
-              <div className="px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs font-mono text-cyan-300">
+              <div className={`${layoutStyles.sectionSurface} text-xs font-mono ${isLight ? 'text-sky-800' : 'text-cyan-300'}`}>
                 {cadStatus}
               </div>
             )}
 
-            <div
-              className={`flex flex-col items-center justify-center border border-slate-800 rounded p-2.5 ${
-                isLight ? 'bg-slate-50' : 'bg-[#090C12]'
-              }`}
-            >
+            <div className={layoutStyles.previewStage}>
               <svg viewBox="0 0 320 265" className="w-full h-[clamp(140px,24dvh,200px)]">
                 <path
                   d={polyPath}
@@ -2046,20 +2163,20 @@ export default function App() {
                   fill={isLight ? '#334155' : '#94A3B8'}
                   fontFamily="IBM Plex Mono, monospace"
                 >
-                  MASTER PROFILE: {geometry.width.toFixed(2)}m W × {geometry.height.toFixed(2)}m H
+                  Master Profile: {geometry.width.toFixed(2)}m W × {geometry.height.toFixed(2)}m H
                   (Source: {geometry.source.toUpperCase()})
                 </text>
               </svg>
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-2.5 border-t border-slate-800 shrink-0">
-            <div className="flex items-center gap-2">
+          <div className={layoutStyles.footerRow}>
+            <div className="flex flex-wrap items-center gap-2.5">
               <button
                 onClick={() => handleOpenProjectMemoryModal('geometries')}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono text-cyan-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded"
+                className={layoutStyles.secondaryButton}
               >
-                <Database className="w-3.5 h-3.5 text-cyan-400" />
+                <Database className={`w-3.5 h-3.5 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
                 Load Saved Geometry ({savedGeometries.length})
               </button>
               <button
@@ -2068,14 +2185,18 @@ export default function App() {
                   setReturnScreenFromCustomEditor('geometry_cad');
                   setScreen('geometry_custom');
                 }}
-                className="px-3 py-2 text-xs font-mono text-amber-200 hover:text-white bg-amber-950/60 hover:bg-amber-900/70 border border-amber-600/60 rounded"
+                className={`px-4 py-2.5 text-xs font-semibold rounded-xl border transition-colors cursor-pointer ${
+                  isLight
+                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-200'
+                    : 'bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 border-amber-700/60'
+                }`}
               >
                 Edit Control Points in Custom Editor
               </button>
             </div>
             <button
               onClick={() => setScreen('drive_and_photos')}
-              className="flex items-center gap-2 px-4 sm:px-5 py-2 text-xs font-mono font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded transition-colors"
+              className={layoutStyles.primaryButton}
             >
               Continue to Drive Direction &amp; Photos
               <ArrowRight className="w-4 h-4" />
@@ -2092,59 +2213,61 @@ export default function App() {
   // ============================================================================
   if (screen === 'geometry_custom') {
     return (
-      <main className="h-dvh w-full flex flex-col bg-[#0B0E14] text-slate-100 overflow-hidden">
-        <FreeformCustomProfileEditor
-          geometry={geometry}
-          settings={settings}
-          onUpdateSettings={setSettings}
-          onConfirmGeometry={(confirmedGeom, proceedToNext = true) => {
-            setGeometry(confirmedGeom);
-            setManWidth(String(confirmedGeom.width));
-            setManHeight(String(confirmedGeom.height));
-            setManWallHeight(String(confirmedGeom.wallHeight));
-            setManCrownRadius(String(confirmedGeom.crownRadius));
-            setManProfileType(confirmedGeom.crownGeometry);
-            setStatusMessage(
-              `Confirmed authoritative custom profile "${confirmedGeom.customProfile?.name || confirmedGeom.profileName || 'Custom Profile'}" (${confirmedGeom.width.toFixed(3)}m W × ${confirmedGeom.height.toFixed(3)}m H · Area ${(confirmedGeom.designAreaSqMeters || 0).toFixed(2)}m² · Perim ${(confirmedGeom.totalPerimeterMeters || 0).toFixed(2)}m).`
-            );
-            if (proceedToNext) {
-              setScreen(
-                returnScreenFromCustomEditor === 'mapping' ? 'mapping' : 'drive_and_photos'
+      <main className={layoutStyles.workspaceShell}>
+        <div className={layoutStyles.workspacePanel}>
+          <FreeformCustomProfileEditor
+            geometry={geometry}
+            settings={settings}
+            onUpdateSettings={setSettings}
+            onConfirmGeometry={(confirmedGeom, proceedToNext = true) => {
+              setGeometry(confirmedGeom);
+              setManWidth(String(confirmedGeom.width));
+              setManHeight(String(confirmedGeom.height));
+              setManWallHeight(String(confirmedGeom.wallHeight));
+              setManCrownRadius(String(confirmedGeom.crownRadius));
+              setManProfileType(confirmedGeom.crownGeometry);
+              setStatusMessage(
+                `Confirmed authoritative custom profile "${confirmedGeom.customProfile?.name || confirmedGeom.profileName || 'Custom Profile'}" (${confirmedGeom.width.toFixed(3)}m W × ${confirmedGeom.height.toFixed(3)}m H · Area ${(confirmedGeom.designAreaSqMeters || 0).toFixed(2)}m² · Perim ${(confirmedGeom.totalPerimeterMeters || 0).toFixed(2)}m).`
               );
-            }
-          }}
-          onBack={() => setScreen(returnScreenFromCustomEditor)}
-          onUploadCADFile={handleCADFileUpload}
-          onDownloadSampleDXF={handleDownloadSampleDXF}
-          cadStatus={cadStatus}
-          savedGeometries={savedGeometries}
-          onSaveGeometryToLibrary={(customName, geomToSave) => {
-            const next = saveDesignGeometryToLibrary({
-              name: customName,
-              tunnelName: settings.tunnelName,
-              location: settings.locationName || 'Underground Tunnel Works',
-              chainage: settings.faceChainage || settings.chainage,
-              geometry: geomToSave,
-            });
-            setSavedGeometries(next);
-          }}
-          onLoadSavedGeometry={(rec) => {
-            setGeometry(rec.geometry);
-            setManWidth(String(rec.geometry.width));
-            setManHeight(String(rec.geometry.height));
-            setManWallHeight(String(rec.geometry.wallHeight));
-            setManCrownRadius(String(rec.geometry.crownRadius));
-          }}
-          onDeleteSavedGeometry={(id) => {
-            const next = deleteSavedDesignGeometry(id);
-            setSavedGeometries(next);
-          }}
-          chainageSchedule={chainageSchedule}
-          onUpdateChainageSchedule={handleUpdateChainageSchedule}
-          surveyControlPoints={controlPoints}
-          onSyncProfileToSurveyControlPoints={handleSyncProfileToSurveyControlPoints}
-          initialTab={customEditorInitialTab}
-        />
+              if (proceedToNext) {
+                setScreen(
+                  returnScreenFromCustomEditor === 'mapping' ? 'mapping' : 'drive_and_photos'
+                );
+              }
+            }}
+            onBack={() => setScreen(returnScreenFromCustomEditor)}
+            onUploadCADFile={handleCADFileUpload}
+            onDownloadSampleDXF={handleDownloadSampleDXF}
+            cadStatus={cadStatus}
+            savedGeometries={savedGeometries}
+            onSaveGeometryToLibrary={(customName, geomToSave) => {
+              const next = saveDesignGeometryToLibrary({
+                name: customName,
+                tunnelName: settings.tunnelName,
+                location: settings.locationName || 'Underground Tunnel Works',
+                chainage: settings.faceChainage || settings.chainage,
+                geometry: geomToSave,
+              });
+              setSavedGeometries(next);
+            }}
+            onLoadSavedGeometry={(rec) => {
+              setGeometry(rec.geometry);
+              setManWidth(String(rec.geometry.width));
+              setManHeight(String(rec.geometry.height));
+              setManWallHeight(String(rec.geometry.wallHeight));
+              setManCrownRadius(String(rec.geometry.crownRadius));
+            }}
+            onDeleteSavedGeometry={(id) => {
+              const next = deleteSavedDesignGeometry(id);
+              setSavedGeometries(next);
+            }}
+            chainageSchedule={chainageSchedule}
+            onUpdateChainageSchedule={handleUpdateChainageSchedule}
+            surveyControlPoints={controlPoints}
+            onSyncProfileToSurveyControlPoints={handleSyncProfileToSurveyControlPoints}
+            initialTab={customEditorInitialTab}
+          />
+        </div>
         {projectMemoryModalNode}
       </main>
     );
@@ -2157,35 +2280,35 @@ export default function App() {
     const parsedDrive = parseDriveDirectionAzimuth(settings.driveDirectionInput);
 
     return (
-      <main className="h-dvh w-full flex flex-col items-center justify-center bg-[#0B0E14] text-slate-100 p-2 sm:p-4 overflow-hidden">
-        <div className="w-full max-w-[min(96vw,1020px)] max-h-[calc(100dvh-16px)] bg-[#111621] border border-slate-800 rounded p-4 sm:p-5 flex flex-col gap-3.5 overflow-hidden">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 shrink-0">
+      <main className={layoutStyles.viewportShell}>
+        <div className={`${layoutStyles.majorPanel} max-w-[1060px]`}>
+          <div className={layoutStyles.headerRow}>
             <button
               onClick={() => setScreen('start')}
-              className="flex items-center gap-1.5 text-xs font-mono text-slate-400 hover:text-white"
+              className={layoutStyles.backButton}
             >
               <ArrowLeft className="w-4 h-4" />
               Back
             </button>
-            <h2 className="font-display font-bold text-sm sm:text-base tracking-wide">
-              STEP 2 &amp; 3: TUNNEL DRIVE DIRECTION &amp; SURFACE PHOTOGRAPHS
+            <h2 className="font-display font-semibold text-base sm:text-lg tracking-wide">
+              02. Tunnel Drive Direction &amp; Surface Photographs
             </h2>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono text-slate-400 hidden sm:inline">
+            <div className="flex items-center gap-3">
+              <span className={`text-xs font-mono hidden sm:inline ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
                 Master: {geometry.width}m × {geometry.height}m
               </span>
               <ThemeToggleButton compact />
             </div>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto space-y-3.5 pr-0.5">
-            {/* Section 4: TUNNEL DRIVE DIRECTION + Essential Sheet Header Info */}
-            <div className="p-3 sm:p-3.5 bg-slate-900/80 border border-slate-800 rounded space-y-3">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-                <label className="block space-y-1">
-                  <span className="text-xs font-mono font-semibold text-cyan-400 flex items-center gap-1.5">
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-6 pr-1">
+            {/* Section 4: Tunnel Drive Direction + Essential Sheet Header Info */}
+            <div className={`${layoutStyles.sectionSurface} space-y-4`}>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                <label className="block space-y-1.5">
+                  <span className={`text-xs font-semibold flex items-center gap-1.5 ${isLight ? 'text-sky-700' : 'text-cyan-400'}`}>
                     <Compass className="w-3.5 h-3.5" />
-                    TUNNEL DRIVE DIRECTION
+                    Tunnel Drive Direction
                   </span>
                   <input
                     type="text"
@@ -2200,57 +2323,60 @@ export default function App() {
                         driveDirection: norm.azimuth,
                       }));
                     }}
-                    className="w-full px-3 py-1.5 bg-slate-950 border border-cyan-500/50 rounded font-mono text-sm text-white"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
 
-                <div className="text-xs font-mono text-slate-300 pb-1.5">
+                <div className={`text-xs font-mono pb-2 ${isLight ? 'text-slate-600' : 'text-slate-300'}`}>
                   Normalized Reference Azimuth:{' '}
-                  <strong className="text-cyan-300">{parsedDrive.azimuth.toFixed(1)}°</strong> (0–360°)
+                  <strong className={isLight ? 'text-sky-700' : 'text-cyan-300'}>
+                    {parsedDrive.azimuth.toFixed(1)}°
+                  </strong>{' '}
+                  (0–360°)
                 </div>
 
-                <label className="block space-y-1 font-mono text-xs">
-                  <span className="text-slate-400">Tunnel Name / Heading</span>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Tunnel Name / Heading</span>
                   <input
                     type="text"
                     value={settings.tunnelName}
                     onChange={(e) => setSettings((p) => ({ ...p, tunnelName: e.target.value }))}
-                    className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 font-mono text-xs pt-2 border-t border-slate-800/80">
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Location / Project Site</span>
+              <div className={`grid grid-cols-2 sm:grid-cols-5 gap-3.5 pt-4 border-t ${layoutStyles.hairlineDivider}`}>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Location / Project Site</span>
                   <input
                     type="text"
                     value={settings.locationName || ''}
                     placeholder="e.g. HRT Package-II"
                     onChange={(e) => setSettings((p) => ({ ...p, locationName: e.target.value }))}
-                    className="w-full px-2.5 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Chainage / RD Interval</span>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Chainage / RD Interval</span>
                   <input
                     type="text"
                     value={settings.chainage}
                     onChange={(e) => setSettings((p) => ({ ...p, chainage: e.target.value }))}
-                    className="w-full px-2.5 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Face Chainage / RD</span>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Face Chainage / RD</span>
                   <input
                     type="text"
                     value={settings.faceChainage}
                     onChange={(e) => setSettings((p) => ({ ...p, faceChainage: e.target.value }))}
-                    className="w-full px-2.5 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
-                <label className="block space-y-1">
-                  <span className="text-slate-400">Round Length / Pull (m)</span>
+                <label className="block space-y-1.5">
+                  <span className={layoutStyles.labelMuted}>Round Length / Pull (m)</span>
                   <input
                     type="number"
                     step="0.1"
@@ -2262,11 +2388,13 @@ export default function App() {
                         roundLength: Math.max(0.5, parseFloat(e.target.value) || 3.5),
                       }))
                     }
-                    className="w-full px-2.5 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                    className={layoutStyles.inputControl}
                   />
                 </label>
-                <label className="block space-y-1">
-                  <span className="text-indigo-300 font-semibold">Classification Method</span>
+                <label className="block space-y-1.5">
+                  <span className={`text-xs font-semibold ${isLight ? 'text-indigo-700' : 'text-indigo-300'}`}>
+                    Classification Method
+                  </span>
                   <select
                     value={selectedClassificationMethod}
                     onChange={(e) =>
@@ -2274,7 +2402,7 @@ export default function App() {
                         e.target.value as RockMassClassificationMethodId
                       )
                     }
-                    className="w-full px-2.5 py-1 bg-slate-950 border border-indigo-500/60 rounded text-indigo-200 font-semibold"
+                    className={layoutStyles.inputControl}
                   >
                     <option value="RMR">RMR (Bieniawski)</option>
                     <option value="Q_SYSTEM">Q-System (Barton NGI)</option>
@@ -2285,35 +2413,35 @@ export default function App() {
               </div>
             </div>
 
-            {/* Section 5: PHOTO INPUT (1. TUNNEL FACE, 2. LEFT WALL, 3. RIGHT WALL, 4. CROWN) */}
-            <div className="space-y-2">
+            {/* Section 5: Surface Photograph Inputs */}
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-mono font-semibold text-slate-200">
-                  UPLOAD AVAILABLE TUNNEL SURFACE PHOTOGRAPHS (OPTIONAL COMBINATIONS SUPPORTED)
-                </span>
+                <h3 className={`text-xs sm:text-sm font-semibold ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>
+                  Tunnel Surface Photographs (Optional Combinations Supported)
+                </h3>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {(
                   [
                     {
                       id: 'face',
-                      title: '1. TUNNEL FACE',
+                      title: '01. Tunnel Face',
                       desc: `Fits ${geometry.customProfile?.name ? `${geometry.customProfile.name} (${geometry.width}m × ${geometry.height}m)` : `${geometry.width}m × ${geometry.height}m cross-section`}`,
                     },
                     {
                       id: 'leftWall',
-                      title: '2. LEFT WALL',
+                      title: '02. Left Wall',
                       desc: `Fits ${settings.roundLength}m pull × ${(geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight).toFixed(2)}m wall`,
                     },
                     {
                       id: 'rightWall',
-                      title: '3. RIGHT WALL',
+                      title: '03. Right Wall',
                       desc: `Fits ${settings.roundLength}m pull × ${(geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight).toFixed(2)}m wall`,
                     },
                     {
                       id: 'crown',
-                      title: '4. CROWN',
+                      title: '04. Crown Arch',
                       desc: `Fits ${geometry.crownArcLength.toFixed(2)}m arch × ${settings.roundLength}m pull`,
                     },
                   ] as { id: SurfaceType; title: string; desc: string }[]
@@ -2323,23 +2451,26 @@ export default function App() {
                   return (
                     <div
                       key={slot.id}
-                      className="flex flex-col justify-between p-2.5 bg-slate-900/70 border border-slate-800 rounded space-y-2"
+                      className={`${layoutStyles.sectionSurface} flex flex-col justify-between space-y-3`}
                     >
-                      {/* MAIN PHOTO ROW (Required Primary Mapping Image) */}
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="space-y-0.5">
-                          <div className="flex items-center gap-1.5 font-mono text-xs font-semibold text-slate-100">
-                            {slot.title}
-                            <span className="px-1.5 py-0.2 text-[9px] bg-cyan-950 text-cyan-300 border border-cyan-700/60 rounded">
-                              MAIN PHOTO
+                      {/* Main Photo Row */}
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className={`flex items-center gap-2 text-xs font-semibold ${isLight ? 'text-slate-900' : 'text-slate-100'}`}>
+                            <span>{slot.title}</span>
+                            <span className={isLight ? 'text-slate-400 font-normal' : 'text-slate-500 font-normal'} aria-hidden="true">·</span>
+                            <span className={`text-[11px] font-normal ${isLight ? 'text-sky-700' : 'text-cyan-300'}`}>
+                              Primary Photo
                             </span>
                             {surfPhoto.image && (
-                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                             )}
                           </div>
-                          <div className="text-[11px] text-slate-400 font-mono">{slot.desc}</div>
+                          <div className={`text-[11px] font-mono ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
+                            {slot.desc}
+                          </div>
                           {surfPhoto.autoFitted && (
-                            <div className="text-[10px] text-emerald-400 font-mono">
+                            <div className={`text-[11px] font-mono ${isLight ? 'text-emerald-700' : 'text-emerald-400'}`}>
                               {surfPhoto.calibration
                                 ? `${surfPhoto.calibration.source === 'EXIF_METADATA' ? 'EXIF Calibrated' : 'Estimated Cam'}: ${surfPhoto.calibration.focalLengthMm}mm eq · 3×3 Homography`
                                 : 'Auto-fitted to master geometry'}
@@ -2347,26 +2478,32 @@ export default function App() {
                           )}
                         </div>
 
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-2">
                           {surfPhoto.image && (
                             <div className="relative group">
                               <img
                                 src={surfPhoto.image}
                                 alt={`${slot.title} Main Photo`}
                                 referrerPolicy="no-referrer"
-                                className="w-11 h-9 object-cover rounded border border-cyan-500/70"
+                                className="w-12 h-10 object-cover rounded-lg border border-cyan-500/60 shadow-2xs"
                               />
                               <button
                                 type="button"
                                 onClick={() => handleRemoveMainPhoto(slot.id)}
                                 title="Remove Main Photo"
-                                className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-rose-600 text-white flex items-center justify-center text-[9px] hover:bg-rose-500"
+                                className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-rose-600 text-white flex items-center justify-center text-[9px] hover:bg-rose-500 cursor-pointer"
                               >
                                 <X className="w-2.5 h-2.5" />
                               </button>
                             </div>
                           )}
-                          <label className="px-2.5 py-1.5 bg-cyan-950/80 hover:bg-cyan-900/80 text-cyan-200 border border-cyan-700/70 rounded text-xs font-mono cursor-pointer whitespace-nowrap">
+                          <label
+                            className={`px-3.5 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
+                              isLight
+                                ? 'bg-sky-50 hover:bg-sky-100 text-sky-800 border-sky-200'
+                                : 'bg-cyan-950/80 hover:bg-cyan-900/80 text-cyan-200 border-cyan-700/70'
+                            }`}
+                          >
                             {surfPhoto.image ? 'Replace Main' : 'Upload Main'}
                             <input
                               type="file"
@@ -2382,29 +2519,33 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* ADDITIONAL SUPPORTING PHOTOS (0-5 Optional Supporting Evidence Only) */}
-                      <div className="pt-1.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
-                        <div className="text-[10px] font-mono text-slate-400">
-                          SUPPORTING PHOTOS ({supPhotos.length}/5):{' '}
-                          <span className="text-slate-500">AI verification only (never merged)</span>
+                      {/* Additional Supporting Photos (0-5 Optional Supporting Evidence Only) */}
+                      <div className={`pt-2.5 border-t ${layoutStyles.hairlineDivider} flex flex-wrap items-center justify-between gap-2`}>
+                        <div className={`text-[11px] ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
+                          Supporting Photos ({supPhotos.length}/5) ·{' '}
+                          <span className={isLight ? 'text-slate-400' : 'text-slate-500'}>
+                            Verification only
+                          </span>
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-wrap">
                           {supPhotos.map((sp, spIdx) => (
                             <div
                               key={sp.id}
-                              className="relative group flex items-center bg-slate-950 border border-slate-700 rounded p-0.5"
+                              className={`relative group flex items-center rounded-lg p-0.5 border ${
+                                isLight ? 'bg-white border-slate-200' : 'bg-slate-950 border-slate-700'
+                              }`}
                               title={`Supporting Photo #${spIdx + 1}: ${sp.fileName} (Baseline ${sp.baselineMeters ?? 1.1}m)`}
                             >
                               <img
                                 src={sp.image}
                                 alt={`Supporting ${spIdx + 1}`}
                                 referrerPolicy="no-referrer"
-                                className="w-8 h-7 object-cover rounded"
+                                className="w-8 h-7 object-cover rounded-md"
                               />
                               <label
                                 title="Replace Supporting Photo"
-                                className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover:opacity-100 flex items-center justify-center text-[8px] font-mono text-cyan-300 cursor-pointer rounded transition-opacity"
+                                className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover:opacity-100 flex items-center justify-center text-[8px] font-mono text-cyan-300 cursor-pointer rounded-lg transition-opacity"
                               >
                                 Repl
                                 <input
@@ -2422,7 +2563,7 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleRemoveSupportingPhoto(slot.id, sp.id)}
                                 title="Remove Supporting Photo"
-                                className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-rose-600 text-slate-200 hover:text-white border border-slate-600 flex items-center justify-center z-10"
+                                className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-rose-600 text-slate-200 hover:text-white border border-slate-600 flex items-center justify-center z-10 cursor-pointer"
                               >
                                 <X className="w-2.5 h-2.5" />
                               </button>
@@ -2430,8 +2571,14 @@ export default function App() {
                           ))}
 
                           {supPhotos.length < 5 && (
-                            <label className="flex items-center gap-1 px-2 py-1 bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded text-[10px] font-mono cursor-pointer whitespace-nowrap">
-                              <Plus className="w-3 h-3 text-emerald-400" />
+                            <label
+                              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-medium cursor-pointer whitespace-nowrap transition-colors ${
+                                isLight
+                                  ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 border-slate-700'
+                              }`}
+                            >
+                              <Plus className="w-3 h-3 text-emerald-500" />
                               Add Photo
                               <input
                                 type="file"
@@ -2454,12 +2601,12 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-2.5 border-t border-slate-800 shrink-0">
+          <div className={layoutStyles.footerRow}>
             <button
               onClick={handleSaveOfflineDraft}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded"
+              className={layoutStyles.secondaryButton}
             >
-              <Save className="w-3.5 h-3.5 text-cyan-400" />
+              <Save className={`w-3.5 h-3.5 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
               Save Draft (Process Later)
             </button>
 
@@ -2471,7 +2618,7 @@ export default function App() {
                 if (firstUploaded) setActiveSurface(firstUploaded);
                 setScreen('mapping');
               }}
-              className="flex items-center gap-2 px-4 sm:px-5 py-2 text-xs font-mono font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded transition-colors"
+              className={layoutStyles.primaryButton}
             >
               Open Mapping Canvas
               <ArrowRight className="w-4 h-4" />
@@ -2487,111 +2634,114 @@ export default function App() {
   // SCREEN 4: MAIN MAPPING WORKSPACE & FINAL ENGINEERING SHEET MODAL
   // ============================================================================
   return (
-    <>
-      <MappingWorkspace
-        geometry={geometry}
-        settings={settings}
-        photos={photos}
-        activeSurface={activeSurface}
-        onSelectSurface={setActiveSurface}
-        onUpdatePhotoSurface={(surf, updater) =>
-          setPhotos((prev) => ({
-            ...prev,
-            [surf]: updater(prev[surf]),
-          }))
-        }
-        onUploadPhotoFile={handleUploadSurfacePhoto}
-        onUploadStereoPhotoFile={handleUploadSupportingPhoto}
-        onRemoveSupportingPhoto={handleRemoveSupportingPhoto}
-        onLoadSamplePhoto={handleLoadSampleSurfacePhoto}
-        onAutoFitCurrentPhoto={handleAutoFitCurrentPhoto}
-        onRunAITrace={handleRunAITrace}
-        onRunAITraceAllSurfaces={handleRunAITraceAllSurfaces}
-        isTracingAI={isTracingAI}
-        traceFitMode={traceFitMode}
-        onChangeTraceFitMode={setTraceFitMode}
-        statusMessage={statusMessage}
-        joints={clusteredJoints}
-        jointSets={jointSets}
-        onUpdateJointsWithHistory={updateJointsWithHistory}
-        onUpdateJointSetAttribute={(setId, field, value) =>
-          setCustomJointSetOverrides((prev) => ({
-            ...prev,
-            [setId]: {
-              ...(prev[setId] || {}),
-              [field]: value,
-            },
-          }))
-        }
-        onMergeJointSets={(fromSetId, toSetId) => {
-          if (fromSetId === toSetId) return;
-          updateJointsWithHistory(
-            clusteredJoints.map((j) => (j.set === fromSetId ? { ...j, set: toSetId } : j))
-          );
-        }}
-        onUndo={handleUndo}
-        onRedo={handleRedo}
-        canUndo={historyPast.length > 0}
-        canRedo={historyFuture.length > 0}
-        onBackToSetup={() => setScreen('drive_and_photos')}
-        onOpenExportSheet={(mode = 'FINAL_ENGINEERING_SHEET') => {
-          setExportModalInitialMode(mode);
-          setIsExportModalOpen(true);
-        }}
-        onSaveOfflineDraft={handleSaveOfflineDraft}
-        sessionMemory={sessionMemory}
-        onRecordRejectedJoint={handleRecordRejectedJoint}
-        onRecordConfirmedJoint={handleRecordConfirmedJoint}
-        onTrainAndUpdateAIModel={handleTrainAndUpdateAIModel}
-        onResetAILearningFilters={handleResetAILearningFilters}
-        qIndexParams={qIndexParams}
-        onUpdateQIndexParams={setQIndexParams}
-        qParamStatus={qParamStatus}
-        onUpdateQParamStatus={setQParamStatus}
-        selectedClassificationMethod={selectedClassificationMethod}
-        onChangeSelectedClassificationMethod={setSelectedClassificationMethod}
-        rmrParams={rmrParams}
-        onUpdateRmrParams={setRmrParams}
-        gsiParams={gsiParams}
-        onUpdateGsiParams={setGsiParams}
-        rockMassSummary={rockMassSummary}
-        onUpdateRockMassSummary={setRockMassSummary}
-        lithologyRegions={lithologyRegions}
-        onUpdateLithologyRegions={(nextRegions) => {
-          setLithologyRegions(nextRegions);
-          if (nextRegions.length > 0) {
-            const uniqueNames = Array.from(
-              new Set(nextRegions.map((r) => r.lithologyName.trim()).filter(Boolean))
-            );
-            if (uniqueNames.length > 0) {
-              const combinedName = uniqueNames.join(' / ');
-              setSettings((prev) => ({ ...prev, lithology: combinedName }));
-              setRockMassSummary((prev) => ({
-                ...prev,
-                rockType: combinedName,
-                geologistRemarks:
-                  nextRegions[0].description || prev.geologistRemarks,
-              }));
-            }
+    <div className={layoutStyles.workspaceShell}>
+      <div className={layoutStyles.workspacePanel}>
+        <MappingWorkspace
+          geometry={geometry}
+          settings={settings}
+          photos={photos}
+          activeSurface={activeSurface}
+          onSelectSurface={setActiveSurface}
+          onUpdatePhotoSurface={(surf, updater) =>
+            setPhotos((prev) => ({
+              ...prev,
+              [surf]: updater(prev[surf]),
+            }))
           }
-        }}
-        onUpdateStatusMessage={setStatusMessage}
-        controlPoints={controlPoints}
-        onUpdateControlPoints={setControlPoints}
-        placedSymbols={placedSymbols}
-        onUpdatePlacedSymbols={setPlacedSymbols}
-        surveyProfile={surveyProfile}
-        onUpdateSurveyProfile={setSurveyProfile}
-        overbreakAnalysis={overbreakAnalysis}
-        onGenerateSampleAsBuiltProfile={handleGenerateSampleAsBuiltProfile}
-        onOpenProjectMemoryModal={handleOpenProjectMemoryModal}
-        onOpenCustomProfileEditor={() => {
-          setCustomEditorInitialTab('freeform_canvas');
-          setReturnScreenFromCustomEditor('mapping');
-          setScreen('geometry_custom');
-        }}
-        savedProjects={savedProjects}
-      />
+          onUploadPhotoFile={handleUploadSurfacePhoto}
+          onUploadStereoPhotoFile={handleUploadSupportingPhoto}
+          onRemoveSupportingPhoto={handleRemoveSupportingPhoto}
+          onLoadSamplePhoto={handleLoadSampleSurfacePhoto}
+          onAutoFitCurrentPhoto={handleAutoFitCurrentPhoto}
+          onRunAITrace={handleRunAITrace}
+          onRunAITraceAllSurfaces={handleRunAITraceAllSurfaces}
+          isTracingAI={isTracingAI}
+          traceFitMode={traceFitMode}
+          onChangeTraceFitMode={setTraceFitMode}
+          statusMessage={statusMessage}
+          joints={clusteredJoints}
+          jointSets={jointSets}
+          onUpdateJointsWithHistory={updateJointsWithHistory}
+          onUpdateJointSetAttribute={(setId, field, value) =>
+            setCustomJointSetOverrides((prev) => ({
+              ...prev,
+              [setId]: {
+                ...(prev[setId] || {}),
+                [field]: value,
+              },
+            }))
+          }
+          onMergeJointSets={(fromSetId, toSetId) => {
+            if (fromSetId === toSetId) return;
+            updateJointsWithHistory(
+              clusteredJoints.map((j) => (j.set === fromSetId ? { ...j, set: toSetId } : j))
+            );
+          }}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          canUndo={historyPast.length > 0}
+          canRedo={historyFuture.length > 0}
+          onBackToSetup={() => setScreen('drive_and_photos')}
+          onOpenExportSheet={(mode = 'FINAL_ENGINEERING_SHEET') => {
+            setExportModalInitialMode(mode);
+            setIsExportModalOpen(true);
+          }}
+          onSaveOfflineDraft={handleSaveOfflineDraft}
+          sessionMemory={sessionMemory}
+          onRecordRejectedJoint={handleRecordRejectedJoint}
+          onRecordConfirmedJoint={handleRecordConfirmedJoint}
+          onTrainAndUpdateAIModel={handleTrainAndUpdateAIModel}
+          onResetAILearningFilters={handleResetAILearningFilters}
+          qIndexParams={qIndexParams}
+          onUpdateQIndexParams={setQIndexParams}
+          qParamStatus={qParamStatus}
+          onUpdateQParamStatus={setQParamStatus}
+          selectedClassificationMethod={selectedClassificationMethod}
+          onChangeSelectedClassificationMethod={setSelectedClassificationMethod}
+          rmrParams={rmrParams}
+          onUpdateRmrParams={setRmrParams}
+          gsiParams={gsiParams}
+          onUpdateGsiParams={setGsiParams}
+          rockMassSummary={rockMassSummary}
+          onUpdateRockMassSummary={setRockMassSummary}
+          lithologyRegions={lithologyRegions}
+          onUpdateLithologyRegions={(nextRegions) => {
+            setLithologyRegions(nextRegions);
+            if (nextRegions.length > 0) {
+              const uniqueNames = Array.from(
+                new Set(nextRegions.map((r) => r.lithologyName.trim()).filter(Boolean))
+              );
+              if (uniqueNames.length > 0) {
+                const combinedName = uniqueNames.join(' / ');
+                setSettings((prev) => ({ ...prev, lithology: combinedName }));
+                setRockMassSummary((prev) => ({
+                  ...prev,
+                  rockType: combinedName,
+                  geologistRemarks:
+                    nextRegions[0].description || prev.geologistRemarks,
+                }));
+              }
+            }
+          }}
+          onUpdateStatusMessage={setStatusMessage}
+          controlPoints={controlPoints}
+          onUpdateControlPoints={setControlPoints}
+          placedSymbols={placedSymbols}
+          onUpdatePlacedSymbols={setPlacedSymbols}
+          surveyProfile={surveyProfile}
+          onUpdateSurveyProfile={setSurveyProfile}
+          overbreakAnalysis={overbreakAnalysis}
+          onGenerateSampleAsBuiltProfile={handleGenerateSampleAsBuiltProfile}
+          onOpenProjectMemoryModal={handleOpenProjectMemoryModal}
+          onOpenCustomProfileEditor={() => {
+            setCustomEditorInitialTab('freeform_canvas');
+            setReturnScreenFromCustomEditor('mapping');
+            setScreen('geometry_custom');
+          }}
+          savedProjects={savedProjects}
+          onLoadProjectRecord={handleLoadProjectRecord}
+        />
+      </div>
 
       <EngineeringSheetModal
         isOpen={isExportModalOpen}
@@ -2632,6 +2782,6 @@ export default function App() {
       />
 
       {projectMemoryModalNode}
-    </>
+    </div>
   );
 }

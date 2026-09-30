@@ -22,6 +22,10 @@
     --app-text-muted: #475569;
   }
 
+  html {
+    font-size: 14.5px;
+  }
+
   html,
   body,
   #root {
@@ -83,48 +87,100 @@ html[data-theme="light"] .cursor-crosshair {
    COMPREHENSIVE LIGHT MODE & DARK MODE ADAPTATION FOR ALL PANELS, INPUTS,
    MODALS, CANVASES, TABLES & BADGES
    ============================================================================ */
+html[data-theme="light"] .bg-\[\#030508\],
+html[data-theme="light"] .bg-\[\#04070D\],
+html[data-theme="light"] .bg-\[\#05070B\],
+html[data-theme="light"] .bg-\[\#05080E\],
 html[data-theme="light"] .bg-\[\#05080F\],
+html[data-theme="light"] .bg-\[\#050811\],
 html[data-theme="light"] .bg-\[\#06090F\],
+html[data-theme="light"] .bg-\[\#06090f\],
+html[data-theme="light"] .bg-\[\#060A12\],
 html[data-theme="light"] .bg-\[\#070A0F\],
 html[data-theme="light"] .bg-\[\#070A10\],
+html[data-theme="light"] .bg-\[\#070a10\],
+html[data-theme="light"] .bg-\[\#070A11\],
 html[data-theme="light"] .bg-\[\#070B12\],
 html[data-theme="light"] .bg-\[\#080C14\],
 html[data-theme="light"] .bg-\[\#090C12\],
 html[data-theme="light"] .bg-\[\#090D16\],
+html[data-theme="light"] .bg-\[\#090d16\],
+html[data-theme="light"] .bg-\[\#090E18\],
+html[data-theme="light"] .bg-\[\#090E1A\],
 html[data-theme="light"] .bg-\[\#0A0D13\],
 html[data-theme="light"] .bg-\[\#0A0E17\],
+html[data-theme="light"] .bg-\[\#0a0e17\]\/95,
+html[data-theme="light"] .bg-\[\#0A0F18\],
 html[data-theme="light"] .bg-\[\#0B0E14\],
 html[data-theme="light"] .bg-\[\#0B0F17\],
+html[data-theme="light"] .bg-\[\#0B0F17\]\/95,
+html[data-theme="light"] .bg-\[\#0B101A\],
+html[data-theme="light"] .bg-\[\#0B101B\],
+html[data-theme="light"] .bg-\[\#0B101C\],
+html[data-theme="light"] .bg-\[\#0b101b\]\/95,
 html[data-theme="light"] .bg-\[\#0B1120\] {
   background-color: #F1F5F9 !important;
   color: #0F172A !important;
 }
 
 html[data-theme="light"] .bg-\[\#0C1018\],
+html[data-theme="light"] .bg-\[\#0C111C\],
+html[data-theme="light"] .bg-\[\#0C111D\],
+html[data-theme="light"] .bg-\[\#0C121D\],
 html[data-theme="light"] .bg-\[\#0C121E\],
+html[data-theme="light"] .bg-\[\#0D121C\],
 html[data-theme="light"] .bg-\[\#0D131F\],
+html[data-theme="light"] .bg-\[\#0D131F\]\/90,
+html[data-theme="light"] .bg-\[\#0D131F\]\/80,
 html[data-theme="light"] .bg-\[\#0D1320\],
+html[data-theme="light"] .bg-\[\#0d1320\],
+html[data-theme="light"] .bg-\[\#0D1422\],
 html[data-theme="light"] .bg-\[\#0E131D\],
 html[data-theme="light"] .bg-\[\#0E141F\],
 html[data-theme="light"] .bg-\[\#0E1420\],
+html[data-theme="light"] .bg-\[\#0E1420\]\/92,
+html[data-theme="light"] .bg-\[\#0e1422\],
 html[data-theme="light"] .bg-\[\#0E1524\],
+html[data-theme="light"] .bg-\[\#0E1628\],
+html[data-theme="light"] .bg-\[\#0E1628\]\/98,
 html[data-theme="light"] .bg-\[\#0F141C\],
 html[data-theme="light"] .bg-\[\#0F172A\],
+html[data-theme="light"] .bg-\[\#101520\],
 html[data-theme="light"] .bg-\[\#101622\],
 html[data-theme="light"] .bg-\[\#101726\],
 html[data-theme="light"] .bg-\[\#111621\],
 html[data-theme="light"] .bg-\[\#111722\],
+html[data-theme="light"] .bg-\[\#111724\],
 html[data-theme="light"] .bg-\[\#111726\],
 html[data-theme="light"] .bg-\[\#111826\],
+html[data-theme="light"] .bg-\[\#11192B\],
+html[data-theme="light"] .bg-\[\#111C33\],
 html[data-theme="light"] .bg-\[\#121824\],
 html[data-theme="light"] .bg-\[\#121926\],
 html[data-theme="light"] .bg-\[\#131924\],
 html[data-theme="light"] .bg-\[\#131A28\],
+html[data-theme="light"] .bg-\[\#131B29\],
+html[data-theme="light"] .bg-\[\#131C2E\],
+html[data-theme="light"] .bg-\[\#131C30\],
 html[data-theme="light"] .bg-\[\#141B29\],
 html[data-theme="light"] .bg-\[\#141C2B\],
+html[data-theme="light"] .bg-\[\#141D2F\],
+html[data-theme="light"] .bg-\[\#141E32\],
+html[data-theme="light"] .bg-\[\#141E33\],
 html[data-theme="light"] .bg-\[\#151C28\],
+html[data-theme="light"] .bg-\[\#152036\],
+html[data-theme="light"] .bg-\[\#161B24\],
+html[data-theme="light"] .bg-\[\#161E2E\],
 html[data-theme="light"] .bg-\[\#161F30\],
-html[data-theme="light"] .bg-\[\#182030\] {
+html[data-theme="light"] .bg-\[\#162238\],
+html[data-theme="light"] .bg-\[\#182030\],
+html[data-theme="light"] .bg-\[\#182132\],
+html[data-theme="light"] .bg-\[\#182234\],
+html[data-theme="light"] .bg-\[\#19253D\],
+html[data-theme="light"] .bg-\[\#1A253A\],
+html[data-theme="light"] .bg-\[\#1B2538\],
+html[data-theme="light"] .bg-\[\#1B2845\],
+html[data-theme="light"] .bg-\[\#1E2F4D\] {
   background-color: #FFFFFF !important;
   color: #0F172A !important;
 }
@@ -196,8 +252,10 @@ html[data-theme="light"] .bg-slate-700\/50 {
   color: #0F172A !important;
 }
 
-html[data-theme="light"] .bg-gradient-to-r,
-html[data-theme="light"] .bg-gradient-to-br {
+html[data-theme="light"] .from-slate-950,
+html[data-theme="light"] .from-slate-900,
+html[data-theme="light"] .from-indigo-950\/60,
+html[data-theme="light"] .from-cyan-950\/40 {
   background-image: linear-gradient(to right, #E0F2FE, #F8FAFC, #ECFDF5) !important;
   color: #0F172A !important;
 }
@@ -451,11 +509,42 @@ html[data-theme="light"] .bg-rose-600 *,
 html[data-theme="light"] .bg-rose-500,
 html[data-theme="light"] .bg-rose-500 *,
 html[data-theme="light"] .bg-purple-600,
-html[data-theme="light"] .bg-purple-600 * {
+html[data-theme="light"] .bg-purple-600 *,
+html[data-theme="light"] .from-purple-600,
+html[data-theme="light"] .from-purple-600 *,
+html[data-theme="light"] .from-cyan-600,
+html[data-theme="light"] .from-cyan-600 *,
+html[data-theme="light"] .from-emerald-600,
+html[data-theme="light"] .from-emerald-600 *,
+html[data-theme="light"] .from-amber-600,
+html[data-theme="light"] .from-amber-600 * {
   color: #FFFFFF !important;
 }
 
 /* Borders & Table Dividers in Light Mode */
+html[data-theme="light"] .border-\[\#1E293B\],
+html[data-theme="light"] .border-\[\#1E2A3F\],
+html[data-theme="light"] .border-\[\#1E2B45\],
+html[data-theme="light"] .border-\[\#222C40\],
+html[data-theme="light"] .border-\[\#222E46\],
+html[data-theme="light"] .border-\[\#22304A\],
+html[data-theme="light"] .border-\[\#243047\],
+html[data-theme="light"] .border-\[\#24324C\],
+html[data-theme="light"] .border-\[\#243656\],
+html[data-theme="light"] .border-\[\#252F45\],
+html[data-theme="light"] .border-\[\#25324A\],
+html[data-theme="light"] .border-\[\#263147\],
+html[data-theme="light"] .border-\[\#263552\],
+html[data-theme="light"] .border-\[\#28354E\],
+html[data-theme="light"] .border-\[\#283959\],
+html[data-theme="light"] .border-\[\#293856\],
+html[data-theme="light"] .border-\[\#2A3956\],
+html[data-theme="light"] .border-\[\#2A3F66\],
+html[data-theme="light"] .border-\[\#2B3854\],
+html[data-theme="light"] .border-\[\#2C3A55\],
+html[data-theme="light"] .border-\[\#2C3C5B\],
+html[data-theme="light"] .border-\[\#2D3E5E\],
+html[data-theme="light"] .border-\[\#2E4268\],
 html[data-theme="light"] .border-slate-800,
 html[data-theme="light"] .border-slate-800\/90,
 html[data-theme="light"] .border-slate-800\/80,

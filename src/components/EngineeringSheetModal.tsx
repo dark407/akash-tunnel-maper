@@ -48,6 +48,7 @@ import {
 } from '../engine/geologicalSymbolLibrary';
 import {
   computeFinalSheetAutoLayout,
+  saveSheetConfigToStorage,
   SheetLayoutArrangement,
   wrapSheetTextLines,
 } from '../engine/sheetLayoutEngine';
@@ -66,6 +67,8 @@ import {
   FileCode,
   Image as ImageIcon,
   Maximize2,
+  PanelLeft,
+  PanelRight,
   Printer,
   Sliders,
   X,
@@ -145,6 +148,30 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     propOnUpdateSettings || setLocalSettings;
 
   const [isSettingsDrawerOpen, setIsSettingsDrawerOpen] = useState<boolean>(false);
+  const [drawerDockSide, setDrawerDockSide] = useState<'left' | 'right'>('left');
+  const [drawerWidthPx, setDrawerWidthPx] = useState<number>(420);
+  const [resizingDrawer, setResizingDrawer] = useState<{
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!resizingDrawer) return;
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - resizingDrawer.startX;
+      const delta = drawerDockSide === 'left' ? dx : -dx;
+      setDrawerWidthPx(
+        Math.max(300, Math.min(700, Math.round(resizingDrawer.startWidth + delta)))
+      );
+    };
+    const onUp = () => setResizingDrawer(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizingDrawer, drawerDockSide]);
   const [outputMode, setOutputMode] = useState<OutputSheetMode>(initialOutputMode);
   const [overlayOverbreakOnGeology, setOverlayOverbreakOnGeology] = useState<boolean>(false);
   const [overlayJointsOnQuantity, setOverlayJointsOnQuantity] = useState<boolean>(false);
@@ -299,8 +326,8 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
         height: Math.round(sheetH * pct),
       };
     }
-    const padX = responsive.isCompactScreen ? 12 : 20;
-    const padY = responsive.isCompactScreen ? 10 : 16;
+    const padX = responsive.isCompactScreen ? 6 : 12;
+    const padY = responsive.isCompactScreen ? 6 : 10;
     const availW = Math.max(320, previewBounds.width - padX);
     const availH = Math.max(240, previewBounds.height - padY);
     const fitScale = Math.min(availW / sheetW, availH / sheetH);
@@ -922,24 +949,73 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
       {/* Main Engineering Sheet Preview Stage + Optional Live Settings & Chainage Storage Drawer */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {isSettingsDrawerOpen && (
-          <aside className="no-print w-[410px] max-w-[46vw] bg-[#111621] border-r border-slate-800 flex flex-col h-full shrink-0 z-20 shadow-2xl">
-            <div className="flex items-center justify-between px-3.5 py-2.5 bg-[#0D121B] border-b border-slate-800">
-              <div>
-                <div className="font-display font-bold text-xs text-emerald-300 tracking-wide">
+          <aside
+            style={{ width: `${drawerWidthPx}px` }}
+            className={`no-print relative max-w-[54vw] bg-[#111621] ${
+              drawerDockSide === 'left' ? 'order-first border-r' : 'order-last border-l'
+            } border-slate-800 flex flex-col h-full shrink-0 z-20 shadow-2xl transition-[width] duration-75`}
+          >
+            {/* Interactive Drag-to-Resize Handle (Extend Left or Right) */}
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setResizingDrawer({ startX: e.clientX, startWidth: drawerWidthPx });
+              }}
+              title="Drag Left or Right to Extend / Resize Settings Drawer"
+              className={`flex items-center justify-center absolute top-0 bottom-0 w-2.5 cursor-col-resize z-30 group ${
+                drawerDockSide === 'left' ? '-right-1.5' : '-left-1.5'
+              }`}
+            >
+              <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-emerald-400 transition-colors" />
+            </div>
+
+            <div className="flex items-center justify-between px-3 py-2.5 bg-[#0D121B] border-b border-slate-800 gap-1">
+              <div className="min-w-0">
+                <div className="font-display font-bold text-xs text-emerald-300 tracking-wide truncate">
                   SHEET SETTINGS, LOGOS &amp; CHAINAGE STORAGE
                 </div>
-                <div className="text-[10px] text-slate-400 font-mono">
+                <div className="text-[10px] text-slate-400 font-mono truncate">
                   Live-edit project details, logos, placement &amp; face records
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsSettingsDrawerOpen(false)}
-                className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
-                title="Close Settings Drawer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setDrawerDockSide((s) => (s === 'left' ? 'right' : 'left'))}
+                  className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-[10px] font-mono flex items-center gap-0.5 cursor-pointer"
+                  title="Move Drawer to Left or Right Side"
+                >
+                  {drawerDockSide === 'left' ? (
+                    <PanelRight className="w-3 h-3" />
+                  ) : (
+                    <PanelLeft className="w-3 h-3" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawerWidthPx((w) => Math.max(300, w - 50))}
+                  className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono cursor-pointer"
+                  title="Narrow Drawer"
+                >
+                  −W
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawerWidthPx((w) => Math.min(700, w + 50))}
+                  className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 text-[10px] font-mono cursor-pointer"
+                  title="Extend Drawer Width"
+                >
+                  +W
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsSettingsDrawerOpen(false)}
+                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+                  title="Close Settings Drawer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
               <SheetSettingsAndStorageEditor
@@ -2502,7 +2578,10 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                       const maxOb = overbreakAnalysis?.maxRadialOverbreakMeters ?? 0;
                       const avgOb = overbreakAnalysis?.avgRadialOverbreakMeters ?? 0;
                       const maxUc = overbreakAnalysis?.maxRadialUndercutMeters ?? 0;
-                      const desPerim = overbreakAnalysis?.designPerimeterMeters ?? geometry.totalPerimeter;
+                      const desPerim =
+                        overbreakAnalysis?.designPerimeterMeters ??
+                        geometry.totalPerimeterMeters ??
+                        25.4;
                       const survPerim = overbreakAnalysis?.surveyedPerimeterMeters ?? desPerim;
                       const designR = stereoR * 0.76;
 

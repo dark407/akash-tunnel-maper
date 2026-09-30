@@ -15,19 +15,19 @@ import {
 
 export type SheetLayoutArrangement = 'AUTO_INTELLIGENT' | 'MAXIMIZE_FACE';
 
-const SHEET_CONFIG_STORAGE_KEY = 'akash_tunnel_engineering_sheet_config_v1';
+const SHEET_CONFIG_STORAGE_KEY = 'akash_tunnel_engineering_sheet_config_v2_fresh';
 
 export function createDefaultEngineeringSheetConfig(
   settings?: Partial<TunnelSettings>
 ): EngineeringSheetConfig {
   return {
-    projectName: settings?.projectName || 'Underground Hydroelectric & Tunneling Project',
-    location: settings?.locationName || settings?.location || 'Main Underground Heading',
-    clientName: 'Project Employer / Authority',
-    contractorName: 'Main Civil Works Contractor',
-    consultantName: 'Design & Geological Supervision Consultant',
-    contractNumber: 'PKG-01 / TUN-CW',
-    drawingNumber: 'DWG-TUN-SH-001',
+    projectName: settings?.projectName || '',
+    location: settings?.locationName || settings?.location || '',
+    clientName: '',
+    contractorName: '',
+    consultantName: '',
+    contractNumber: '',
+    drawingNumber: '',
     revisionNumber: 'Rev 0',
     geologySheetTitle: 'ENGINEERING GEOLOGICAL TUNNEL MAPPING SHEET',
     quantitySheetTitle: 'ENGINEERING OVERBREAK, UNDERCUT & EXCAVATION QUANTITY SHEET',
@@ -327,30 +327,30 @@ export function computeFinalSheetAutoLayout(params: {
 
   const isFixedLayout = effectiveSheetConfig.layoutMode === 'FIXED_LAYOUT';
 
-  // Base adaptive font scale based on content load (or fixed 1.0 baseline when Fixed Layout is selected)
+  // Base adaptive font scale (1pt sleeker baseline so tables/text are crisp and drawing arena gets maximum space)
   let baseFontScale = isFixedLayout
-    ? 1.0
+    ? 0.94
     : ultraDenseMode
-    ? 0.82
+    ? 0.78
     : activeRowCount > 7
-    ? 0.87
+    ? 0.83
     : compactMode
-    ? 0.93
+    ? 0.89
     : isSparseContent
-    ? 1.12
-    : 1.03;
+    ? 1.04
+    : 0.96;
 
   if (!isFixedLayout) {
     if (effectiveSheetConfig.adaptiveScaleMode === 'SPACIOUS_LARGE') {
-      baseFontScale = Math.min(1.26, baseFontScale * 1.12);
+      baseFontScale = Math.min(1.18, baseFontScale * 1.1);
     } else if (effectiveSheetConfig.adaptiveScaleMode === 'COMPACT_DENSE') {
-      baseFontScale = Math.max(0.8, baseFontScale * 0.9);
+      baseFontScale = Math.max(0.76, baseFontScale * 0.9);
     }
   }
 
-  const userMult = Math.max(0.8, Math.min(1.35, effectiveSheetConfig.fontScaleMultiplier || 1.0));
-  const fontScale = Number(Math.max(0.8, Math.min(1.32, baseFontScale * userMult)).toFixed(3));
-  const sparseContentBoost = isFixedLayout ? 1.0 : isSparseContent ? 1.14 : compactMode ? 0.94 : 1.02;
+  const userMult = Math.max(0.75, Math.min(1.35, effectiveSheetConfig.fontScaleMultiplier || 1.0));
+  const fontScale = Number(Math.max(0.75, Math.min(1.26, baseFontScale * userMult)).toFixed(3));
+  const sparseContentBoost = isFixedLayout ? 0.96 : isSparseContent ? 1.08 : compactMode ? 0.92 : 0.98;
 
   // Header Block (Priority 6: Project Information - Supports TOP or BOTTOM placement)
   const hasLogosInHeader =
@@ -364,12 +364,12 @@ export function computeFinalSheetAutoLayout(params: {
 
   const headerH = showTitleAndTables
     ? hasLogosInHeader
-      ? 78
+      ? 72
       : ultraDenseMode
-      ? 66
+      ? 62
       : compactMode
-      ? 70
-      : 76
+      ? 66
+      : 70
     : 0;
 
   const isHeaderBottom = effectiveSheetConfig.headerPosition === 'BOTTOM';
@@ -382,26 +382,26 @@ export function computeFinalSheetAutoLayout(params: {
 
   const contentTopY = showTitleAndTables
     ? isHeaderBottom
-      ? margin + 8
-      : headerBox.y + headerBox.height + 6
-    : margin + 8;
+      ? margin + 6
+      : headerBox.y + headerBox.height + 5
+    : margin + 6;
   const contentBottomY = showTitleAndTables
     ? isHeaderBottom
-      ? headerBox.y - 6
-      : sheetH - margin - 6
-    : sheetH - margin - 8;
+      ? headerBox.y - 5
+      : sheetH - margin - 5
+    : sheetH - margin - 6;
   const availHeight = Math.max(600, contentBottomY - contentTopY);
 
   // Engineering Column Width & Position (Supports RIGHT or LEFT, and BALANCED / WIDE_TABLES / MAX_DRAWING)
-  // Core Rule: Keep main geological drawing arena strictly protected and non-overlapping.
+  // Core Rule: Keep main geological drawing arena strictly protected and maximize canvas utilization.
   const baseRightColW =
     effectiveSheetConfig.columnWidthMode === 'WIDE_TABLES'
-      ? 610
+      ? 580
       : effectiveSheetConfig.columnWidthMode === 'MAX_DRAWING'
-      ? 508
+      ? 480
       : compactMode
-      ? 556
-      : 568;
+      ? 524
+      : 536;
 
   const rightColW = showTitleAndTables ? baseRightColW : 0;
   const isColumnOnLeft = effectiveSheetConfig.engineeringColumnPosition === 'LEFT';
@@ -420,19 +420,19 @@ export function computeFinalSheetAutoLayout(params: {
   // Main Drawing Arena (Priorities 1 & 2 - Strictly separated from Engineering Column)
   const arenaLeftX = showTitleAndTables
     ? isColumnOnLeft
-      ? rightColX + rightColW + 8
+      ? rightColX + rightColW + 6
       : margin + 4
     : margin + 4;
   const arenaRightX = showTitleAndTables
     ? isColumnOnLeft
       ? sheetW - margin - 4
-      : rightColX - 8
+      : rightColX - 6
     : sheetW - margin - 4;
 
   const drawingArenaBox: SheetRect = {
     x: arenaLeftX,
     y: contentTopY,
-    width: Math.max(480, arenaRightX - arenaLeftX),
+    width: Math.max(520, arenaRightX - arenaLeftX),
     height: availHeight,
   };
 
@@ -456,14 +456,14 @@ export function computeFinalSheetAutoLayout(params: {
   // Minimize empty white space around the Tunnel Face while reserving safe room for dimension lines & callout labels
   const calloutCount = joints.length + placedSymbolCount + controlPointCount;
   const hasDenseCallouts = calloutCount > 10;
-  const arenaPadW = hasDenseCallouts ? 88 : calloutCount > 4 ? 76 : 64;
+  const arenaPadW = hasDenseCallouts ? 68 : calloutCount > 4 ? 56 : 46;
   const arenaPadH = showPerimeterPlan
     ? hasDenseCallouts
-      ? 98
-      : 86
+      ? 78
+      : 66
     : hasDenseCallouts
-    ? 76
-    : 64;
+    ? 58
+    : 48;
 
   // UNIFIED TRUE ENGINEERING SCALE: Maximizes utilization of drawingArenaBox
   const totalHorizontalMeters = showPerimeterPlan

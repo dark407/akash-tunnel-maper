@@ -61,14 +61,14 @@ export const StereonetAndSupportPanel: React.FC<StereonetAndSupportPanelProps> =
   // Build stereonet planes from active joint sets (or individual joints if no sets yet)
   const stereonetPlanes = useMemo(() => {
     const activeSets = jointSets.filter((js) => {
-      const count = joints.filter((j) => j.jointSetId === js.id).length;
+      const count = joints.filter((j) => j.set === js.id).length;
       return count > 0 || js.id === 'J1' || js.id === 'J2' || js.id === 'J3';
     });
 
     return activeSets.map((js) =>
       computeStereonetPlaneProjection(
         js.id,
-        `${js.id} (${js.avgDip}°/${js.avgDipDirection.toString().padStart(3, '0')}°)`,
+        `${js.id} (${js.avgDip ?? 60}°/${(js.avgDipDirection ?? 130).toString().padStart(3, '0')}°)`,
         js.color || '#38BDF8',
         js.avgDip || 60,
         js.avgDipDirection || 130,

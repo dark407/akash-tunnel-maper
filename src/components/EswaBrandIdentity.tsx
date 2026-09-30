@@ -3,7 +3,7 @@ import { useTheme } from '../context/ThemeContext';
 
 export interface EswaTunnelLogoProps {
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl' | '2xl' | 'splash';
-  variant?: 'emblem' | 'lockup' | 'splash';
+  variant?: 'emblem' | 'lockup' | 'inline' | 'splash';
   animated?: boolean;
   showBadge?: boolean;
   className?: string;
@@ -288,23 +288,38 @@ export const EswaTunnelLogo: React.FC<EswaTunnelLogoProps> = ({
     return emblemNode;
   }
 
+  if (variant === 'inline') {
+    return (
+      <div className="inline-flex items-center gap-2.5 select-none">
+        {emblemNode}
+        <span
+          className={`font-display text-sm font-bold tracking-wider whitespace-nowrap ${
+            isLight ? 'text-slate-900' : 'text-slate-100'
+          }`}
+        >
+          ESWA Tunnel Mapper
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col items-center text-center select-none">
       {emblemNode}
-      <div className="mt-4 space-y-0.5">
+      <div className="mt-4 space-y-1">
         <div
-          className={`font-display text-3xl sm:text-4xl font-extrabold tracking-[0.18em] ${
+          className={`font-display text-3xl sm:text-4xl font-bold tracking-[0.16em] ${
             isLight ? 'text-slate-900' : 'text-white'
           }`}
         >
           ESWA
         </div>
         <div
-          className={`font-display text-xs sm:text-sm font-bold tracking-[0.26em] uppercase ${
+          className={`font-display text-xs sm:text-sm font-semibold tracking-[0.22em] ${
             isLight ? 'text-sky-700' : 'text-cyan-300'
           }`}
         >
-          TUNNEL MAPPER
+          Tunnel Mapper · 3D Geotechnical CAD
         </div>
       </div>
     </div>
@@ -317,7 +332,7 @@ interface EswaLoadingScreenProps {
 
 /**
  * Centered High-Resolution 'ESWA' Brand Splash Screen Displayed During Application Boot
- * Fully supports Dark Mode and Light Mode.
+ * Fully supports Dark Mode and Light Mode with an embedded architectural CAD grid backdrop.
  */
 export const EswaLoadingScreen: React.FC<EswaLoadingScreenProps> = ({ onComplete }) => {
   const { theme } = useTheme();
@@ -327,11 +342,11 @@ export const EswaLoadingScreen: React.FC<EswaLoadingScreenProps> = ({ onComplete
   useEffect(() => {
     const interval = window.setInterval(() => {
       setProgress((prev) => Math.min(100, prev + 25));
-    }, 150);
+    }, 140);
 
     const timer = window.setTimeout(() => {
       onComplete();
-    }, 850);
+    }, 800);
 
     return () => {
       window.clearInterval(interval);
@@ -341,34 +356,64 @@ export const EswaLoadingScreen: React.FC<EswaLoadingScreenProps> = ({ onComplete
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex flex-col items-center justify-center px-4 select-none transition-colors ${
+      className={`fixed inset-0 z-50 flex flex-col items-center justify-center px-4 select-none transition-colors overflow-hidden ${
         isLight
-          ? 'bg-slate-100/95 text-slate-900'
-          : 'bg-[#0B0E14]/95 text-slate-100'
+          ? 'bg-slate-50/95 text-slate-900'
+          : 'bg-[#080C14]/95 text-slate-100'
       } backdrop-blur-md`}
       onClick={onComplete}
       role="dialog"
       aria-label="ESWA Brand Boot Splash Screen"
     >
+      {/* Subtle Architectural CAD Grid Backdrop */}
+      <svg
+        className="absolute inset-0 w-full h-full pointer-events-none opacity-35"
+        aria-hidden="true"
+      >
+        <defs>
+          <pattern
+            id="eswaBootGrid"
+            width="48"
+            height="48"
+            patternUnits="userSpaceOnUse"
+          >
+            <path
+              d="M 48 0 L 0 0 0 48"
+              fill="none"
+              stroke={isLight ? '#CBD5E1' : '#1E293B'}
+              strokeWidth="0.75"
+            />
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#eswaBootGrid)" />
+      </svg>
+
       <div
-        className={`relative z-10 w-full max-w-sm flex flex-col items-center text-center space-y-5 p-7 rounded-2xl border shadow-2xl ${
+        className={`relative z-10 w-full max-w-md flex flex-col items-center text-center space-y-6 p-8 rounded-2xl border shadow-2xl ${
           isLight
-            ? 'bg-white border-slate-300 shadow-slate-300/60'
-            : 'bg-[#111621] border-slate-800 shadow-black/70'
+            ? 'bg-white/95 border-slate-200 shadow-slate-300/60'
+            : 'bg-[#0F1624]/95 border-slate-800 shadow-black/70'
         }`}
       >
         <EswaTunnelLogo size="2xl" variant="lockup" animated showBadge />
 
-        <div className="w-full pt-1">
+        <div className="w-full space-y-2 pt-1">
           <div
-            className={`w-full h-2 rounded-full overflow-hidden border ${
-              isLight ? 'bg-slate-200 border-slate-300' : 'bg-slate-900 border-slate-800'
+            className={`w-full h-1.5 rounded-full overflow-hidden ${
+              isLight ? 'bg-slate-200' : 'bg-slate-800'
             }`}
           >
             <div
-              className="h-full bg-gradient-to-r from-cyan-500 via-sky-500 to-emerald-500 transition-all duration-150"
+              className="h-full bg-gradient-to-r from-sky-500 via-cyan-500 to-emerald-500 transition-all duration-150"
               style={{ width: `${progress}%` }}
             />
+          </div>
+          <div
+            className={`text-xs font-mono tabular-nums ${
+              isLight ? 'text-slate-500' : 'text-slate-400'
+            }`}
+          >
+            Initializing Photogrammetry &amp; 3D Strip CAD Engine · {progress}%
           </div>
         </div>
       </div>

@@ -7,8 +7,8 @@ import {
   TunnelGeometry,
 } from '../types/tunnel';
 
-const SAVED_GEOMETRIES_STORAGE_KEY = 'akash_tunnel_saved_geometries_v1';
-const PROJECT_MEMORY_STORAGE_KEY = 'akash_tunnel_project_memory_v1';
+const SAVED_GEOMETRIES_STORAGE_KEY = 'akash_tunnel_saved_geometries_v2_fresh';
+const PROJECT_MEMORY_STORAGE_KEY = 'akash_tunnel_project_memory_v2_fresh';
 
 export interface ProjectLocationChainageGroup {
   groupKey: string;

@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ConnectedSurveyProfile,
   MappingWorkspaceMode,
@@ -39,6 +39,8 @@ import {
   Layers,
   Link2,
   Lock,
+  PanelLeft,
+  PanelRight,
   Plus,
   Save,
   Search,
@@ -91,6 +93,30 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
   const [importText, setImportText] = useState<string>(
     'CP1, -4.20, 0.00\nCP2, -4.35, 2.20\nCP3, -4.28, 4.25\nCP4, -3.15, 6.18\nCP5, 0.00, 7.62\nCP6, 3.28, 6.24\nCP7, 4.42, 4.20\nCP8, 4.02, 2.10\nCP9, 4.20, 0.00'
   );
+  const [dockSide, setDockSide] = useState<'left' | 'right'>('right');
+  const [panelWidthPx, setPanelWidthPx] = useState<number>(384);
+  const [resizingState, setResizingState] = useState<{
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!resizingState) return;
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - resizingState.startX;
+      const delta = dockSide === 'right' ? -dx : dx;
+      setPanelWidthPx(
+        Math.max(280, Math.min(660, Math.round(resizingState.startWidth + delta)))
+      );
+    };
+    const onUp = () => setResizingState(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizingState, dockSide]);
 
   const surfaceCPs = useMemo(
     () => controlPoints.filter((c) => c.surface === activeSurface),
@@ -252,21 +278,64 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
   };
 
   return (
-    <aside className="w-96 bg-[#111621] border-l border-slate-800 flex flex-col h-full text-xs font-mono shrink-0 z-20">
+    <aside
+      style={{ width: `${panelWidthPx}px` }}
+      className={`relative max-w-[52vw] bg-[#111621] ${
+        dockSide === 'left' ? 'order-first border-r' : 'order-last border-l'
+      } border-slate-800 flex flex-col h-full text-xs font-mono shrink-0 z-20 transition-[width] duration-75`}
+    >
+      {/* Interactive Drag-to-Resize Handle (Extend Left or Right) */}
+      <div
+        onMouseDown={(e) => {
+          e.preventDefault();
+          setResizingState({ startX: e.clientX, startWidth: panelWidthPx });
+        }}
+        title="Drag Left or Right to Extend / Resize Panel"
+        className={`flex items-center justify-center absolute top-0 bottom-0 w-2.5 cursor-col-resize z-30 group ${
+          dockSide === 'left' ? '-right-1.5' : '-left-1.5'
+        }`}
+      >
+        <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-rose-400 transition-colors" />
+      </div>
+
       {/* Header */}
-      <div className="flex items-center justify-between px-3.5 py-2.5 bg-[#0D121B] border-b border-slate-800">
-        <div className="flex items-center gap-2">
-          <Layers className="w-4 h-4 text-rose-400" />
-          <div>
-            <div className="font-display font-bold text-slate-100 text-xs tracking-wide">
+      <div className="flex items-center justify-between px-3 py-2.5 bg-[#0D121B] border-b border-slate-800 gap-1">
+        <div className="flex items-center gap-2 min-w-0">
+          <Layers className="w-4 h-4 text-rose-400 shrink-0" />
+          <div className="truncate">
+            <div className="font-display font-bold text-slate-100 text-xs tracking-wide truncate">
               OVERBREAK &amp; UNDERCUT ANALYSIS
             </div>
-            <div className="text-[10px] text-slate-400">
+            <div className="text-[10px] text-slate-400 truncate">
               Design ({geometry.width.toFixed(2)}m × {geometry.height.toFixed(2)}m) vs Surveyed As-Built
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => setDockSide((s) => (s === 'right' ? 'left' : 'right'))}
+            className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-[10px] flex items-center gap-0.5 cursor-pointer"
+            title="Move Panel to Left or Right Side"
+          >
+            {dockSide === 'right' ? <PanelLeft className="w-3 h-3" /> : <PanelRight className="w-3 h-3" />}
+          </button>
+          <button
+            type="button"
+            onClick={() => setPanelWidthPx((w) => Math.max(280, w - 45))}
+            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] cursor-pointer"
+            title="Narrow Panel"
+          >
+            −W
+          </button>
+          <button
+            type="button"
+            onClick={() => setPanelWidthPx((w) => Math.min(660, w + 45))}
+            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[10px] cursor-pointer"
+            title="Extend Panel Width"
+          >
+            +W
+          </button>
           <button
             type="button"
             onClick={() =>

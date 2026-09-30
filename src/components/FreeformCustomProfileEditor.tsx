@@ -21,13 +21,20 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  Columns,
   CornerUpRight,
   Crosshair,
+  GripVertical,
   Maximize2,
+  Minimize2,
   MousePointer,
+  PanelLeft,
+  PanelRight,
   Plus,
   Redo2,
   RotateCcw,
+  Sliders,
+  Sparkles,
   Trash2,
   Undo2,
   Upload,
@@ -44,6 +51,308 @@ export type ProfileEditorMainTab =
   | 'chainage_schedule';
 
 type GraphToolMode = 'select' | 'draw_line' | 'draw_arc' | 'round_corner';
+
+export type BasicRegularTunnelShapeId =
+  | 'd_shaped'
+  | 'horseshoe'
+  | 'circular'
+  | 'rectangular'
+  | 'flat_arch'
+  | 'trapezoidal'
+  | 'stepped_cavern';
+
+/**
+ * Build an exact, clean CustomTunnelProfileDefinition from Basic Regular Shape parameters
+ * (Width, Height, Wall Height, Crown Radius, Corner Fillet Radius, Top Width, Invert Drop)
+ */
+function buildBasicRegularShapeProfile(params: {
+  shapeId: BasicRegularTunnelShapeId;
+  width: number;
+  height: number;
+  wallHeight: number;
+  crownRadius: number;
+  cornerRadius: number;
+  topWidth: number;
+  invertDrop: number;
+}): CustomTunnelProfileDefinition {
+  const w = Math.max(1.0, Number(params.width.toFixed(3)));
+  const h = Math.max(1.0, Number(params.height.toFixed(3)));
+  const halfW = Number((w / 2).toFixed(3));
+  const wh = Math.max(0.4, Math.min(h - 0.3, Number(params.wallHeight.toFixed(3))));
+  const cornerR = Math.max(0, Math.min(w * 0.4, h * 0.4, Number(params.cornerRadius.toFixed(3))));
+  const invDrop = Math.max(0, Math.min(h * 0.3, Number(params.invertDrop.toFixed(3))));
+
+  if (params.shapeId === 'circular') {
+    // Full Circle / Elliptical TBM profile using 4 cardinal points with exact semicircular/elliptical arcs
+    const rX = halfW;
+    const rY = Number((h / 2).toFixed(3));
+    const cy = rY;
+    const pts: ProfileControlPoint[] = [
+      { id: 'P1', label: 'P1', x: 0, y: 0, role: 'smooth_tangent' },
+      { id: 'P2', label: 'P2', x: -rX, y: cy, role: 'smooth_tangent' },
+      { id: 'P3', label: 'P3', x: 0, y: h, role: 'crown_apex' },
+      { id: 'P4', label: 'P4', x: rX, y: cy, role: 'smooth_tangent' },
+    ];
+    // For a 90-degree quarter-circle arc, bulge = tan(90° / 4) = tan(22.5°) = 0.4142
+    const quarterBulge = Number((0.4142 * (rY / Math.max(0.5, rX))).toFixed(4));
+    const segs: ProfileSegment[] = [
+      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
+      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
+      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
+      { id: 'S4', fromPointId: 'P4', toPointId: 'P1', type: 'arc', arcBulge: quarterBulge, arcRadiusMeters: rX },
+    ];
+    return {
+      id: `prof-circular-${Date.now()}`,
+      name: Math.abs(w - h) < 0.05 ? `Circular TBM (Ø${w.toFixed(2)}m)` : `Elliptical (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
+      category: 'freeform',
+      controlPoints: pts,
+      segments: segs,
+      isClosed: true,
+      version: 'v1.0',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (params.shapeId === 'rectangular') {
+    // Rectangular / Box Tunnel with optional rounded corner fillet radius
+    if (cornerR <= 0.05) {
+      const pts: ProfileControlPoint[] = [
+        { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
+        { id: 'P2', label: 'P2', x: -halfW, y: h, role: 'left_wall_top' },
+        { id: 'P3', label: 'P3', x: halfW, y: h, role: 'right_wall_top' },
+        { id: 'P4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
+      ];
+      const segs: ProfileSegment[] = [
+        { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
+        { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'line' },
+        { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
+        { id: 'S4', fromPointId: 'P4', toPointId: 'P1', type: 'line' },
+      ];
+      return {
+        id: `prof-rect-${Date.now()}`,
+        name: `Rectangular Box (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
+        category: 'freeform',
+        controlPoints: pts,
+        segments: segs,
+        isClosed: true,
+        version: 'v1.0',
+        updatedAt: new Date().toISOString(),
+      };
+    } else {
+      const r = Math.min(cornerR, halfW - 0.2, h / 2 - 0.2);
+      const b90 = 0.4142;
+      const pts: ProfileControlPoint[] = [
+        { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
+        { id: 'P2', label: 'P2', x: -halfW, y: Number((h - r).toFixed(3)), role: 'left_wall_top' },
+        { id: 'P3', label: 'P3', x: Number((-halfW + r).toFixed(3)), y: h, role: 'smooth_tangent' },
+        { id: 'P4', label: 'P4', x: Number((halfW - r).toFixed(3)), y: h, role: 'smooth_tangent' },
+        { id: 'P5', label: 'P5', x: halfW, y: Number((h - r).toFixed(3)), role: 'right_wall_top' },
+        { id: 'P6', label: 'P6', x: halfW, y: 0, role: 'right_invert' },
+      ];
+      const segs: ProfileSegment[] = [
+        { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
+        { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: b90, arcRadiusMeters: r },
+        { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
+        { id: 'S4', fromPointId: 'P4', toPointId: 'P5', type: 'arc', arcBulge: b90, arcRadiusMeters: r },
+        { id: 'S5', fromPointId: 'P5', toPointId: 'P6', type: 'line' },
+        { id: 'S6', fromPointId: 'P6', toPointId: 'P1', type: 'line' },
+      ];
+      return {
+        id: `prof-rect-fillet-${Date.now()}`,
+        name: `Rounded Box (${w.toFixed(2)}m × ${h.toFixed(2)}m, R=${r.toFixed(2)}m)`,
+        category: 'freeform',
+        controlPoints: pts,
+        segments: segs,
+        isClosed: true,
+        version: 'v1.0',
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  if (params.shapeId === 'horseshoe') {
+    const invW = Number((halfW * 0.86).toFixed(3));
+    const crownSag = Math.max(0.5, h - wh);
+    const crownBulge = Number(((2 * crownSag) / Math.max(1, w)).toFixed(4));
+    const wallBulge = 0.18;
+    const invBulge = invDrop > 0.02 ? Number(((2 * invDrop) / Math.max(1, invW * 2)).toFixed(4)) : 0;
+    const pts: ProfileControlPoint[] = [
+      { id: 'P1', label: 'P1', x: -invW, y: 0, role: 'left_invert' },
+      { id: 'P2', label: 'P2', x: -halfW, y: wh, role: 'left_wall_top' },
+      { id: 'P3', label: 'P3', x: halfW, y: wh, role: 'right_wall_top' },
+      { id: 'P4', label: 'P4', x: invW, y: 0, role: 'right_invert' },
+    ];
+    const segs: ProfileSegment[] = [
+      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'arc', arcBulge: wallBulge },
+      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: crownBulge },
+      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'arc', arcBulge: wallBulge },
+      {
+        id: 'S4',
+        fromPointId: 'P4',
+        toPointId: 'P1',
+        type: invBulge > 0 ? 'arc' : 'line',
+        arcBulge: invBulge > 0 ? invBulge : undefined,
+      },
+    ];
+    return {
+      id: `prof-horseshoe-${Date.now()}`,
+      name: `Horseshoe (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
+      category: 'freeform',
+      controlPoints: pts,
+      segments: segs,
+      isClosed: true,
+      version: 'v1.0',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (params.shapeId === 'flat_arch') {
+    const haunchW = Number((halfW * 0.68).toFixed(3));
+    const haunchY = Number(Math.min(h - 0.25, wh + (h - wh) * 0.62).toFixed(3));
+    const pts: ProfileControlPoint[] = [
+      { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
+      { id: 'P2', label: 'P2', x: -halfW, y: wh, role: 'left_wall_top' },
+      { id: 'P3', label: 'P3', x: -haunchW, y: haunchY, role: 'smooth_tangent' },
+      { id: 'P4', label: 'P4', x: haunchW, y: haunchY, role: 'smooth_tangent' },
+      { id: 'P5', label: 'P5', x: halfW, y: wh, role: 'right_wall_top' },
+      { id: 'P6', label: 'P6', x: halfW, y: 0, role: 'right_invert' },
+    ];
+    const topSag = Math.max(0.2, h - haunchY);
+    const topBulge = Number(((2 * topSag) / Math.max(0.8, haunchW * 2)).toFixed(4));
+    const segs: ProfileSegment[] = [
+      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
+      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'arc', arcBulge: 0.26 },
+      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'arc', arcBulge: topBulge },
+      { id: 'S4', fromPointId: 'P4', toPointId: 'P5', type: 'arc', arcBulge: 0.26 },
+      { id: 'S5', fromPointId: 'P5', toPointId: 'P6', type: 'line' },
+      { id: 'S6', fromPointId: 'P6', toPointId: 'P1', type: 'line' },
+    ];
+    return {
+      id: `prof-flat-arch-${Date.now()}`,
+      name: `Flat-Arch / Basket-Handle (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
+      category: 'freeform',
+      controlPoints: pts,
+      segments: segs,
+      isClosed: true,
+      version: 'v1.0',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (params.shapeId === 'trapezoidal') {
+    const topHalfW = Number((Math.max(1.0, params.topWidth) / 2).toFixed(3));
+    const roofWallY = invDrop > 0.05 ? Number(Math.max(0.5, h - invDrop).toFixed(3)) : h;
+    const roofBulge =
+      invDrop > 0.05 ? Number(((2 * invDrop) / Math.max(1.0, topHalfW * 2)).toFixed(4)) : 0;
+    const pts: ProfileControlPoint[] = [
+      { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
+      { id: 'P2', label: 'P2', x: -topHalfW, y: roofWallY, role: 'left_wall_top' },
+      { id: 'P3', label: 'P3', x: topHalfW, y: roofWallY, role: 'right_wall_top' },
+      { id: 'P4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
+    ];
+    const segs: ProfileSegment[] = [
+      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
+      {
+        id: 'S2',
+        fromPointId: 'P2',
+        toPointId: 'P3',
+        type: roofBulge > 0 ? 'arc' : 'line',
+        arcBulge: roofBulge > 0 ? roofBulge : undefined,
+      },
+      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
+      { id: 'S4', fromPointId: 'P4', toPointId: 'P1', type: 'line' },
+    ];
+    return {
+      id: `prof-trap-${Date.now()}`,
+      name: `Trapezoidal (${w.toFixed(2)}m Base × ${(topHalfW * 2).toFixed(2)}m Top × ${h.toFixed(2)}m H)`,
+      category: 'freeform',
+      controlPoints: pts,
+      segments: segs,
+      isClosed: true,
+      version: 'v1.0',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (params.shapeId === 'stepped_cavern') {
+    const stepM = Math.max(0.3, Math.min(halfW * 0.35, Number(params.cornerRadius.toFixed(2)) || 1.0));
+    const lowerWallH = Number((wh * 0.55).toFixed(2));
+    const crownSag = Math.max(0.6, h - wh);
+    const crownBulge = Number(((2 * crownSag) / Math.max(1, w)).toFixed(4));
+    const pts: ProfileControlPoint[] = [
+      { id: 'P1', label: 'P1', x: Number((-halfW + stepM).toFixed(3)), y: 0, role: 'left_invert' },
+      { id: 'P2', label: 'P2', x: Number((-halfW + stepM).toFixed(3)), y: lowerWallH, role: 'step_corner' },
+      { id: 'P3', label: 'P3', x: -halfW, y: lowerWallH, role: 'step_corner' },
+      { id: 'P4', label: 'P4', x: -halfW, y: wh, role: 'left_wall_top' },
+      { id: 'P5', label: 'P5', x: halfW, y: wh, role: 'right_wall_top' },
+      { id: 'P6', label: 'P6', x: halfW, y: lowerWallH, role: 'step_corner' },
+      { id: 'P7', label: 'P7', x: Number((halfW - stepM).toFixed(3)), y: lowerWallH, role: 'step_corner' },
+      { id: 'P8', label: 'P8', x: Number((halfW - stepM).toFixed(3)), y: 0, role: 'right_invert' },
+    ];
+    const segs: ProfileSegment[] = [
+      { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
+      { id: 'S2', fromPointId: 'P2', toPointId: 'P3', type: 'line' },
+      { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
+      { id: 'S4', fromPointId: 'P4', toPointId: 'P5', type: 'arc', arcBulge: crownBulge },
+      { id: 'S5', fromPointId: 'P5', toPointId: 'P6', type: 'line' },
+      { id: 'S6', fromPointId: 'P6', toPointId: 'P7', type: 'line' },
+      { id: 'S7', fromPointId: 'P7', toPointId: 'P8', type: 'line' },
+      { id: 'S8', fromPointId: 'P8', toPointId: 'P1', type: 'line' },
+    ];
+    return {
+      id: `prof-cavern-${Date.now()}`,
+      name: `Stepped Cavern (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
+      category: 'powerhouse_cavern',
+      controlPoints: pts,
+      segments: segs,
+      isClosed: true,
+      version: 'v1.0',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  // Default: D-Shaped (Vertical Walls + Arch Crown)
+  const crownSag = Math.max(0.3, h - wh);
+  const crownBulge = Number(((2 * crownSag) / Math.max(1, w)).toFixed(4));
+  const computedCrownR = Number(((w * w) / (8 * crownSag) + crownSag / 2).toFixed(3));
+  const invBulge = invDrop > 0.02 ? Number(((2 * invDrop) / Math.max(1, w)).toFixed(4)) : 0;
+
+  const pts: ProfileControlPoint[] = [
+    { id: 'P1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
+    { id: 'P2', label: 'P2', x: -halfW, y: wh, role: 'left_wall_top' },
+    { id: 'P3', label: 'P3', x: halfW, y: wh, role: 'right_wall_top' },
+    { id: 'P4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
+  ];
+  const segs: ProfileSegment[] = [
+    { id: 'S1', fromPointId: 'P1', toPointId: 'P2', type: 'line' },
+    {
+      id: 'S2',
+      fromPointId: 'P2',
+      toPointId: 'P3',
+      type: 'arc',
+      arcBulge: crownBulge,
+      arcRadiusMeters: computedCrownR,
+    },
+    { id: 'S3', fromPointId: 'P3', toPointId: 'P4', type: 'line' },
+    {
+      id: 'S4',
+      fromPointId: 'P4',
+      toPointId: 'P1',
+      type: invBulge > 0 ? 'arc' : 'line',
+      arcBulge: invBulge > 0 ? invBulge : undefined,
+    },
+  ];
+  return {
+    id: `prof-dshape-${Date.now()}`,
+    name: `D-Shaped (${w.toFixed(2)}m × ${h.toFixed(2)}m)`,
+    category: 'freeform',
+    controlPoints: pts,
+    segments: segs,
+    isClosed: true,
+    version: 'v1.0',
+    updatedAt: new Date().toISOString(),
+  };
+}
 
 interface FreeformCustomProfileEditorProps {
   geometry: TunnelGeometry;
@@ -274,6 +583,116 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
 
   // Corner Round (Fillet) Radius Input
   const [roundRadiusM, setRoundRadiusM] = useState<string>('1.20');
+
+  // Extendable & Dockable Aside Panel State (Left or Right Dock + Drag Resize Width)
+  const [asideDockSide, setAsideDockSide] = useState<'left' | 'right'>('right');
+  const [asideWidthPx, setAsideWidthPx] = useState<number>(400);
+  const [isAsideCollapsed, setIsAsideCollapsed] = useState<boolean>(false);
+  const [resizingAside, setResizingAside] = useState<{
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+  const [cadProfileCmd, setCadProfileCmd] = useState<string>('');
+
+  useEffect(() => {
+    if (!resizingAside) return;
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - resizingAside.startX;
+      const delta = asideDockSide === 'right' ? -dx : dx;
+      const nextW = Math.max(280, Math.min(680, Math.round(resizingAside.startWidth + delta)));
+      setAsideWidthPx(nextW);
+    };
+    const onUp = () => setResizingAside(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizingAside, asideDockSide]);
+
+  // Easy Basic Regular Shape Generator State (Width, Height & Required Details)
+  const [basicShapeId, setBasicShapeId] = useState<BasicRegularTunnelShapeId>(
+    geometry.crownGeometry === 'horseshoe'
+      ? 'horseshoe'
+      : geometry.crownGeometry === 'circular'
+      ? 'circular'
+      : geometry.crownGeometry === 'flat_arch'
+      ? 'flat_arch'
+      : 'd_shaped'
+  );
+  const [basicWidthM, setBasicWidthM] = useState<string>(String((geometry.width || 9.0).toFixed(2)));
+  const [basicHeightM, setBasicHeightM] = useState<string>(
+    String((geometry.height || 7.5).toFixed(2))
+  );
+  const [basicWallHeightM, setBasicWallHeightM] = useState<string>(
+    String((geometry.wallHeight || 4.2).toFixed(2))
+  );
+  const [basicCornerRadiusM, setBasicCornerRadiusM] = useState<string>('0.00');
+  const [basicTopWidthM, setBasicTopWidthM] = useState<string>(
+    String(((geometry.width || 9.0) * 0.78).toFixed(2))
+  );
+  const [basicInvertDropM, setBasicInvertDropM] = useState<string>('0.00');
+  const [lockCircularDiameter, setLockCircularDiameter] = useState<boolean>(true);
+  const [showBasicShapePanel, setShowBasicShapePanel] = useState<boolean>(true);
+
+  // Left-Click Contextual Quick Action Bar Visibility
+  const [showLeftClickShortcuts, setShowLeftClickShortcuts] = useState<boolean>(true);
+
+  const handleApplyBasicRegularShape = useCallback(
+    (overrides?: Partial<{
+      shapeId: BasicRegularTunnelShapeId;
+      width: string;
+      height: string;
+      wallHeight: string;
+      cornerRadius: string;
+      topWidth: string;
+      invertDrop: string;
+    }>) => {
+      const sId = overrides?.shapeId ?? basicShapeId;
+      const wVal = Math.max(1.0, parseFloat(overrides?.width ?? basicWidthM) || 9.0);
+      const hVal =
+        sId === 'circular' && lockCircularDiameter && overrides?.width !== undefined
+          ? wVal
+          : Math.max(1.0, parseFloat(overrides?.height ?? basicHeightM) || 7.5);
+      const whRaw = parseFloat(overrides?.wallHeight ?? basicWallHeightM);
+      const whVal = Number.isFinite(whRaw)
+        ? Math.max(0.4, Math.min(hVal - 0.3, whRaw))
+        : Number((hVal * 0.56).toFixed(2));
+      const cRad = Math.max(0, parseFloat(overrides?.cornerRadius ?? basicCornerRadiusM) || 0);
+      const topW = Math.max(1.0, parseFloat(overrides?.topWidth ?? basicTopWidthM) || wVal * 0.78);
+      const invD = Math.max(0, parseFloat(overrides?.invertDrop ?? basicInvertDropM) || 0);
+
+      const crownSag = Math.max(0.3, hVal - whVal);
+      const autoCrownR = Number(((wVal * wVal) / (8 * crownSag) + crownSag / 2).toFixed(2));
+
+      const nextProf = buildBasicRegularShapeProfile({
+        shapeId: sId,
+        width: wVal,
+        height: hVal,
+        wallHeight: whVal,
+        crownRadius: autoCrownR,
+        cornerRadius: cRad,
+        topWidth: topW,
+        invertDrop: invD,
+      });
+
+      updateProfileWithUndo(nextProf);
+      setSelectedPointId(nextProf.controlPoints[0]?.id || null);
+      setSelectedSegmentId(nextProf.segments[0]?.id || null);
+    },
+    [
+      basicShapeId,
+      basicWidthM,
+      basicHeightM,
+      basicWallHeightM,
+      basicCornerRadiusM,
+      basicTopWidthM,
+      basicInvertDropM,
+      lockCircularDiameter,
+      updateProfileWithUndo,
+    ]
+  );
 
   // Evaluate current profile geometry
   const evaluated = useMemo(() => evaluateCustomProfileGeometry(profile), [profile]);
@@ -659,34 +1078,75 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
     return { lastPt, len, deg };
   }, [profile.controlPoints, cursorMeters]);
 
+  // Execute AutoCAD command inside Draw Tunnel Block Editor
+  const handleExecuteProfileCadCmd = (raw: string) => {
+    const cmd = raw.trim().toUpperCase();
+    if (!cmd) return;
+    if (cmd === 'LINE' || cmd === 'PLINE' || cmd === 'L' || cmd === 'PL') {
+      setTool('draw_line');
+    } else if (cmd === 'ARC' || cmd === 'A') {
+      setTool('draw_arc');
+    } else if (cmd === 'FILLET' || cmd === 'ROUND' || cmd === 'F') {
+      setTool('round_corner');
+    } else if (cmd === 'SELECT' || cmd === 'ESC') {
+      setTool('select');
+    } else if (cmd === 'CLOSE' || cmd === 'C') {
+      updateProfileWithUndo((prev) => {
+        const nextClosed = !prev.isClosed;
+        const norm = normalizeProfileTopology(prev.controlPoints, prev.segments, nextClosed);
+        return { ...prev, isClosed: nextClosed, controlPoints: norm.controlPoints, segments: norm.segments };
+      });
+    } else if (cmd === 'DSHAPE' || cmd === 'D') {
+      setBasicShapeId('d_shaped');
+      handleApplyBasicRegularShape({ shapeId: 'd_shaped' });
+    } else if (cmd === 'HORSESHOE') {
+      setBasicShapeId('horseshoe');
+      handleApplyBasicRegularShape({ shapeId: 'horseshoe' });
+    } else if (cmd === 'CIRCLE' || cmd === 'TBM') {
+      setBasicShapeId('circular');
+      handleApplyBasicRegularShape({ shapeId: 'circular' });
+    } else if (cmd === 'RECT' || cmd === 'BOX') {
+      setBasicShapeId('rectangular');
+      handleApplyBasicRegularShape({ shapeId: 'rectangular' });
+    } else if (cmd === 'ZOOM' || cmd === 'FIT' || cmd === 'ZE') {
+      handleFitGraph();
+    } else if (cmd === 'U' || cmd === 'UNDO') {
+      handleUndo();
+    } else if (cmd === 'REDO') {
+      handleRedo();
+    }
+    setCadProfileCmd('');
+  };
+
   return (
     <div className="h-dvh w-full flex flex-col bg-[#090D16] text-slate-100 font-mono select-none overflow-hidden">
       {/* ====================================================================
-          TOP HEADER BAR: Simple, Clean Controls + Quick Shape Presets + Confirm
+          AUTOCAD 2026 BLOCK EDITOR — TOP APPLICATION BAR & RIBBON
          ==================================================================== */}
-      <header className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-[#111726] border-b border-slate-800 shrink-0">
-        <div className="flex items-center gap-3">
+      <header className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-[#0E131D] border-b border-[#253047] shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={onBack}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-xs bg-gradient-to-b from-[#0284C7] to-[#0369A1] hover:from-[#0EA5E9] hover:to-[#0284C7] text-white border border-cyan-400/50 text-xs font-bold cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            Back
+            ESWA CAD
           </button>
 
-          <div>
-            <div className="text-xs sm:text-sm font-bold text-white tracking-wide flex items-center gap-2">
-              <span>CUSTOM TUNNEL SHAPE — GRAPH BUILDER</span>
-              <span className="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-700/60 text-[10px]">
-                X,Y Points · Length &amp; Angle · Line · Arc · Round · Undo
-              </span>
-            </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs sm:text-sm font-bold text-cyan-300 tracking-wider">
+              BLOCK EDITOR: TUNNEL CROSS-SECTION (W×H)
+            </span>
+            <span className="hidden md:inline-block px-2 py-0.5 rounded-xs bg-[#161F30] text-emerald-300 border border-[#2B3B59] text-[10px]">
+              SPAN: {evaluated.width.toFixed(2)}m W × {evaluated.height.toFixed(2)}m H · AREA:{' '}
+              {evaluated.designAreaSqMeters.toFixed(2)} m²
+            </span>
           </div>
         </div>
 
         {/* Quick Template / Preset Loader + DXF Upload + Confirm Button */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <select
             value=""
             onChange={(e) => {
@@ -711,9 +1171,9 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                 setSelectedSegmentId(nextP.segments[0]?.id || null);
               }
             }}
-            className="px-2.5 py-1 bg-slate-900 border border-slate-700 rounded text-xs text-cyan-300 cursor-pointer"
+            className="px-2 py-1 bg-[#141C2B] border border-[#2B3A55] rounded-xs text-xs text-cyan-300 cursor-pointer"
           >
-            <option value="">Load Starter Shape...</option>
+            <option value="">Insert CAD Block / Preset...</option>
             <option value="blank">Blank Graph (Start from P1)</option>
             {CUSTOM_PROFILE_PRESETS.map((p) => (
               <option key={p.id} value={p.id}>
@@ -736,8 +1196,8 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
           <button
             type="button"
             onClick={() => cadInputRef.current?.click()}
-            className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs cursor-pointer"
-            title="Import DXF/DWG profile onto graph"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-xs bg-[#161F30] hover:bg-slate-700 text-slate-200 border border-[#2B3A55] text-xs cursor-pointer"
+            title="DXFIN — Import DXF/DWG profile onto graph"
           >
             <Upload className="w-3.5 h-3.5 text-cyan-400" />
             Import DXF
@@ -750,10 +1210,10 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               onConfirmGeometry(built, true);
             }}
             disabled={profile.controlPoints.length < 3}
-            className="flex items-center gap-1.5 px-4 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-bold text-xs shadow-lg cursor-pointer"
+            className="flex items-center gap-1.5 px-3.5 py-1 rounded-xs bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-bold text-xs border border-emerald-400/50 shadow-md cursor-pointer"
           >
             <CheckCircle2 className="w-4 h-4" />
-            Confirm Tunnel Shape &amp; Continue
+            BCLOSE &amp; Apply Tunnel Shape
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
 
@@ -762,11 +1222,15 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
       </header>
 
       {/* ====================================================================
-          MAIN BODY: LEFT GRAPH PAPER WITH SCALES (74%) + RIGHT INSPECTOR (26%)
+          MAIN BODY: GRAPH PAPER WITH SCALES + EXTENDABLE LEFT/RIGHT INSPECTOR
          ==================================================================== */}
       <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
-        {/* LEFT COLUMN: GRAPH PAPER STAGE + TOP DRAWING TOOLBAR */}
-        <div className="flex-1 flex flex-col min-w-0 min-h-0 relative bg-[#070B12]">
+        {/* LEFT/MAIN COLUMN: GRAPH PAPER STAGE + TOP DRAWING TOOLBAR */}
+        <div
+          className={`flex-1 flex flex-col min-w-0 min-h-0 relative bg-[#070B12] ${
+            asideDockSide === 'left' ? 'lg:order-2' : 'lg:order-1'
+          }`}
+        >
           {/* Simple, Clean Drawing Toolbar */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-[#0E1524] border-b border-slate-800 text-xs">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -932,11 +1396,47 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               <button
                 type="button"
                 onClick={handleFitGraph}
-                className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px]"
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px] cursor-pointer"
                 title="Center & Fit Shape on Graph"
               >
                 <Maximize2 className="w-3 h-3" />
                 Fit
+              </button>
+
+              <div className="h-4 w-px bg-slate-700 mx-0.5" />
+
+              {/* Side Panel Dock Left / Right & Expand/Collapse Controls */}
+              <button
+                type="button"
+                onClick={() => setAsideDockSide((prev) => (prev === 'right' ? 'left' : 'right'))}
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-[11px] cursor-pointer"
+                title="Move / Extend Tools Panel to Left or Right Side"
+              >
+                {asideDockSide === 'right' ? (
+                  <>
+                    <PanelLeft className="w-3 h-3" />
+                    Panel → Left
+                  </>
+                ) : (
+                  <>
+                    <PanelRight className="w-3 h-3" />
+                    Panel → Right
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsAsideCollapsed((prev) => !prev)}
+                className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] cursor-pointer ${
+                  isAsideCollapsed
+                    ? 'bg-cyan-600 text-white border-cyan-400 font-bold'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                }`}
+                title="Expand or Collapse the Side Shape & Coordinates Panel"
+              >
+                <Columns className="w-3 h-3" />
+                {isAsideCollapsed ? 'Show Panel' : 'Hide Panel'}
               </button>
             </div>
           </div>
@@ -1356,7 +1856,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                 </span>
               </div>
 
-              <div className="px-3 py-1.5 rounded bg-slate-950/90 border border-slate-800 text-[11px] flex items-center gap-2 shadow-lg">
+              <div className="px-3 py-1.5 rounded bg-slate-950/90 border border-slate-800 text-[11px] flex items-center gap-2 shadow-lg pointer-events-auto">
                 <Crosshair className="w-3.5 h-3.5 text-cyan-400" />
                 {cursorMeters ? (
                   <span>
@@ -1368,13 +1868,406 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                 )}
               </div>
             </div>
+
+            {/* Clean AutoCAD Command Prompt Bar */}
+            <div className="absolute bottom-3 left-14 right-3 flex items-center justify-center pointer-events-none z-20">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleExecuteProfileCadCmd(cadProfileCmd);
+                }}
+                className="pointer-events-auto flex items-center gap-2 px-3 py-1 rounded-xs bg-[#090D16]/95 border border-[#2C3A55] shadow-xl text-[11px] w-full max-w-md"
+              >
+                <span className="text-[10px] font-bold text-amber-400 shrink-0">Command:</span>
+                <input
+                  type="text"
+                  value={cadProfileCmd}
+                  onChange={(e) => setCadProfileCmd(e.target.value)}
+                  placeholder="Type PLINE, ARC, FILLET, DSHAPE, BOX, CIRCLE, ZOOM..."
+                  className="w-full bg-transparent text-[10px] font-mono text-white placeholder-slate-500 outline-none"
+                />
+              </form>
+            </div>
           </div>
         </div>
 
         {/* ====================================================================
-            RIGHT PANEL: ADD BY LENGTH & ANGLE / X,Y + ROUND / ARC + POINTS LIST
+            EXTENDABLE LEFT / RIGHT PANEL:
+            0. EASY BASIC REGULAR SHAPES (WIDTH & HEIGHT)
+            1. ADD BY LENGTH & ANGLE / X,Y
+            2. EDIT SELECTED POINT / LINE / ARC / ROUND
+            3. POINTS & SEGMENTS TABLE
            ==================================================================== */}
-        <aside className="w-full lg:w-[370px] bg-[#101726] border-t lg:border-t-0 lg:border-l border-slate-800 flex flex-col min-h-0 overflow-y-auto p-3.5 space-y-3.5 text-xs shrink-0">
+        {!isAsideCollapsed && (
+          <aside
+            style={{ width: `${asideWidthPx}px` }}
+            className={`relative w-full lg:w-auto max-w-full lg:max-w-[52vw] bg-[#101726] border-t lg:border-t-0 ${
+              asideDockSide === 'left'
+                ? 'lg:order-1 lg:border-r'
+                : 'lg:order-2 lg:border-l'
+            } border-slate-800 flex flex-col min-h-0 overflow-y-auto p-3.5 space-y-3.5 text-xs shrink-0 transition-[width] duration-75`}
+          >
+            {/* Interactive Drag Handle to Extend Panel Left or Right */}
+            <div
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setResizingAside({
+                  startX: e.clientX,
+                  startWidth: asideWidthPx,
+                });
+              }}
+              title="Drag Left or Right to Extend / Resize Panel Width"
+              className={`hidden lg:flex items-center justify-center absolute top-0 bottom-0 w-2.5 cursor-col-resize z-30 group ${
+                asideDockSide === 'left' ? '-right-1.5' : '-left-1.5'
+              }`}
+            >
+              <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-cyan-400 transition-colors" />
+            </div>
+
+            {/* Panel Header: Extend Width (- / +) & Dock Left / Right Controls */}
+            <div className="flex flex-wrap items-center justify-between gap-1.5 pb-2 border-b border-slate-800">
+              <div className="flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="font-bold text-slate-100 text-[11px] tracking-wide">
+                  SHAPE &amp; DIMENSIONS PANEL
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setAsideDockSide((prev) => (prev === 'right' ? 'left' : 'right'))}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 text-[10px] flex items-center gap-1 cursor-pointer"
+                  title="Move Panel to Left or Right Side"
+                >
+                  {asideDockSide === 'right' ? (
+                    <>
+                      <PanelLeft className="w-3 h-3" /> Left
+                    </>
+                  ) : (
+                    <>
+                      <PanelRight className="w-3 h-3" /> Right
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAsideWidthPx((w) => Math.max(280, w - 50))}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] cursor-pointer"
+                  title="Narrow Panel Width"
+                >
+                  −W
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAsideWidthPx((w) => Math.min(680, w + 50))}
+                  className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] cursor-pointer"
+                  title="Extend Panel Width"
+                >
+                  +Extend
+                </button>
+              </div>
+            </div>
+
+            {/* 0. EASY BASIC REGULAR SHAPES (CHOOSE WIDTH, HEIGHT & REQUIRED DETAILS) */}
+            <div className="p-3 bg-slate-950/95 border border-emerald-500/40 rounded space-y-2.5 shadow-md">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-emerald-300 text-[11px] flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                  0. BASIC REGULAR SHAPES (WIDTH &amp; HEIGHT)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowBasicShapePanel((prev) => !prev)}
+                  className="text-[10px] text-slate-400 hover:text-white cursor-pointer"
+                >
+                  {showBasicShapePanel ? 'Minimize' : 'Expand'}
+                </button>
+              </div>
+
+              {showBasicShapePanel && (
+                <div className="space-y-2.5">
+                  {/* Shape Type Selector Pills */}
+                  <div className="grid grid-cols-2 gap-1 text-[10px]">
+                    {(
+                      [
+                        { id: 'd_shaped', label: 'D-Shaped (Arch)' },
+                        { id: 'horseshoe', label: 'Horseshoe' },
+                        { id: 'circular', label: 'Circular / TBM' },
+                        { id: 'rectangular', label: 'Rectangular / Box' },
+                        { id: 'flat_arch', label: 'Flat-Arch / Basket' },
+                        { id: 'trapezoidal', label: 'Trapezoidal Adit' },
+                        { id: 'stepped_cavern', label: 'Stepped Cavern' },
+                      ] as { id: BasicRegularTunnelShapeId; label: string }[]
+                    ).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setBasicShapeId(item.id);
+                          handleApplyBasicRegularShape({ shapeId: item.id });
+                        }}
+                        className={`px-2 py-1 rounded border text-left font-semibold truncate cursor-pointer ${
+                          basicShapeId === item.id
+                            ? 'bg-emerald-600 text-white border-emerald-400'
+                            : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-600'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Primary Dimensions: Width (m) & Total Height (m) */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-0.5">
+                      <span className="text-slate-300 text-[10px] font-semibold">
+                        {basicShapeId === 'circular'
+                          ? 'Diameter / Width (m)'
+                          : basicShapeId === 'trapezoidal'
+                          ? 'Bottom Width (m)'
+                          : 'Tunnel Width (m)'}
+                      </span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="1.0"
+                        value={basicWidthM}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setBasicWidthM(val);
+                          if (basicShapeId === 'circular' && lockCircularDiameter) {
+                            setBasicHeightM(val);
+                          }
+                          if (parseFloat(val) >= 1.0) {
+                            handleApplyBasicRegularShape({
+                              width: val,
+                              height:
+                                basicShapeId === 'circular' && lockCircularDiameter
+                                  ? val
+                                  : basicHeightM,
+                            });
+                          }
+                        }}
+                        className="w-full px-2 py-1 bg-slate-900 border border-emerald-500/50 rounded text-white font-bold"
+                      />
+                    </label>
+
+                    <label className="space-y-0.5">
+                      <span className="text-slate-300 text-[10px] font-semibold">
+                        Total Height (m)
+                      </span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="1.0"
+                        value={basicHeightM}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setBasicHeightM(val);
+                          if (basicShapeId === 'circular' && lockCircularDiameter) {
+                            setBasicWidthM(val);
+                          }
+                          if (parseFloat(val) >= 1.0) {
+                            handleApplyBasicRegularShape({
+                              height: val,
+                              width:
+                                basicShapeId === 'circular' && lockCircularDiameter
+                                  ? val
+                                  : basicWidthM,
+                            });
+                          }
+                        }}
+                        className="w-full px-2 py-1 bg-slate-900 border border-emerald-500/50 rounded text-white font-bold"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Shape-Specific Required Details */}
+                  {(basicShapeId === 'd_shaped' ||
+                    basicShapeId === 'horseshoe' ||
+                    basicShapeId === 'flat_arch' ||
+                    basicShapeId === 'stepped_cavern') && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="space-y-0.5">
+                        <span className="text-slate-400 text-[10px]">Wall Height (m)</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.5"
+                          value={basicWallHeightM}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setBasicWallHeightM(val);
+                            if (parseFloat(val) >= 0.4) {
+                              handleApplyBasicRegularShape({ wallHeight: val });
+                            }
+                          }}
+                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-cyan-300 font-bold"
+                        />
+                      </label>
+
+                      {basicShapeId === 'stepped_cavern' ? (
+                        <label className="space-y-0.5">
+                          <span className="text-slate-400 text-[10px]">Bench Step Width (m)</span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0.3"
+                            value={basicCornerRadiusM === '0.00' ? '1.00' : basicCornerRadiusM}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setBasicCornerRadiusM(val);
+                              handleApplyBasicRegularShape({ cornerRadius: val });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-amber-300 font-bold"
+                          />
+                        </label>
+                      ) : (
+                        <label className="space-y-0.5">
+                          <span className="text-slate-400 text-[10px]">Invert Curve Depth (m)</span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0"
+                            value={basicInvertDropM}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setBasicInvertDropM(val);
+                              handleApplyBasicRegularShape({ invertDrop: val });
+                            }}
+                            className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-amber-300 font-bold"
+                          />
+                        </label>
+                      )}
+                    </div>
+                  )}
+
+                  {basicShapeId === 'rectangular' && (
+                    <div className="grid grid-cols-2 gap-2 items-end">
+                      <label className="space-y-0.5">
+                        <span className="text-slate-400 text-[10px]">
+                          Corner Fillet Radius (m) [0=Sharp]
+                        </span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          value={basicCornerRadiusM}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setBasicCornerRadiusM(val);
+                            handleApplyBasicRegularShape({ cornerRadius: val });
+                          }}
+                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-cyan-300 font-bold"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextR = parseFloat(basicCornerRadiusM) > 0 ? '0.00' : '0.80';
+                          setBasicCornerRadiusM(nextR);
+                          handleApplyBasicRegularShape({ cornerRadius: nextR });
+                        }}
+                        className="py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[10px] cursor-pointer"
+                      >
+                        {parseFloat(basicCornerRadiusM) > 0
+                          ? 'Make Sharp Corners (0m)'
+                          : 'Round Top Corners (0.8m)'}
+                      </button>
+                    </div>
+                  )}
+
+                  {basicShapeId === 'circular' && (
+                    <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={lockCircularDiameter}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setLockCircularDiameter(checked);
+                          if (checked) {
+                            setBasicHeightM(basicWidthM);
+                            handleApplyBasicRegularShape({
+                              width: basicWidthM,
+                              height: basicWidthM,
+                            });
+                          }
+                        }}
+                        className="rounded border-slate-700 bg-slate-900 text-emerald-500"
+                      />
+                      <span>Lock Perfect Circle (Diameter W = H)</span>
+                    </label>
+                  )}
+
+                  {basicShapeId === 'trapezoidal' && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="space-y-0.5">
+                        <span className="text-slate-400 text-[10px]">Top Roof Width (m)</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="1.0"
+                          value={basicTopWidthM}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setBasicTopWidthM(val);
+                            if (parseFloat(val) >= 1.0) {
+                              handleApplyBasicRegularShape({ topWidth: val });
+                            }
+                          }}
+                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-cyan-300 font-bold"
+                        />
+                      </label>
+                      <label className="space-y-0.5">
+                        <span className="text-slate-400 text-[10px]">Roof Arch Rise (m)</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          value={basicInvertDropM}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setBasicInvertDropM(val);
+                            handleApplyBasicRegularShape({ invertDrop: val });
+                          }}
+                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-amber-300 font-bold"
+                        />
+                      </label>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleApplyBasicRegularShape();
+                        setTimeout(handleFitGraph, 20);
+                      }}
+                      className="flex-1 py-1.5 px-2.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Generate {basicWidthM}m × {basicHeightM}m Shape
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const wTarget = Math.max(1.0, parseFloat(basicWidthM) || evaluated.width);
+                        const hTarget = Math.max(1.0, parseFloat(basicHeightM) || evaluated.height);
+                        const scaled = applyParametricOverallDimensions(profile, {
+                          width: wTarget,
+                          height: hTarget,
+                        });
+                        updateProfileWithUndo(scaled);
+                      }}
+                      className="py-1.5 px-2 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] font-semibold cursor-pointer"
+                      title="Scale current graph points to match Width × Height"
+                    >
+                      Scale Current
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           {/* 1. ADD SEGMENT BY LENGTH & ANGLE OR X,Y POINT */}
           <div className="p-3 bg-slate-950/90 border border-slate-800 rounded space-y-2.5">
             <div className="flex items-center justify-between">
@@ -1938,8 +2831,58 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               </table>
             </div>
           </div>
-        </aside>
+          </aside>
+        )}
       </div>
+
+      {/* ====================================================================
+          AUTOCAD BLOCK EDITOR BOTTOM STATUS BAR & COORDINATE READOUT
+         ==================================================================== */}
+      <footer className="flex flex-wrap items-center justify-between gap-2 px-3 py-1 bg-[#0C1018] border-t border-[#252F45] text-[10px] font-mono shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-0.5 bg-[#1B2538] text-cyan-300 border border-cyan-500/60 rounded-xs font-bold">
+            BLOCK: TUNNEL CROSS-SECTION
+          </span>
+          <span className="text-slate-400">
+            Vertices: <strong className="text-white">{profile.controlPoints.length}</strong> ·
+            Segments: <strong className="text-white">{profile.segments.length}</strong> · Area:{' '}
+            <strong className="text-emerald-300">{evaluated.designAreaSqMeters.toFixed(2)} m²</strong> ·
+            Perimeter:{' '}
+            <strong className="text-cyan-300">{evaluated.totalPerimeterMeters.toFixed(2)} m</strong>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="px-2 py-0.5 bg-[#070A0F] border border-slate-800 rounded-xs text-slate-300">
+            {cursorMeters ? (
+              <>
+                X: <strong className="text-emerald-300">{cursorMeters.x.toFixed(2)}m</strong>, Y:{' '}
+                <strong className="text-emerald-300">{cursorMeters.y.toFixed(2)}m</strong>
+              </>
+            ) : (
+              <>X: 0.00m, Y: 0.00m</>
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={() => setGridSnapStep((s) => (s === 0 ? 0.25 : 0))}
+            className={`px-1.5 py-0.5 rounded-xs border font-bold cursor-pointer ${
+              gridSnapStep > 0
+                ? 'bg-cyan-950 text-cyan-300 border-cyan-600/70'
+                : 'bg-[#121824] text-slate-500 border-slate-800'
+            }`}
+          >
+            SNAP {gridSnapStep > 0 ? `${gridSnapStep}m` : 'OFF'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAsideDockSide((prev) => (prev === 'right' ? 'left' : 'right'))}
+            className="px-1.5 py-0.5 rounded-xs bg-[#121824] hover:bg-slate-800 text-amber-300 border border-slate-700 font-bold cursor-pointer"
+          >
+            DOCK: {asideDockSide.toUpperCase()}
+          </button>
+        </div>
+      </footer>
     </div>
   );
 };

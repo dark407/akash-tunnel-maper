@@ -11,7 +11,7 @@ import {
   TunnelGeometry,
 } from '../types/tunnel';
 
-const CHAINAGE_PROFILE_SCHEDULE_KEY = 'akash_tunnel_chainage_profile_schedule_v1';
+const CHAINAGE_PROFILE_SCHEDULE_KEY = 'akash_tunnel_chainage_profile_schedule_v2_fresh';
 
 // ============================================================================
 // 1. MULTI-SPACE COORDINATE SYSTEM FOR CUSTOM PROFILE EDITOR

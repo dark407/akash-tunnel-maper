@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Joint,
   LithologyPatternType,
@@ -30,6 +30,8 @@ import {
   Maximize2,
   Minimize2,
   Move,
+  PanelLeft,
+  PanelRight,
   PenTool,
   Plus,
   Redo2,
@@ -93,6 +95,30 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
   const [defaultPatternForNew, setDefaultPatternForNew] =
     useState<LithologyPatternType>('quartzite');
   const [activeVertexIdx, setActiveVertexIdx] = useState<number>(0);
+  const [dockSide, setDockSide] = useState<'left' | 'right'>('right');
+  const [panelWidthPx, setPanelWidthPx] = useState<number>(340);
+  const [resizingState, setResizingState] = useState<{
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!resizingState) return;
+    const onMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - resizingState.startX;
+      const delta = dockSide === 'right' ? -dx : dx;
+      setPanelWidthPx(
+        Math.max(260, Math.min(640, Math.round(resizingState.startWidth + delta)))
+      );
+    };
+    const onUp = () => setResizingState(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizingState, dockSide]);
 
   // Filter regions for current surface
   const surfaceRegions = lithologyRegions.filter((r) => r.surface === activeSurface);
@@ -201,21 +227,64 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
     : 0;
 
   return (
-    <div className="w-80 bg-[#0D121B] border-l border-slate-800 flex flex-col shrink-0 z-20 select-none overflow-hidden">
+    <aside
+      style={{ width: `${panelWidthPx}px` }}
+      className={`relative max-w-[52vw] bg-[#0D121B] ${
+        dockSide === 'left' ? 'order-first border-r' : 'order-last border-l'
+      } border-slate-800 flex flex-col shrink-0 z-20 select-none overflow-hidden transition-[width] duration-75`}
+    >
+      {/* Interactive Drag-to-Resize Handle (Extend Left or Right) */}
+      <div
+        onMouseDown={(e) => {
+          e.preventDefault();
+          setResizingState({ startX: e.clientX, startWidth: panelWidthPx });
+        }}
+        title="Drag Left or Right to Extend / Resize Panel"
+        className={`flex items-center justify-center absolute top-0 bottom-0 w-2.5 cursor-col-resize z-30 group ${
+          dockSide === 'left' ? '-right-1.5' : '-left-1.5'
+        }`}
+      >
+        <div className="h-16 w-1 rounded-full bg-slate-700 group-hover:bg-amber-400 transition-colors" />
+      </div>
+
       {/* Header */}
-      <div className="px-3.5 py-2.5 bg-[#111826] border-b border-slate-800 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Layers className="w-4 h-4 text-amber-400" />
-          <div>
-            <div className="text-xs font-mono font-bold text-slate-100 tracking-wide">
+      <div className="px-3 py-2.5 bg-[#111826] border-b border-slate-800 flex items-center justify-between gap-1">
+        <div className="flex items-center gap-2 min-w-0">
+          <Layers className="w-4 h-4 text-amber-400 shrink-0" />
+          <div className="truncate">
+            <div className="text-xs font-mono font-bold text-slate-100 tracking-wide truncate">
               LITHOLOGY &amp; AI DESCRIPTION
             </div>
-            <div className="text-[10px] font-mono text-slate-400">
+            <div className="text-[10px] font-mono text-slate-400 truncate">
               Select Area → Lithology → AI Suggest → Approve
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => setDockSide((s) => (s === 'right' ? 'left' : 'right'))}
+            className="px-1.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-[10px] flex items-center gap-0.5 cursor-pointer"
+            title="Move Panel to Left or Right Side"
+          >
+            {dockSide === 'right' ? <PanelLeft className="w-3 h-3" /> : <PanelRight className="w-3 h-3" />}
+          </button>
+          <button
+            type="button"
+            onClick={() => setPanelWidthPx((w) => Math.max(260, w - 45))}
+            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] cursor-pointer"
+            title="Narrow Panel"
+          >
+            −W
+          </button>
+          <button
+            type="button"
+            onClick={() => setPanelWidthPx((w) => Math.min(640, w + 45))}
+            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[10px] cursor-pointer"
+            title="Extend Panel Width"
+          >
+            +W
+          </button>
           {onUndo && (
             <button
               onClick={onUndo}
@@ -859,6 +928,6 @@ export const LithologyPanel: React.FC<LithologyPanelProps> = ({
           </div>
         )}
       </div>
-    </div>
+    </aside>
   );
 };

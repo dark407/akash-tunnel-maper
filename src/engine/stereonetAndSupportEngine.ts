@@ -456,20 +456,33 @@ export function buildLongitudinalChainageStrip(
     if (rec.tunnelName.trim().toLowerCase() !== currentSettings.tunnelName.trim().toLowerCase()) {
       continue;
     }
-    const qVal = rec.stationClassificationRecord?.qSystem?.qValue ?? null;
-    const rmrVal = rec.stationClassificationRecord?.rmr?.finalRmr ?? null;
+    const qVal = rec.qIndexParams
+      ? Number(
+          (
+            (rec.qIndexParams.rqd / Math.max(0.5, rec.qIndexParams.jn)) *
+            (rec.qIndexParams.jr / Math.max(0.5, rec.qIndexParams.ja)) *
+            (rec.qIndexParams.jw / Math.max(0.5, rec.qIndexParams.srf))
+          ).toFixed(2)
+        )
+      : null;
+    const rmrVal = rec.rmrParams?.intactStrengthRating
+      ? (rec.rmrParams.intactStrengthRating || 0) +
+        (rec.rmrParams.rqdRating || 0) +
+        (rec.rmrParams.spacingRating || 0) +
+        (rec.rmrParams.conditionRating || 0) +
+        (rec.rmrParams.groundwaterRating || 0) +
+        (rec.rmrParams.orientationAdjustmentRating || 0)
+      : null;
     const rqdVal = rec.qIndexParams?.rqd ?? 70;
+    const chNum = rec.numericChainageMeters || parseCh(rec.faceChainage);
     points.push({
       id: rec.id,
-      chainageMeters: rec.chainageNumericMeters || parseCh(rec.faceChainage),
-      chainageLabel: rec.faceChainage || `RD ${rec.chainageNumericMeters}m`,
+      chainageMeters: chNum,
+      chainageLabel: rec.faceChainage || `RD ${chNum}m`,
       qValue: qVal,
       rmrValue: rmrVal,
       rqdValue: rqdVal,
-      supportClassShort:
-        rec.stationClassificationRecord?.rmr?.rockMassClass ||
-        rec.stationClassificationRecord?.qSystem?.classification ||
-        'Mapped',
+      supportClassShort: 'Mapped',
       isCurrentStation: false,
     });
   }
@@ -480,9 +493,9 @@ export function buildLongitudinalChainageStrip(
     id: 'current-station',
     chainageMeters: currentChMeters,
     chainageLabel: currentSettings.faceChainage || `RD ${currentChMeters.toFixed(1)}m`,
-    qValue: currentQ.isComplete ? Number(currentQ.qValue.toFixed(2)) : null,
+    qValue: currentQ.isComplete && currentQ.qValue !== null ? Number(currentQ.qValue.toFixed(2)) : null,
     rmrValue: currentRmr.isComplete ? currentRmr.finalRmr : null,
-    rqdValue: currentQ.rqd,
+    rqdValue: 75,
     supportClassShort: currentRmr.isComplete
       ? currentRmr.rockMassClassLabel
       : currentQ.isComplete
@@ -589,13 +602,13 @@ export function exportMappedGeologicalSheetToDXF(
   pushPair(31, '0.0');
 
   // 4. Mapped Face Joint Traces & Strike/Dip Annotations (Layer: MAPPED_JOINTS_<SET>)
-  const faceJoints = joints.filter((j) => j.surface === 'face' && j.points.length >= 2);
+  const faceJoints = joints.filter((j) => j.surface === 'face' && j.geometry.length >= 2);
   for (const j of faceJoints) {
-    const layerName = `MAPPED_JOINTS_${j.jointSetId || 'J1'}`;
-    const aciColor = j.jointSetId === 'J1' ? 1 : j.jointSetId === 'J2' ? 5 : j.jointSetId === 'J3' ? 3 : 2;
-    for (let k = 0; k < j.points.length - 1; k++) {
-      const p1 = j.points[k];
-      const p2 = j.points[k + 1];
+    const layerName = `MAPPED_JOINTS_${j.set || 'J1'}`;
+    const aciColor = j.set === 'J1' ? 1 : j.set === 'J2' ? 5 : j.set === 'J3' ? 3 : 2;
+    for (let k = 0; k < j.geometry.length - 1; k++) {
+      const p1 = j.geometry[k];
+      const p2 = j.geometry[k + 1];
       pushPair(0, 'LINE');
       pushPair(8, layerName);
       pushPair(62, aciColor);
@@ -606,7 +619,7 @@ export function exportMappedGeologicalSheetToDXF(
       pushPair(21, p2.y.toFixed(4));
       pushPair(31, '0.0');
     }
-    const mid = j.points[Math.floor(j.points.length / 2)];
+    const mid = j.geometry[Math.floor(j.geometry.length / 2)];
     pushPair(0, 'TEXT');
     pushPair(8, layerName);
     pushPair(62, aciColor);
@@ -614,7 +627,7 @@ export function exportMappedGeologicalSheetToDXF(
     pushPair(20, (mid.y + 0.12).toFixed(3));
     pushPair(30, '0.0');
     pushPair(40, '0.18'); // text height 0.18m
-    pushPair(1, `${j.label} (${j.dip}/${j.dipDirection})`);
+    pushPair(1, `${j.id} (${j.dip}/${j.dipDirection})`);
   }
 
   // 5. Title Block & Rock Mass Classification Summary Text (Layer: ENGINEERING_TITLE_BLOCK)

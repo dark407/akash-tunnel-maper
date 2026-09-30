@@ -312,6 +312,172 @@ CRITICAL GEOLOGICAL REALISM & MAIN PHOTO RULES:
   });
 
   /**
+   * POST /api/ai/eswa-chat
+   * ESWA AI Executive Assistant with Full Software Authority & Multi-Format Template Data Extraction.
+   */
+  app.post('/api/ai/eswa-chat', async (req, res) => {
+    try {
+      const {
+        message = '',
+        history = [],
+        softwareContext = {},
+        selectedTemplate = 'AUTO_BEST_TEMPLATE',
+      } = req.body || {};
+
+      const userPrompt = String(message || '').trim();
+      if (!userPrompt) {
+        res.status(400).json({ error: 'Missing chat message' });
+        return;
+      }
+
+      const ai = getGeminiClient();
+
+      if (ai) {
+        const systemInstruction = `You are ESWA AI — the Master Geotechnical & Tunnel Engineering Executive Intelligence embedded inside ESWA Tunnel Mapper & ESWACAD.
+You have FULL AUTHORITY AND ROOT RIGHTS over the entire software, all workspaces, all tunnel geometries, face/wall joint mappings, 3D continuous strip logging datasets, rock support BOQ, overbreak/undercut calculations, and multi-format template exports.
+
+LIVE SOFTWARE DATA SNAPSHOT:
+${JSON.stringify(softwareContext, null, 2)}
+
+SELECTED EXPORT TEMPLATE PREFERENCE: ${selectedTemplate}
+
+YOUR RESPONSIBILITIES:
+1. Answer the user's question with high geotechnical precision using the exact numbers, chainages, pull intervals, joint sets (dip/dipDirection, spacing, roughness, infilling), RMR/Q-system values, and dimensions from the LIVE SOFTWARE DATA SNAPSHOT above.
+2. If the user asks you to perform ANY action in the software (e.g., open 3D Continuous Logging, open Face Mapping, open Custom Profile Editor, open Project Database, open Export Sheet, change tunnel width/height/wallHeight, update tunnel name/chainage/drive azimuth/round length, add a joint, add a 3D strip pull interval, switch theme to light/dark, or save current section), include the appropriate command object in "executedActions".
+3. Always populate "extractedDataPackage" with a rich, structured engineering dataset (title, subtitle, templateType, summaryMetrics, columns, rows) tailored to the user's query so the user can immediately download/extract the answer in CSV/Excel, Word (.DOC), ESWACAD (.DXF), Printable PDF Sheet, JSON, or Markdown format with the related engineering template.`;
+
+        const historyContents = Array.isArray(history)
+          ? history.slice(-8).map((h: { role?: string; text?: string }) => ({
+              role: h.role === 'model' ? 'model' : 'user',
+              parts: [{ text: String(h.text || '') }],
+            }))
+          : [];
+
+        const candidateModels = [
+          'gemini-3.8-flash',
+          'gemini-3.1-flash-lite',
+          'gemini-flash-latest',
+        ];
+
+        for (const modelName of candidateModels) {
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: [
+                ...historyContents,
+                {
+                  role: 'user',
+                  parts: [{ text: userPrompt }],
+                },
+              ],
+              config: {
+                systemInstruction,
+                temperature: 0.25,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    reply: {
+                      type: Type.STRING,
+                      description:
+                        'Comprehensive, clear geotechnical engineering answer grounded in the live software data.',
+                    },
+                    executedActions: {
+                      type: Type.ARRAY,
+                      description:
+                        'List of software control commands executed by ESWA AI with full authority.',
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          actionType: {
+                            type: Type.STRING,
+                            description:
+                              'One of: OPEN_3D_CONTINUOUS_LOGGING, OPEN_FACE_MAPPING, OPEN_CUSTOM_PROFILE_EDITOR, OPEN_PROJECT_DATABASE, OPEN_EXPORT_SHEET, UPDATE_GEOMETRY, UPDATE_SETTINGS, ADD_JOINT, ADD_STRIP_PULL, SAVE_SECTION, SET_THEME, NONE',
+                          },
+                          description: {
+                            type: Type.STRING,
+                          },
+                          payloadJson: {
+                            type: Type.STRING,
+                            description:
+                              'JSON string of parameters for the action (e.g. {"width":9.0,"height":7.5} or {"fromRd":300,"toRd":305,"rockType":"Quartzite"} or {"theme":"light"}).',
+                          },
+                        },
+                        required: ['actionType', 'description'],
+                      },
+                    },
+                    extractedDataPackage: {
+                      type: Type.OBJECT,
+                      description:
+                        'Structured engineering table & metrics extracted from the answer and project data for multi-format template export.',
+                      properties: {
+                        title: { type: Type.STRING },
+                        subtitle: { type: Type.STRING },
+                        templateType: {
+                          type: Type.STRING,
+                          description:
+                            'One of: STRIP_PULL_LOG_TEMPLATE, JOINT_DISCONTINUITY_TEMPLATE, OVERBREAK_SUPPORT_BOQ_TEMPLATE, EXECUTIVE_PROJECT_AUDIT_TEMPLATE',
+                        },
+                        summaryMetrics: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.OBJECT,
+                            properties: {
+                              label: { type: Type.STRING },
+                              value: { type: Type.STRING },
+                            },
+                            required: ['label', 'value'],
+                          },
+                        },
+                        columns: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                        },
+                        rows: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.ARRAY,
+                            items: { type: Type.STRING },
+                          },
+                        },
+                      },
+                      required: ['title', 'templateType', 'columns', 'rows'],
+                    },
+                  },
+                  required: ['reply', 'executedActions', 'extractedDataPackage'],
+                },
+              },
+            });
+
+            const rawText = response.text;
+            if (rawText) {
+              const parsed = JSON.parse(rawText.trim());
+              if (parsed && typeof parsed.reply === 'string') {
+                res.json({
+                  ...parsed,
+                  engine: modelName,
+                });
+                return;
+              }
+            }
+          } catch {
+            // Try next model or fall through to local deterministic executive engine
+          }
+        }
+      }
+
+      // Deterministic Local Executive Intelligence Fallback (ensures 100% reliability offline or without API key)
+      res.json({
+        fallback: true,
+        engine: 'ESWA_LOCAL_EXECUTIVE_CORE',
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'ESWA AI Chat error';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  /**
    * GET /api/offline-pc-installer
    * Packages the compiled dist/ bundle (HTML + CSS + JS) into a 100% self-contained
    * local Windows PC application installer that runs from %LOCALAPPDATA% without
