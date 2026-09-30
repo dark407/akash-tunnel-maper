@@ -1448,8 +1448,6 @@ export const Continuous3DStripLoggerModal: React.FC<
             </button>
           </div>
 
-          <ThemeToggleButton compact />
-
           <button
             onClick={onClose}
             className={`px-2.5 py-1 rounded-lg border text-xs font-bold flex items-center gap-1 cursor-pointer ${

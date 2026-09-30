@@ -1216,8 +1216,6 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
             BCLOSE &amp; Apply Tunnel Shape
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
-
-          <ThemeToggleButton compact />
         </div>
       </header>
 

@@ -18,9 +18,23 @@ function createMainWindow() {
 
   win.maximize();
 
+  let editionSuffix = '';
+  try {
+    const fs = require('fs');
+    const editionPath = path.join(__dirname, 'edition.json');
+    if (fs.existsSync(editionPath)) {
+      const parsed = JSON.parse(fs.readFileSync(editionPath, 'utf8'));
+      if (parsed && parsed.edition === 'user') {
+        editionSuffix = '?edition=user';
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
   const startUrl =
     process.env.ELECTRON_START_URL ||
-    `file://${path.join(__dirname, '../dist/index.html')}`;
+    `file://${path.join(__dirname, '../dist/index.html')}${editionSuffix}`;
 
   win.loadURL(startUrl);
 

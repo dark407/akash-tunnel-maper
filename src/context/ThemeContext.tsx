@@ -68,11 +68,19 @@ export function useTheme(): ThemeContextValue {
 
 interface ThemeToggleButtonProps {
   compact?: boolean;
+  isMainWindow?: boolean;
 }
 
-export const ThemeToggleButton: React.FC<ThemeToggleButtonProps> = ({ compact = false }) => {
+export const ThemeToggleButton: React.FC<ThemeToggleButtonProps> = ({
+  compact = false,
+  isMainWindow = false,
+}) => {
   const { theme, toggleTheme } = useTheme();
   const isLight = theme === 'light';
+
+  if (!isMainWindow) {
+    return null;
+  }
 
   return (
     <button

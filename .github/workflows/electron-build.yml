@@ -32,6 +32,7 @@ jobs:
             '@google/genai': '^1.0.0',
             '@tailwindcss/vite': '^4.0.9',
             '@vitejs/plugin-react': '^4.3.4',
+            'firebase': '^11.4.0',
             'lucide-react': '^0.475.0',
             'react': '^19.0.0',
             'react-dom': '^19.0.0',
@@ -62,30 +63,41 @@ jobs:
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Generate 256x256 Windows Application Icon (.ico)
-        run: node scripts/generate-win-icon.mjs
-
-      - name: Build Production Web Assets & Package Windows Installer with electron-builder
-        run: npx vite build && npx electron-builder --config electron-builder.json --win nsis --publish never
+      - name: Build Both Master & User Windows Executables (.EXE)
+        run: node scripts/build-dual-installers.mjs
         env:
           CI: false
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          VITE_GITHUB_REPO: ${{ github.repository }}
+          VITE_APP_BUILD_VERSION: "1.0.${{ github.run_number }}"
 
-      - name: Upload Windows Installer Artifact (.EXE)
+      - name: Upload Master & User Windows Installer Artifacts (.EXE)
         uses: actions/upload-artifact@v4
         with:
-          name: AKASH-TUNNEL-MAPPER-Windows-Installer
+          name: AKASH-TUNNEL-MAPPER-Master-and-User-Installers
           path: |
-            release/*.exe
+            release/AKASH-TUNNEL-MAPPER-Master-Setup.exe
+            release/AKASH-TUNNEL-MAPPER-User-Setup.exe
+            release/latest-release.json
             release/*.blockmap
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish Installer to GitHub Releases
+      - name: Publish Master & User .EXE Installers to GitHub Releases
         uses: softprops/action-gh-release@v2
         continue-on-error: true
         with:
           tag_name: latest
-          name: "AKASH TUNNEL MAPPER - Latest Windows Installer (.EXE)"
-          body: "Download `AKASH-TUNNEL-MAPPER-Setup.exe` below to install or update AKASH TUNNEL MAPPER on Windows."
-          files: release/AKASH-TUNNEL-MAPPER-Setup.exe
+          name: "AKASH TUNNEL MAPPER - Latest Master & User Windows Installers (.EXE)"
+          body: |
+            ### Official Windows Desktop Executables (.EXE)
+            1. **Normal User Software (Share with Users):** `AKASH-TUNNEL-MAPPER-User-Setup.exe`
+               - Direct Link for Users: `https://github.com/${{ github.repository }}/releases/download/latest/AKASH-TUNNEL-MAPPER-User-Setup.exe`
+            2. **Master Software (Owner Only):** `AKASH-TUNNEL-MAPPER-Master-Setup.exe`
+               - Direct Link for Owner: `https://github.com/${{ github.repository }}/releases/download/latest/AKASH-TUNNEL-MAPPER-Master-Setup.exe`
+          files: |
+            release/AKASH-TUNNEL-MAPPER-Master-Setup.exe
+            release/AKASH-TUNNEL-MAPPER-User-Setup.exe
+            release/latest-release.json
           prerelease: false

@@ -249,6 +249,172 @@ export function buildWindowsDesktopExeBinary(appUrl: string): Uint8Array {
   return buf;
 }
 
+const GITHUB_REPO_STORAGE_KEY = 'eswa_github_repo_slug_v1';
+
+/**
+ * Normalizes a GitHub repository input (e.g. "https://github.com/owner/repo" or "owner/repo")
+ * into a clean "owner/repo" slug.
+ */
+export function normalizeGithubRepoSlug(raw: string): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  const withoutProtocol = trimmed
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '');
+  const parts = withoutProtocol.split('/').filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0]}/${parts[1]}`;
+  }
+  return '';
+}
+
+/**
+ * Returns the configured GitHub repository slug ("owner/repo") from build env or localStorage.
+ */
+export function getConfiguredGithubRepo(): string {
+  try {
+    const envRepo = (
+      import.meta as unknown as { env?: Record<string, string> }
+    ).env?.VITE_GITHUB_REPO;
+    if (envRepo && normalizeGithubRepoSlug(envRepo)) {
+      return normalizeGithubRepoSlug(envRepo);
+    }
+  } catch {
+    // Ignore
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = localStorage.getItem(GITHUB_REPO_STORAGE_KEY);
+      if (stored && normalizeGithubRepoSlug(stored)) {
+        return normalizeGithubRepoSlug(stored);
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  return '';
+}
+
+/**
+ * Saves the GitHub repository slug ("owner/repo") locally and notifies listeners.
+ */
+export function saveConfiguredGithubRepo(rawInput: string): string {
+  const clean = normalizeGithubRepoSlug(rawInput);
+  if (typeof window !== 'undefined') {
+    try {
+      if (clean) {
+        localStorage.setItem(GITHUB_REPO_STORAGE_KEY, clean);
+      } else {
+        localStorage.removeItem(GITHUB_REPO_STORAGE_KEY);
+      }
+      window.dispatchEvent(new CustomEvent('eswa-github-repo-updated', { detail: clean }));
+    } catch {
+      // Ignore
+    }
+  }
+  return clean;
+}
+
+/**
+ * Returns the direct GitHub Releases download URL for the Normal User Software (.EXE):
+ * https://github.com/<owner>/<repo>/releases/download/latest/AKASH-TUNNEL-MAPPER-User-Setup.exe
+ */
+export function getGithubUserExeDownloadUrl(customRepo?: string): string {
+  const repo = normalizeGithubRepoSlug(customRepo || '') || getConfiguredGithubRepo();
+  if (repo) {
+    return `https://github.com/${repo}/releases/download/latest/AKASH-TUNNEL-MAPPER-User-Setup.exe`;
+  }
+  return getUserEditionShareUrl();
+}
+
+/**
+ * Returns the direct GitHub Releases download URL for the Master Software (.EXE):
+ * https://github.com/<owner>/<repo>/releases/download/latest/AKASH-TUNNEL-MAPPER-Master-Setup.exe
+ */
+export function getGithubMasterExeDownloadUrl(customRepo?: string): string {
+  const repo = normalizeGithubRepoSlug(customRepo || '') || getConfiguredGithubRepo();
+  if (repo) {
+    return `https://github.com/${repo}/releases/download/latest/AKASH-TUNNEL-MAPPER-Master-Setup.exe`;
+  }
+  if (typeof window === 'undefined') return 'http://localhost:3000';
+  return window.location.origin;
+}
+
+/**
+ * Returns the shareable URL for the Normal User Software Edition (?edition=user).
+ */
+export function getUserEditionShareUrl(): string {
+  if (typeof window === 'undefined') return 'http://localhost:3000/?edition=user';
+  return `${window.location.origin}/?edition=user`;
+}
+
+/**
+ * Triggers download of the Normal User Software Windows .EXE file
+ * (uses the GitHub Releases AKASH-TUNNEL-MAPPER-User-Setup.exe link when GitHub repo is configured,
+ * or generates the standalone User Edition .EXE launcher).
+ */
+export function downloadUserEditionDesktopExe(customFileName?: string) {
+  const repo = getConfiguredGithubRepo();
+  if (repo) {
+    const ghUrl = getGithubUserExeDownloadUrl(repo);
+    const a = document.createElement('a');
+    a.href = ghUrl;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.download = customFileName || 'AKASH-TUNNEL-MAPPER-User-Setup.exe';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return;
+  }
+  const userEditionUrl = getUserEditionShareUrl();
+  const exeBytes = buildWindowsDesktopExeBinary(userEditionUrl);
+  const blob = new Blob([exeBytes.buffer as ArrayBuffer], {
+    type: 'application/vnd.microsoft.portable-executable',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = customFileName || 'AKASH-TUNNEL-MAPPER-User-Setup.exe';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Triggers download of the Master Software Windows .EXE file (Only for Master Owner).
+ */
+export function downloadMasterEditionDesktopExe(customFileName?: string) {
+  const repo = getConfiguredGithubRepo();
+  if (repo) {
+    const ghUrl = getGithubMasterExeDownloadUrl(repo);
+    const a = document.createElement('a');
+    a.href = ghUrl;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.download = customFileName || 'AKASH-TUNNEL-MAPPER-Master-Setup.exe';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return;
+  }
+  const masterUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+  const exeBytes = buildWindowsDesktopExeBinary(masterUrl);
+  const blob = new Blob([exeBytes.buffer as ArrayBuffer], {
+    type: 'application/vnd.microsoft.portable-executable',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = customFileName || 'AKASH-TUNNEL-MAPPER-Master-Setup.exe';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 /**
  * Triggers browser download of the native Windows PC .exe launcher.
  */

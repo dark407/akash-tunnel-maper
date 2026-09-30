@@ -3351,8 +3351,6 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 <PanelRight className="w-3 h-3 text-amber-400" />
               )}
             </button>
-
-            <ThemeToggleButton compact />
           </div>
         </div>
 

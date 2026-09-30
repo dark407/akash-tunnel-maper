@@ -653,9 +653,23 @@ function createMainWindow() {
   // Load production files by default (never depends on localhost or dev server)
   const devStartUrl = process.env.ELECTRON_START_URL;
   const prodIndexFile = path.join(__dirname, '../dist/index.html');
+  let softwareEdition = 'master';
+  try {
+    const editionConfigPath = path.join(__dirname, 'edition.json');
+    if (fs.existsSync(editionConfigPath)) {
+      const parsedEdition = JSON.parse(fs.readFileSync(editionConfigPath, 'utf8'));
+      if (parsedEdition && parsedEdition.edition === 'user') {
+        softwareEdition = 'user';
+      }
+    }
+  } catch {
+    // Default to master
+  }
 
   if (devStartUrl) {
     mainWindow.loadURL(devStartUrl);
+  } else if (softwareEdition === 'user') {
+    mainWindow.loadFile(prodIndexFile, { query: { edition: 'user' } });
   } else {
     mainWindow.loadFile(prodIndexFile);
   }

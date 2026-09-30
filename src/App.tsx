@@ -97,6 +97,7 @@ import { EswaAiExecutiveChatbot } from './components/EswaAiExecutiveChatbot';
 import { loadSavedSheetConfig, saveSheetConfigToStorage } from './engine/sheetLayoutEngine';
 import { EswaLoadingScreen, EswaTunnelLogo } from './components/EswaBrandIdentity';
 import { ThemeToggleButton, useTheme } from './context/ThemeContext';
+import { subscribeAdminLicensingData } from './engine/softwareLicensingEngine';
 import { useResponsiveLayout } from './hooks/useResponsiveLayout';
 import {
   ArrowLeft,
@@ -107,6 +108,7 @@ import {
   Download,
   Plus,
   Save,
+  ShieldCheck,
   Trash2,
   Upload,
   Wand2,
@@ -123,13 +125,36 @@ type ScreenStep =
 
 const OFFLINE_DRAFT_STORAGE_KEY = 'akash_tunnel_mapper_field_draft_v2_fresh';
 
-export default function App() {
+interface AppProps {
+  isMasterSoftware?: boolean;
+  onOpenAdminPortal?: () => void;
+}
+
+export default function App({
+  isMasterSoftware = false,
+  onOpenAdminPortal,
+}: AppProps = {}) {
   const { theme, toggleTheme } = useTheme();
   const isLight = theme === 'light';
   const responsive = useResponsiveLayout();
   const [screen, setScreen] = useState<ScreenStep>('start');
+  const [isFirstOpening, setIsFirstOpening] = useState<boolean>(true);
+  const [pendingRequestCount, setPendingRequestCount] = useState<number>(0);
   const [isBootLoading, setIsBootLoading] = useState<boolean>(true);
   const [hasSavedDraft, setHasSavedDraft] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isMasterSoftware || !isFirstOpening) return;
+    const unsub = subscribeAdminLicensingData({
+      onRequests: (all) => {
+        setPendingRequestCount(all.filter((r) => r.status === 'PENDING').length);
+      },
+      onLicenses: () => {},
+      onReleases: () => {},
+      onMasterPcs: () => {},
+    });
+    return () => unsub();
+  }, [isMasterSoftware, isFirstOpening]);
 
   // Master Tunnel Geometry State (Authoritative real-world dimensions in meters)
   const [geometry, setGeometry] = useState<TunnelGeometry>(() =>
@@ -1674,9 +1699,34 @@ export default function App() {
           <rect width="100%" height="100%" fill="url(#eswaStartGrid)" />
         </svg>
 
-        <div className="absolute top-4 right-4 sm:top-6 sm:right-6 flex items-center gap-2 z-20">
-          <ThemeToggleButton />
-        </div>
+        {!isContinuous3DLoggerOpen && !isProjectMemoryModalOpen && (
+          <div className="absolute top-4 right-4 sm:top-6 sm:right-6 flex items-center gap-2 z-20">
+            {isMasterSoftware && isFirstOpening && onOpenAdminPortal && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFirstOpening(false);
+                  onOpenAdminPortal();
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 font-mono text-xs font-semibold rounded border transition-colors cursor-pointer whitespace-nowrap ${
+                  isLight
+                    ? 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300 shadow-xs'
+                    : 'bg-slate-800/90 hover:bg-slate-700 text-cyan-300 border-cyan-500/40'
+                }`}
+                title="Open Master Admin Website (Shown on first opening only)"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Master Admin Website</span>
+                {pendingRequestCount > 0 && (
+                  <span className="ml-1 px-1.5 py-0.2 rounded-full bg-amber-500 text-slate-950 font-bold text-[10px]">
+                    {pendingRequestCount}
+                  </span>
+                )}
+              </button>
+            )}
+            <ThemeToggleButton isMainWindow />
+          </div>
+        )}
 
         <div className={`${layoutStyles.majorPanel} max-w-lg items-center text-center`}>
           <EswaTunnelLogo size={responsive.isCompactHeight ? 'lg' : 'xl'} animated showBadge />
@@ -1693,14 +1743,20 @@ export default function App() {
 
           <div className="w-full flex flex-col gap-3">
             <button
-              onClick={() => setScreen('drive_and_photos')}
-              className={`w-full py-3 px-5 text-xs sm:text-sm ${layoutStyles.primaryButton}`}
+              onClick={() => {
+                setIsFirstOpening(false);
+                setScreen('drive_and_photos');
+              }}
+              className={`w-full py-3 px-5 text-xs sm:text-sm ${layoutStyles.primaryButton} border !bg-[#fafafa] !text-[#060303] !border-[#ffffff]`}
             >
               Start Face &amp; Wall Surface Mapping
             </button>
 
             <button
-              onClick={() => setIsContinuous3DLoggerOpen(true)}
+              onClick={() => {
+                setIsFirstOpening(false);
+                setIsContinuous3DLoggerOpen(true);
+              }}
               className="w-full py-2.5 sm:py-3 px-5 text-xs sm:text-sm font-semibold rounded-xl border border-slate-300 !bg-white hover:!bg-slate-50 !text-slate-900 shadow-xs inline-flex items-center justify-center gap-2 transition-all cursor-pointer"
             >
               <Compass className="w-4 h-4 shrink-0 text-sky-600" />
@@ -1710,6 +1766,7 @@ export default function App() {
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => {
+                  setIsFirstOpening(false);
                   setCustomEditorInitialTab('freeform_canvas');
                   setReturnScreenFromCustomEditor('start');
                   setScreen('geometry_custom');
@@ -1720,7 +1777,10 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => setScreen('geometry_cad')}
+                onClick={() => {
+                  setIsFirstOpening(false);
+                  setScreen('geometry_cad');
+                }}
                 className={layoutStyles.secondaryButton}
               >
                 Upload DWG / DXF
@@ -1728,7 +1788,10 @@ export default function App() {
             </div>
 
             <button
-              onClick={() => handleOpenProjectMemoryModal('projects')}
+              onClick={() => {
+                setIsFirstOpening(false);
+                handleOpenProjectMemoryModal('projects');
+              }}
               className={`w-full ${layoutStyles.secondaryButton}`}
             >
               <Database className={`w-3.5 h-3.5 ${isLight ? 'text-sky-600' : 'text-cyan-400'}`} />
@@ -1737,7 +1800,10 @@ export default function App() {
 
             {hasSavedDraft && (
               <button
-                onClick={handleResumeOfflineDraft}
+                onClick={() => {
+                  setIsFirstOpening(false);
+                  handleResumeOfflineDraft();
+                }}
                 className={`w-full py-2.5 px-4 text-xs font-medium border rounded-xl transition-colors cursor-pointer ${
                   isLight
                     ? 'bg-sky-50 hover:bg-sky-100 text-sky-900 border-sky-200'
@@ -1797,7 +1863,6 @@ export default function App() {
               <span className={`text-xs font-mono hidden sm:inline ${isLight ? 'text-sky-700' : 'text-cyan-400'}`}>
                 Units: meters (m)
               </span>
-              <ThemeToggleButton compact />
             </div>
           </div>
 
@@ -2106,9 +2171,7 @@ export default function App() {
             <h2 className="font-display font-semibold text-base sm:text-lg tracking-wide">
               Upload Master Tunnel DWG / DXF
             </h2>
-            <div className="flex items-center gap-2">
-              <ThemeToggleButton compact />
-            </div>
+            <div className="w-14" />
           </div>
 
           <input
@@ -2297,7 +2360,6 @@ export default function App() {
               <span className={`text-xs font-mono hidden sm:inline ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
                 Master: {geometry.width}m × {geometry.height}m
               </span>
-              <ThemeToggleButton compact />
             </div>
           </div>
 

@@ -32,8 +32,9 @@ export interface CadLayerVisibilityState {
   foliationHatch: boolean;
   lithology: boolean;
   traces: boolean;
-  strikeDipLabels: boolean;
-  waterInflow: boolean;
+  strikeDipLabels?: boolean;
+  waterInflow?: boolean;
+  waterInflows?: boolean;
   aiRawGhost: boolean;
   junctions: boolean;
   aiCrossProj: boolean;
