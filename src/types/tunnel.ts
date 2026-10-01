@@ -86,11 +86,21 @@ export interface ReferenceTracingImageConfig {
   rotationDeg?: number;
 }
 
+export interface CustomSurfacePortionConfig {
+  hasCrown: boolean;          // Default true; false if e.g. Transformer Hall bench/wall logging with only Face & Wall portion
+  hasLeftWall: boolean;       // Default true
+  hasRightWall: boolean;      // Default true
+  overrideLeftWallLength?: number | null;  // Optional manual override (m) for Left Wall length
+  overrideRightWallLength?: number | null; // Optional manual override (m) for Right Wall length
+  overrideCrownLength?: number | null;     // Optional manual override (m) for Crown arch length
+}
+
 export interface CustomTunnelProfileDefinition {
   id: string;
   name: string;
   category:
     | 'freeform'
+    | 'freeform_polygon'
     | 'powerhouse_cavern'
     | 'transformer_hall'
     | 'cavern_junction'
@@ -105,6 +115,7 @@ export interface CustomTunnelProfileDefinition {
   version: string;
   updatedAt: string;
   referenceImage?: ReferenceTracingImageConfig | null;
+  surfaceConfig?: CustomSurfacePortionConfig;
 }
 
 export interface ChainageProfileSegmentRecord {
@@ -158,6 +169,9 @@ export interface TunnelGeometry {
   rightWallHeight?: number;    // Explicit Right Wall vertical height (m) for asymmetric profiles
   leftWallArcLength?: number;  // True developed curvilinear length of Left Wall (m)
   rightWallArcLength?: number; // True developed curvilinear length of Right Wall (m)
+  hasCrown?: boolean;          // Whether Crown portion exists for this section (default true; false for e.g. Transformer Hall face+wall only)
+  hasLeftWall?: boolean;       // Whether Left Wall portion exists for this section
+  hasRightWall?: boolean;      // Whether Right Wall portion exists for this section
   invertLength?: number;       // True developed floor/invert length (m)
   totalPerimeterMeters?: number; // True closed vector perimeter (m)
   designAreaSqMeters?: number;   // True cross-sectional design area (m²)
@@ -271,6 +285,23 @@ export interface EngineeringSheetConfig {
   customFooterRemarks: string;
 }
 
+export interface StrikeDip3DSnapshotAppendix {
+  id: string;
+  capturedAt: string;
+  imageDataUrl: string;
+  viewModeLabel: string;
+  cameraAnglesLabel: string;
+  driveAzimuthDeg: number;
+  primaryPlaneLabel: string;
+  strikeDeg: number;
+  dipDirectionDeg: number;
+  dipDeg: number;
+  acuteStrikeToDriveAngleDeg: number;
+  favorabilityLabel: string;
+  rmrAdjustmentRating: number;
+  explanation: string;
+}
+
 export interface TunnelSettings {
   projectName?: string;        // Project / Contract Name for hierarchical Project -> Location -> Chainage storage
   tunnelName: string;
@@ -285,6 +316,7 @@ export interface TunnelSettings {
   mappedBy: string;
   lithology: string;           // e.g. "Quartzite / Phyllite with Shear Seam"
   sheetConfig?: EngineeringSheetConfig;
+  strikeDip3DSnapshots?: StrikeDip3DSnapshotAppendix[];
 }
 
 export interface CameraCalibration {

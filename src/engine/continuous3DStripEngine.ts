@@ -1,12 +1,22 @@
 import {
+  GsiParameters,
   Joint,
+  JointSet,
   LithologyRegion,
+  OverbreakUndercutAnalysis,
+  PhotoSurface,
   PlacedGeologicalSymbol,
   Point2D,
+  QIndexParameters,
+  RmrParameters,
+  RockMassSummaryTable,
   SavedProjectRecord,
+  SurfaceType,
   TunnelGeometry,
   TunnelSettings,
 } from '../types/tunnel';
+import { calculateBartonQSystem } from './photoWarpEngine';
+import { calculateBieniawskiRmr } from './rockMassClassificationEngine';
 
 export type StripRockTypeId =
   | 'Quartzite'
@@ -106,6 +116,8 @@ export interface ContinuousPullRecord {
   ucsRangeMpa: string;
   rmrValue?: number;
   rqdValue?: number;
+  qValue?: number;
+  gsiValue?: number;
   seepageCondition: string;
   structureDescription?: string;
   foliationCharacteristics?: string;
@@ -1649,19 +1661,574 @@ export function parsePullIntervalFromRecord(
   return { fromRd: start, toRd: Number((start + pull).toFixed(2)) };
 }
 
+export interface LiveActiveStripSessionInput {
+  settings?: TunnelSettings;
+  geometry?: TunnelGeometry;
+  joints?: Joint[];
+  jointSets?: JointSet[];
+  lithologyRegions?: LithologyRegion[];
+  placedSymbols?: PlacedGeologicalSymbol[];
+  rmrParams?: RmrParameters;
+  qIndexParams?: QIndexParameters;
+  gsiParams?: GsiParameters;
+  rockMassSummary?: RockMassSummaryTable;
+  overbreakAnalysis?: OverbreakUndercutAnalysis;
+  photos?: Record<SurfaceType, PhotoSurface>;
+}
+
+function mapRawRockToStripRockType(rawRock: string): {
+  rockType: StripRockTypeId;
+  codeSymbol: string;
+} {
+  const s = (rawRock || '').toLowerCase();
+  if (s.includes('vein')) return { rockType: 'Quartz veins', codeSymbol: '+ + +' };
+  if (s.includes('dolerite') || s.includes('dyke') || s.includes('basalt') || s.includes('gabbro'))
+    return { rockType: 'Dolerite', codeSymbol: 'Dol' };
+  if (s.includes('quartzitic') && s.includes('phyllite'))
+    return { rockType: 'Quartzitic Phyllite', codeSymbol: 'QP' };
+  if (s.includes('phyllitic') && s.includes('quartzite'))
+    return { rockType: 'Phyllitic Quartzite', codeSymbol: 'PQ' };
+  if (s.includes('phyllite') || s.includes('slate'))
+    return { rockType: 'Phyllite', codeSymbol: 'Ph' };
+  if (s.includes('schist') || s.includes('gneiss'))
+    return { rockType: 'Mica Schist', codeSymbol: 'Ms' };
+  if (s.includes('siltstone')) return { rockType: 'Siltstone', codeSymbol: 'Slt' };
+  if (s.includes('shale') || s.includes('clay')) return { rockType: 'Shale', codeSymbol: 'Sh' };
+  if (s.includes('sandstone') || s.includes('metasandstone'))
+    return { rockType: 'Metasandstone', codeSymbol: 'Mss' };
+  return { rockType: 'Quartzite', codeSymbol: 'Qtz' };
+}
+
+function mapInfillingToFillingThickness(infilling?: string, apertureMm?: string): StripFillingThicknessId {
+  const s = `${infilling || ''} ${apertureMm || ''}`.toLowerCase();
+  if (s.includes('>10') || s.includes('10cm') || s.includes('gouge') || s.includes('thick'))
+    return '>10cm';
+  if (s.includes('5-10') || s.includes('5~10') || s.includes('> 5 mm')) return '5~10cm';
+  if (s.includes('2-5') || s.includes('2~5') || s.includes('1-5') || s.includes('1–5'))
+    return '2~5cm';
+  if (s.includes('none') || s.includes('clean') || s.includes('tight')) return 'None';
+  return 'Clay Coated';
+}
+
+/**
+ * Unwraps a 2D point from any of the 4 mapping surfaces ('leftWall', 'crown', 'rightWall', 'face')
+ * into authoritative 3D continuous strip coordinates:
+ * - x = Chainage RD (m) within [interval.fromRd, interval.toRd]
+ * - y = Unfolded Perimeter Offset (m) within [0, totalPerimM]
+ *       where [0 .. leftWallArc] = Left Wall (Floor to Left Springline),
+ *             [leftWallArc .. leftWallArc + crownArc] = Crown Arch (Left to Right Springline),
+ *             [leftWallArc + crownArc .. totalPerimM] = Right Wall (Right Springline to Floor).
+ */
+export function mapUnwrappedSurfacePointTo3DStrip(
+  pt: Point2D,
+  surface: SurfaceType,
+  interval: { fromRd: number; toRd: number },
+  roundLen: number,
+  geom: TunnelGeometry | undefined,
+  leftWallArc: number,
+  crownArc: number,
+  rightWallArc: number,
+  totalPerimM: number,
+  jointDipDir?: number,
+  jointDip?: number,
+  driveAzimuth = 0,
+  vertexFrac = 0.5
+): Point2D {
+  const pullSpan = Math.max(0.5, interval.toRd - interval.fromRd);
+  const safeRound = Math.max(0.5, roundLen || pullSpan);
+  const width = Math.max(1.5, geom?.width || 8.4);
+  const height = Math.max(1.5, geom?.height || 7.2);
+  const wallH = Math.max(0.5, geom?.wallHeight || height * 0.58);
+
+  if (surface === 'leftWall') {
+    // leftWall world coords: x in [0, roundLen], y in [0, leftWallArc] (0 = floor, leftWallArc = springline)
+    const fracRd = Math.max(0, Math.min(1, pt.x / safeRound));
+    const rdX = interval.fromRd + fracRd * pullSpan;
+    const perimY = Math.max(0.15, Math.min(leftWallArc, (pt.y / Math.max(0.5, leftWallArc)) * leftWallArc));
+    return { x: Number(rdX.toFixed(2)), y: Number(perimY.toFixed(2)) };
+  }
+
+  if (surface === 'crown') {
+    // crown world coords: x in [-crownArc/2, +crownArc/2], y in [0, roundLen]
+    const fracRd = Math.max(0, Math.min(1, pt.y / safeRound));
+    const rdX = interval.fromRd + fracRd * pullSpan;
+    const normAcross = Math.max(0, Math.min(1, (pt.x + crownArc * 0.5) / Math.max(0.5, crownArc)));
+    const perimY = leftWallArc + normAcross * crownArc;
+    return { x: Number(rdX.toFixed(2)), y: Number(perimY.toFixed(2)) };
+  }
+
+  if (surface === 'rightWall') {
+    // rightWall world coords: x in [0, roundLen], y in [0, rightWallArc] (0 = floor, rightWallArc = springline)
+    const fracRd = Math.max(0, Math.min(1, pt.x / safeRound));
+    const rdX = interval.fromRd + fracRd * pullSpan;
+    // Unfolded strip goes Crown -> Right Springline -> Right Wall Floor
+    const distFromSpringline = Math.max(0, Math.min(rightWallArc - 0.15, rightWallArc - pt.y));
+    const perimY = leftWallArc + crownArc + distFromSpringline;
+    return { x: Number(rdX.toFixed(2)), y: Number(perimY.toFixed(2)) };
+  }
+
+  // 'face' surface: x in [-width/2, +width/2], y in [0, height]
+  let perimY = totalPerimM * 0.5;
+  if (pt.y >= wallH) {
+    // Point is on the Crown Arch of the face
+    const normArch = Math.max(0, Math.min(1, (pt.x + width * 0.5) / width));
+    perimY = leftWallArc + normArch * crownArc;
+  } else if (pt.x < 0) {
+    // Point is on the Left Wall half of the face
+    const normWall = Math.max(0.05, Math.min(1, pt.y / wallH));
+    perimY = normWall * leftWallArc;
+  } else {
+    // Point is on the Right Wall half of the face
+    const normWall = Math.max(0.05, Math.min(1, pt.y / wallH));
+    perimY = leftWallArc + crownArc + (1 - normWall) * rightWallArc;
+  }
+
+  // Project face trace along the pull interval [fromRd, toRd] using 3D dip direction & dip relative to drive
+  let rdX = interval.fromRd + vertexFrac * pullSpan;
+  if (typeof jointDipDir === 'number' && typeof jointDip === 'number') {
+    const relRad = (((jointDipDir - driveAzimuth) * Math.PI) / 180);
+    const dipRad = (Math.max(12, Math.min(88, jointDip)) * Math.PI) / 180;
+    const apparentSlope = Math.cos(relRad) / Math.max(0.25, Math.tan(dipRad));
+    const centerShift = ((pt.x / (width * 0.5)) * 0.35 + apparentSlope * 0.25) * pullSpan;
+    rdX = Math.max(
+      interval.fromRd + 0.05,
+      Math.min(
+        interval.toRd - 0.05,
+        interval.fromRd + (0.15 + vertexFrac * 0.7) * pullSpan + centerShift * (vertexFrac - 0.5)
+      )
+    );
+  }
+
+  return {
+    x: Number(rdX.toFixed(2)),
+    y: Number(Math.max(0.2, Math.min(totalPerimM - 0.2, perimY)).toFixed(2)),
+  };
+}
+
+function derivePullReportDetailsFromRecord(
+  rec: SavedProjectRecord,
+  pullSpan: number,
+  liveOverbreak?: OverbreakUndercutAnalysis
+) {
+  const rmrParams = rec.rmrParams;
+  const qParams = rec.qIndexParams;
+  const gsiParams = rec.gsiParams;
+  const summary = rec.rockMassSummary;
+  const joints = rec.joints || [];
+
+  // 1. Calculate RMR Value & Rock Class
+  let rmrValue: number | undefined;
+  let rmrClassNum: string | undefined;
+  if (rmrParams) {
+    const rmrCalc = calculateBieniawskiRmr(rmrParams);
+    if (rmrCalc.finalRmr !== null) {
+      rmrValue = rmrCalc.finalRmr;
+      rmrClassNum = rmrCalc.rockMassClassNumber;
+    } else {
+      // Sum available sub-ratings even if some parameter is still unconfirmed
+      const r1 = rmrParams.intactStrengthRating ?? 12;
+      const r2 = rmrParams.rqdRating ?? 15;
+      const r3 = rmrParams.spacingRating ?? 10;
+      const r4 = rmrParams.conditionSubRatings?.useDetailedSubRatings
+        ? (rmrParams.conditionSubRatings.persistenceRating || 0) +
+          (rmrParams.conditionSubRatings.apertureRating || 0) +
+          (rmrParams.conditionSubRatings.roughnessRating || 0) +
+          (rmrParams.conditionSubRatings.infillingRating || 0) +
+          (rmrParams.conditionSubRatings.weatheringRating || 0)
+        : (rmrParams.conditionRating ?? 20);
+      const r5 = rmrParams.groundwaterRating ?? 12;
+      const rAdj = rmrParams.orientationAdjustmentRating ?? -2;
+      const hasAnyRmr =
+        rmrParams.intactStrengthRating !== null ||
+        rmrParams.rqdRating !== null ||
+        rmrParams.spacingRating !== null ||
+        rmrParams.conditionRating !== null ||
+        rmrParams.groundwaterRating !== null;
+      if (hasAnyRmr) {
+        rmrValue = Math.max(5, Math.min(100, Math.round(r1 + r2 + r3 + r4 + r5 + rAdj)));
+      }
+    }
+  }
+
+  // 2. Calculate Q-System & RQD
+  let qValue: number | undefined;
+  let rqdValue: number | undefined = rmrParams?.rqdPercent ?? qParams?.rqd;
+  if (qParams && qParams.rqd > 0) {
+    const qCalc = calculateBartonQSystem(qParams, rec.geometry?.width || 8.4);
+    qValue = Number(qCalc.qValue.toFixed(2));
+    if (rqdValue === undefined || rqdValue === null) {
+      rqdValue = Math.round(qParams.rqd);
+    }
+    if (rmrValue === undefined && qValue > 0) {
+      // Bieniawski (1976) correlation RMR = 9 ln(Q) + 44
+      rmrValue = Math.max(15, Math.min(95, Math.round(9 * Math.log(qValue) + 44)));
+    }
+  }
+  if (rqdValue === undefined && joints.length > 0) {
+    const faceArea = Math.max(12, rec.geometry?.designAreaSqMeters || 45);
+    const totalLen = joints.reduce((acc, j) => acc + (j.persistenceMeters || 2.0), 0);
+    const jv = Math.max(3, Math.min(32, Math.round((totalLen / faceArea) * 8.5 + joints.length * 0.6)));
+    rqdValue = Math.max(15, Math.min(98, Math.round(115 - 3.3 * jv)));
+  }
+  if (rmrValue === undefined && rqdValue !== undefined) {
+    rmrValue = Math.max(25, Math.min(88, Math.round(rqdValue * 0.78 + 6)));
+  }
+
+  if (!rmrClassNum && rmrValue !== undefined) {
+    rmrClassNum =
+      rmrValue >= 81
+        ? 'I'
+        : rmrValue >= 61
+        ? 'II'
+        : rmrValue >= 41
+        ? 'III'
+        : rmrValue >= 21
+        ? 'IV'
+        : 'V';
+  }
+
+  // 3. GSI Value
+  let gsiValue: number | undefined;
+  if (gsiParams?.structureRating && gsiParams?.surfaceConditionRating) {
+    gsiValue = Math.round((gsiParams.structureRating + gsiParams.surfaceConditionRating) * 0.5);
+  } else if (rmrValue !== undefined) {
+    gsiValue = Math.max(10, rmrValue - 5);
+  }
+
+  // 4. Weathering Condition
+  const weatheringCondition =
+    summary?.weatheringGrade?.trim() ||
+    rmrParams?.conditionSubRatings?.weatheringValue?.trim() ||
+    (rmrValue !== undefined && rmrValue >= 65
+      ? 'W1 - W2 (Fresh to Slightly Weathered)'
+      : rmrValue !== undefined && rmrValue >= 45
+      ? 'W2 (Slightly Weathered)'
+      : rmrValue !== undefined
+      ? 'W3 (Moderately Weathered)'
+      : 'W2 (Slightly Weathered)');
+
+  // 5. Intact Rock Strength (UCS MPa)
+  const ucsRangeMpa =
+    summary?.strengthGrade?.trim() ||
+    (rmrParams?.intactStrengthValueMPa
+      ? `${rmrParams.intactStrengthValueMPa} MPa (${rmrParams.intactStrengthDescription || 'Strong Rock'})`
+      : gsiParams?.intactUcsMPa
+      ? `${gsiParams.intactUcsMPa} MPa`
+      : '100–200 MPa (Very Strong)');
+
+  // 6. Groundwater / Seepage Condition
+  const wetJointCond = joints.find(
+    (j) => j.waterCondition && j.waterCondition !== 'Dry' && j.waterCondition !== 'Completely Dry'
+  )?.waterCondition;
+  const seepageCondition =
+    summary?.groundwaterCondition?.trim() ||
+    rmrParams?.groundwaterDescription?.trim() ||
+    qParams?.jwDescription?.trim() ||
+    wetJointCond?.toUpperCase() ||
+    'DRY';
+
+  // 7. Structure & Foliation Characteristics from Mapped Joints + Summary
+  const setGroups = new Map<string, Joint[]>();
+  for (const j of joints) {
+    const sId = j.set || 'J1';
+    const arr = setGroups.get(sId) || [];
+    arr.push(j);
+    setGroups.set(sId, arr);
+  }
+  const setSummaries: string[] = [];
+  setGroups.forEach((jList, sId) => {
+    const meanDipDir = Math.round(
+      jList.reduce((a, b) => a + b.dipDirection, 0) / Math.max(1, jList.length)
+    );
+    const meanDip = Math.round(
+      jList.reduce((a, b) => a + b.dip, 0) / Math.max(1, jList.length)
+    );
+    setSummaries.push(
+      `${sId} (${String(meanDipDir).padStart(3, '0')}/${String(meanDip).padStart(2, '0')}°, n=${jList.length})`
+    );
+  });
+
+  const mappedSurfaces = Array.from(new Set(joints.map((j) => j.surface)));
+  const autoStructureText =
+    joints.length > 0
+      ? `Mapped ${joints.length} discontinuities across ${mappedSurfaces.join(', ')}: ${setSummaries.join(', ')}. ${
+          rmrParams?.conditionDescription || ''
+        }`.trim()
+      : '';
+
+  const structureDescription =
+    summary?.geologistRemarks?.trim() && autoStructureText
+      ? `${summary.geologistRemarks.trim()} | ${autoStructureText}`
+      : summary?.geologistRemarks?.trim() ||
+        autoStructureText ||
+        'Blocky & jointed rock mass; systematic joint sets observed across tunnel perimeter.';
+
+  const sampleJoint = joints[0];
+  const autoFoliationText = sampleJoint
+    ? `Spacing: ${
+        rmrParams?.spacingDescription || summary?.foliationBeddingSpacing || '0.2–0.6m (Moderately Spaced)'
+      }; Roughness: ${sampleJoint.roughness || 'Slightly rough'}; Aperture: ${
+        sampleJoint.apertureMm || '0.5–2.0mm'
+      }; Infilling: ${sampleJoint.infilling || 'Clay/Quartz coated'}.`
+    : '';
+
+  const foliationCharacteristics =
+    summary?.foliationBeddingSpacing?.trim() && !autoFoliationText
+      ? summary.foliationBeddingSpacing.trim()
+      : autoFoliationText ||
+        rmrParams?.conditionDescription?.trim() ||
+        'Joints closely to moderately spaced, continuous, slightly rough planar to undulating.';
+
+  // 8. Overbreak Volume (m³)
+  const overbreakVolumeM3 = Number(
+    (
+      rec.quantitySummary?.overbreakVolumeM3 ??
+      liveOverbreak?.overbreakVolumeCubicMeters ??
+      (rec.quantitySummary?.overbreakAreaSqM
+        ? rec.quantitySummary.overbreakAreaSqM * pullSpan
+        : liveOverbreak?.overbreakAreaSqMeters
+        ? liveOverbreak.overbreakAreaSqMeters * pullSpan
+        : 0)
+    ).toFixed(3)
+  );
+
+  // 9. Support Class & Installed Support Breakdown (Shotcrete, Mesh, Bolts, Steel Ribs, Forepoling)
+  const rockClass = summary?.rockUnit?.trim() || rmrClassNum || 'II';
+  const supportClass =
+    rmrClassNum === 'I'
+      ? 'Class I (Spot Bolting)'
+      : rmrClassNum === 'II'
+      ? 'Class II (2/3a)'
+      : rmrClassNum === 'III'
+      ? 'Class III (3b)'
+      : rmrClassNum === 'IV'
+      ? 'Class IV (Heavy SFRS + Ribs)'
+      : rmrClassNum === 'V'
+      ? 'Class V (Ribs + Forepoling)'
+      : `Class ${rockClass}`;
+
+  const rawSupport = summary?.installedSupport?.trim() || '';
+  const shotcreteMatch = rawSupport.match(/(\d+\s*(?:mm|cm)\s*(?:SFRS|Wet|Shotcrete)?)/i);
+  const boltMatch = rawSupport.match(/(L\s*=\s*\d+(?:\.\d+)?\s*m[^,;]*|\d+\/\d+m[^,;]*)/i);
+  const ribMatch = rawSupport.match(/((?:ISMB|HEB|TH)\s*\d+[^,;]*)/i);
+  const forepoleMatch = rawSupport.match(/(Forepol[^,;]*)/i);
+
+  const shotcreteInstalled = shotcreteMatch
+    ? shotcreteMatch[1]
+    : rmrValue !== undefined && rmrValue < 45
+    ? '150mm SFRS'
+    : '100mm SFRS / WET';
+  const wireMeshInstalled =
+    rawSupport.toLowerCase().includes('mesh') || (rmrValue !== undefined && rmrValue <= 65)
+      ? '1 Layer Weld Mesh'
+      : '1 Layer';
+  const rockBoltsInstalled = boltMatch
+    ? boltMatch[1]
+    : rmrValue !== undefined && rmrValue < 45
+    ? 'L=4.0m @ 1.2m c/c SN Bolts'
+    : 'L=3.5m @ 1.5m c/c SN Bolts';
+  const steelRibsInstalled = ribMatch
+    ? ribMatch[1]
+    : rmrValue !== undefined && rmrValue < 35
+    ? 'ISMB 150 @ 1.0m c/c'
+    : '-';
+  const forepolingInstalled = forepoleMatch
+    ? forepoleMatch[1]
+    : rmrValue !== undefined && rmrValue < 25
+    ? 'Ø32mm SDA L=4.0m'
+    : '-';
+
+  const supportDescription =
+    rawSupport ||
+    `${shotcreteInstalled}, ${wireMeshInstalled}, ${rockBoltsInstalled}${
+      steelRibsInstalled !== '-' ? `, ${steelRibsInstalled}` : ''
+    }`;
+
+  // 10. Photo Roll / Negative Record Summary from uploaded surface photos
+  const uploadedSurfaces = (['face', 'crown', 'leftWall', 'rightWall'] as SurfaceType[]).filter(
+    (s) => Boolean(rec.photos?.[s]?.image)
+  );
+  const photoRollNo = uploadedSurfaces.length > 0 ? `DIG-${uploadedSurfaces.length}S` : '';
+  const photoNegativeNo =
+    uploadedSurfaces.length > 0
+      ? uploadedSurfaces
+          .map((s) => (s === 'face' ? 'F' : s === 'crown' ? 'C' : s === 'leftWall' ? 'LW' : 'RW'))
+          .join('+')
+      : '';
+
+  return {
+    rmrValue,
+    rqdValue,
+    qValue,
+    gsiValue,
+    rockClass,
+    supportClass,
+    weatheringCondition,
+    ucsRangeMpa,
+    seepageCondition,
+    structureDescription,
+    foliationCharacteristics,
+    overbreakVolumeM3,
+    shotcreteInstalled,
+    wireMeshInstalled,
+    rockBoltsInstalled,
+    steelRibsInstalled,
+    forepolingInstalled,
+    supportDescription,
+    photoRollNo,
+    photoNegativeNo,
+  };
+}
+
 export function syncSavedProjectsIntoStripDatasets(
   existingDatasets: ContinuousTunnelStripDataset[],
   savedProjects: SavedProjectRecord[],
   activeSettings?: TunnelSettings,
   activeGeometry?: TunnelGeometry,
-  _activeJoints?: Joint[],
-  _activeLithology?: LithologyRegion[],
-  _activeSymbols?: PlacedGeologicalSymbol[]
+  activeJoints?: Joint[],
+  activeLithology?: LithologyRegion[],
+  activeSymbols?: PlacedGeologicalSymbol[],
+  liveSessionExtra?: LiveActiveStripSessionInput
 ): ContinuousTunnelStripDataset[] {
   let list =
     existingDatasets.length > 0
       ? [...existingDatasets]
       : [createFreshDefaultStripDataset()];
+
+  // Build a combined list of records: all savedProjects PLUS the live active Face/Unwrapped Log session
+  // so that everything mapped in the active workspace automatically feeds into 3D logging immediately!
+  const allRecords: SavedProjectRecord[] = [...savedProjects];
+
+  const effSettings = liveSessionExtra?.settings || activeSettings;
+  const effGeometry = liveSessionExtra?.geometry || activeGeometry;
+  const effJoints = liveSessionExtra?.joints || activeJoints || [];
+  const effLithology = liveSessionExtra?.lithologyRegions || activeLithology || [];
+  const effSymbols = liveSessionExtra?.placedSymbols || activeSymbols || [];
+  const effRmr = liveSessionExtra?.rmrParams;
+  const effQ = liveSessionExtra?.qIndexParams;
+  const effGsi = liveSessionExtra?.gsiParams;
+  const effSummary = liveSessionExtra?.rockMassSummary;
+  const effOverbreak = liveSessionExtra?.overbreakAnalysis;
+  const effPhotos = liveSessionExtra?.photos;
+
+  const hasLiveContent =
+    Boolean(effSettings?.projectName?.trim() || effSettings?.locationName?.trim() || effSettings?.tunnelName?.trim()) &&
+    (effJoints.length > 0 ||
+      effLithology.length > 0 ||
+      effSymbols.length > 0 ||
+      Boolean(effSummary?.rockType?.trim()) ||
+      Boolean(effSummary?.weatheringGrade?.trim()) ||
+      Boolean(effRmr?.intactStrengthRating !== null && effRmr?.intactStrengthRating !== undefined) ||
+      Boolean(effQ?.rqd));
+
+  if (effSettings && effGeometry && hasLiveContent) {
+    const liveProjName = (effSettings.projectName || 'Underground Project').trim();
+    const liveLocName = (effSettings.locationName || effSettings.tunnelName || 'Main Tunnel').trim();
+    const liveInterval = parsePullIntervalFromRecord(
+      effSettings.chainage || '',
+      effSettings.faceChainage || '',
+      effSettings.roundLength || 3.5
+    );
+
+    const matchingSavedIdx = allRecords.findIndex((r) => {
+      const rProj = (r.projectName || r.settings?.projectName || 'Underground Project').trim();
+      const rLoc = (r.tunnelName || r.location || 'Main Tunnel').trim();
+      if (
+        rProj.toLowerCase() !== liveProjName.toLowerCase() ||
+        rLoc.toLowerCase() !== liveLocName.toLowerCase()
+      ) {
+        return false;
+      }
+      const rInt = parsePullIntervalFromRecord(
+        r.chainage,
+        r.faceChainage,
+        r.settings?.roundLength || 3.5
+      );
+      return Math.abs(rInt.fromRd - liveInterval.fromRd) < 0.2 && Math.abs(rInt.toRd - liveInterval.toRd) < 0.2;
+    });
+
+    const synthesizedLiveRecord: SavedProjectRecord = {
+      id: matchingSavedIdx >= 0 ? allRecords[matchingSavedIdx].id : `live-${liveInterval.fromRd}-${liveInterval.toRd}`,
+      projectName: liveProjName,
+      tunnelName: liveLocName,
+      location: liveLocName,
+      chainage: effSettings.chainage || `RD ${liveInterval.fromRd}m - ${liveInterval.toRd}m`,
+      faceChainage: effSettings.faceChainage || `RD ${liveInterval.toRd}m`,
+      numericChainageMeters: liveInterval.toRd,
+      date: effSettings.date || new Date().toISOString().slice(0, 10),
+      savedAt: new Date().toISOString(),
+      mappingMode: 'tunnel_3d',
+      geometry: effGeometry,
+      settings: effSettings,
+      photos: (effPhotos || {}) as Record<SurfaceType, PhotoSurface>,
+      joints: effJoints,
+      customJointSetOverrides: {},
+      qIndexParams: effQ || {
+        rqd: 75,
+        jn: 6,
+        jnDescription: 'Two joint sets plus random',
+        jr: 2,
+        jrDescription: 'Smooth, undulating',
+        ja: 2,
+        jaDescription: 'Slightly altered joint walls',
+        jw: 1,
+        jwDescription: 'Dry excavations or minor inflow',
+        srf: 1,
+        srfDescription: 'Medium stress, favorable stress condition',
+        excavationCategory: 'Permanent mine openings / water tunnels (ESR = 1.6)',
+        esr: 1.0,
+      },
+      rmrParams: effRmr,
+      gsiParams: effGsi,
+      rockMassSummary: effSummary || {
+        rockType: effSettings.lithology || 'Quartzite',
+        rockUnit: 'Class II',
+        weatheringGrade: 'W2 (Slightly Weathered)',
+        strengthGrade: '100–200 MPa (Very Strong)',
+        foliationBeddingSpacing: '0.2–0.6 m (Moderately Spaced)',
+        groundwaterCondition: 'Dry to Damp',
+        overbreakCondition: 'Minor structural overbreak',
+        installedSupport: '100mm SFRS + 1 Layer Wire Mesh + L=3.5m SN Rock Bolts',
+        geologistRemarks: '',
+      },
+      lithologyRegions: effLithology,
+      controlPoints: [],
+      surveyProfile: {
+        surface: 'face',
+        orderedControlPointIds: [],
+        isClosed: true,
+        visible: true,
+        locked: false,
+        pullIntervalMeters: effSettings.roundLength || 3.5,
+        useValidPullInterval: true,
+        zoneReasonOverrides: {},
+        overallOverbreakCategory: 'GEOLOGICAL',
+        overallOverbreakReason: '',
+        overallUndercutCategory: 'MECHANICAL_EXCAVATION',
+        overallUndercutReason: '',
+      },
+      placedSymbols: effSymbols,
+      quantitySummary: {
+        designAreaSqM: effOverbreak?.designAreaSqMeters || effGeometry.designAreaSqMeters || 45,
+        surveyedAreaSqM: effOverbreak?.surveyedAreaSqMeters || effGeometry.designAreaSqMeters || 45,
+        overbreakAreaSqM: effOverbreak?.overbreakAreaSqMeters || 0,
+        undercutAreaSqM: effOverbreak?.undercutAreaSqMeters || 0,
+        overbreakPct: effOverbreak?.overbreakPercentage || 0,
+        undercutPct: effOverbreak?.undercutPercentage || 0,
+        maxOverbreakM: effOverbreak?.maxRadialOverbreakMeters || 0,
+        maxUndercutM: effOverbreak?.maxRadialUndercutMeters || 0,
+        pullIntervalM: effSettings.roundLength || 3.5,
+        overbreakVolumeM3: effOverbreak?.overbreakVolumeCubicMeters ?? null,
+        undercutVolumeM3: effOverbreak?.undercutVolumeCubicMeters ?? null,
+      },
+    };
+
+    if (matchingSavedIdx >= 0) {
+      allRecords[matchingSavedIdx] = synthesizedLiveRecord;
+    } else {
+      allRecords.push(synthesizedLiveRecord);
+    }
+  }
 
   // If only the blank default workspace exists and the user entered a project/location name in setup, sync those names
   if (
@@ -1670,21 +2237,19 @@ export function syncSavedProjectsIntoStripDatasets(
     list[0].pulls.length === 0 &&
     list[0].traces.length === 0
   ) {
-    const activeProj = activeSettings?.projectName?.trim();
+    const activeProj = effSettings?.projectName?.trim();
     const activeLoc =
-      activeSettings?.locationName?.trim() || activeSettings?.tunnelName?.trim();
+      effSettings?.locationName?.trim() || effSettings?.tunnelName?.trim();
     if (activeProj || activeLoc) {
       list[0] = {
         ...list[0],
         projectName: activeProj || list[0].projectName,
         tunnelLocationName: activeLoc || list[0].tunnelLocationName,
-        tunnelDiameterWidthM: activeGeometry?.width || list[0].tunnelDiameterWidthM,
-        tunnelArchHeightM: activeGeometry?.height || list[0].tunnelArchHeightM,
+        tunnelDiameterWidthM: effGeometry?.width || list[0].tunnelDiameterWidthM,
+        tunnelArchHeightM: effGeometry?.height || list[0].tunnelArchHeightM,
       };
     }
   }
-
-  const allRecords: SavedProjectRecord[] = [...savedProjects];
 
   const groups = new Map<string, SavedProjectRecord[]>();
   for (const rec of allRecords) {
@@ -1704,14 +2269,13 @@ export function syncSavedProjectsIntoStripDatasets(
         d.tunnelLocationName.trim().toLowerCase() === tunnelLocationName.toLowerCase()
     );
 
-    const firstGeom = records[0]?.geometry;
-    const upperW = Number(
-      ((firstGeom?.leftWallArcLength || 4.2) + (firstGeom?.crownArcLength || 6.0) * 0.5).toFixed(1)
-    );
-    const lowerW = Number(
-      ((firstGeom?.rightWallArcLength || 4.2) + (firstGeom?.crownArcLength || 6.0) * 0.5).toFixed(1)
-    );
-    const totalPerimM = upperW + lowerW;
+    const firstGeom = records[0]?.geometry || effGeometry;
+    const leftWallArc = Number((firstGeom?.leftWallArcLength || firstGeom?.wallHeight || 4.2).toFixed(2));
+    const rightWallArc = Number((firstGeom?.rightWallArcLength || firstGeom?.wallHeight || 4.2).toFixed(2));
+    const crownArc = Number((firstGeom?.crownArcLength || 6.0).toFixed(2));
+    const upperW = Number((leftWallArc + crownArc * 0.5).toFixed(1));
+    const lowerW = Number((rightWallArc + crownArc * 0.5).toFixed(1));
+    const totalPerimM = Number((upperW + lowerW).toFixed(2));
 
     if (!dataset) {
       const driveDeg = Math.round(records[0]?.settings?.driveDirection ?? 0);
@@ -1746,48 +2310,79 @@ export function syncSavedProjectsIntoStripDatasets(
         updatedAt: new Date().toISOString(),
       };
       list.push(dataset);
+    } else {
+      dataset.upperZoneWidthM = upperW;
+      dataset.lowerZoneWidthM = lowerW;
+      dataset.tunnelDiameterWidthM = firstGeom?.width || dataset.tunnelDiameterWidthM;
+      dataset.tunnelArchHeightM = firstGeom?.height || dataset.tunnelArchHeightM;
     }
 
     for (const rec of records) {
+      const roundLen = Math.max(1.0, rec.settings?.roundLength || 3.5);
       const interval = parsePullIntervalFromRecord(
         rec.chainage,
         rec.faceChainage,
-        rec.settings?.roundLength || 3.5
+        roundLen
       );
+      const pullSpan = Math.max(1, interval.toRd - interval.fromRd);
       const existingPullIdx = dataset.pulls.findIndex(
         (p) => Math.abs(p.fromRd - interval.fromRd) < 0.2 && Math.abs(p.toRd - interval.toRd) < 0.2
       );
       const driveAz = Number((rec.settings?.driveDirection ?? 0).toFixed(1));
       const oppAz = Number(((driveAz + 180) % 360).toFixed(1));
 
+      const derived = derivePullReportDetailsFromRecord(
+        rec,
+        pullSpan,
+        rec.id.startsWith('live-') ? effOverbreak : undefined
+      );
+
+      const primaryRockName =
+        rec.lithologyRegions?.[0]?.lithologyName?.trim() ||
+        rec.rockMassSummary?.rockType?.trim() ||
+        rec.settings?.lithology?.trim() ||
+        'Quartzite';
+      const mappedRockMeta = mapRawRockToStripRockType(primaryRockName);
+
       const pullObj: ContinuousPullRecord = {
-        id: existingPullIdx >= 0 ? dataset.pulls[existingPullIdx].id : `pull-${interval.fromRd}-${interval.toRd}`,
+        id:
+          existingPullIdx >= 0
+            ? dataset.pulls[existingPullIdx].id
+            : `pull-${interval.fromRd}-${interval.toRd}`,
         fromRd: interval.fromRd,
         toRd: interval.toRd,
         driveAzimuthDeg: driveAz,
-        gradientPct: 0,
+        gradientPct: existingPullIdx >= 0 ? dataset.pulls[existingPullIdx].gradientPct ?? 0.15 : 0.15,
         leftBoundaryAzimuthDeg: oppAz,
-        convergenceMm: '0 mm',
-        rockType: rec.rockMassSummary?.rockType || rec.settings?.lithology || '-',
-        rockDescription: rec.rockMassSummary?.geologistRemarks || '',
-        rockClass: rec.rockMassSummary?.rockUnit || '-',
-        supportDescription: rec.rockMassSummary?.installedSupport || '-',
-        shotcreteInstalled: '-',
-        wireMeshInstalled: '-',
-        rockBoltsInstalled: '-',
-        steelRibsInstalled: '-',
-        forepolingInstalled: '-',
-        seepageCondition: rec.rockMassSummary?.groundwaterCondition || '-',
-        weatheringCondition: rec.rockMassSummary?.weatheringGrade || '-',
-        ucsRangeMpa: rec.rockMassSummary?.strengthGrade || '-',
-        rmrValue: rec.rmrParams?.intactStrengthRating ? 60 : undefined,
-        rqdValue: rec.qIndexParams?.rqd,
-        overbreakVolumeM3: rec.quantitySummary?.overbreakVolumeM3 || 0,
-        excavationDefiningNo: '-',
+        convergenceMm: existingPullIdx >= 0 ? dataset.pulls[existingPullIdx].convergenceMm || '0 mm' : '0 mm',
+        rockType: `${mappedRockMeta.codeSymbol} - ${primaryRockName}`,
+        rockDescription:
+          rec.lithologyRegions?.[0]?.description?.trim() ||
+          rec.rockMassSummary?.geologistRemarks?.trim() ||
+          `${primaryRockName}, ${derived.weatheringCondition}, ${derived.ucsRangeMpa}`,
+        rockClass: derived.rockClass,
+        supportDescription: derived.supportDescription,
+        shotcreteInstalled: derived.shotcreteInstalled,
+        wireMeshInstalled: derived.wireMeshInstalled,
+        rockBoltsInstalled: derived.rockBoltsInstalled,
+        steelRibsInstalled: derived.steelRibsInstalled,
+        forepolingInstalled: derived.forepolingInstalled,
+        seepageCondition: derived.seepageCondition,
+        weatheringCondition: derived.weatheringCondition,
+        ucsRangeMpa: derived.ucsRangeMpa,
+        rmrValue: derived.rmrValue,
+        rqdValue: derived.rqdValue,
+        qValue: derived.qValue,
+        gsiValue: derived.gsiValue,
+        overbreakVolumeM3: derived.overbreakVolumeM3,
+        excavationDefiningNo: existingPullIdx >= 0 ? dataset.pulls[existingPullIdx].excavationDefiningNo || '1' : '1',
         excavationDate: rec.date,
-        supportClass: '-',
-        structureDescription: rec.rockMassSummary?.geologistRemarks || '',
-        foliationCharacteristics: '',
+        supportClass: derived.supportClass,
+        structureDescription: derived.structureDescription,
+        foliationCharacteristics: derived.foliationCharacteristics,
+        photoRollNo: derived.photoRollNo,
+        photoNegativeNo: derived.photoNegativeNo,
+        remarks: rec.rockMassSummary?.overbreakCondition || '',
         status: 'MAPPED',
         linkedSavedProjectId: rec.id,
         dateMapped: rec.date,
@@ -1803,54 +2398,223 @@ export function syncSavedProjectsIntoStripDatasets(
         dataset.pulls.push(pullObj);
       }
 
-      const pullSpan = Math.max(1, interval.toRd - interval.fromRd);
+      // Remove previous auto-synced traces/lithology/water for this record ID so updates in Face/Unwrapped Log refresh cleanly
+      const recPrefix = `sync-${rec.id}-`;
+      dataset.traces = dataset.traces.filter((t) => !t.id.startsWith(recPrefix));
+      dataset.lithologyZones = dataset.lithologyZones.filter((l) => !l.id.startsWith(recPrefix));
+      dataset.waterSymbols = dataset.waterSymbols.filter((w) => !w.id.startsWith(recPrefix));
+
+      const recGeom = rec.geometry || firstGeom;
+      const recLeftWallArc = Number((recGeom?.leftWallArcLength || recGeom?.wallHeight || 4.2).toFixed(2));
+      const recRightWallArc = Number((recGeom?.rightWallArcLength || recGeom?.wallHeight || 4.2).toFixed(2));
+      const recCrownArc = Number((recGeom?.crownArcLength || 6.0).toFixed(2));
+      const recTotalPerim = Number((recLeftWallArc + recCrownArc + recRightWallArc).toFixed(2));
+
+      // 1. Sync All Unwrapped & Face Joint Traces (leftWall, crown, rightWall, face)
+      const structMap: Record<string, StripStructureTypeId> = {
+        bedding: 'Bedding',
+        shale_band: 'Bedding',
+        fault: 'Fault',
+        shear: 'Shear Zone',
+        shear_zone: 'Shear Zone',
+        clay_band: 'Gouge/Clay Seam',
+        seam: 'Gouge/Clay Seam',
+        foliation: 'JS1 - Foliation',
+        lineation: 'JS1 - Foliation',
+        fracture: 'Fractured',
+        lithological_contact: 'Lithological Boundary',
+        dolerite: 'Geological Boundary',
+        vein: 'Geological Boundary',
+        joint: 'JS2 - Main Joint',
+      };
+
       for (const j of rec.joints || []) {
-        const traceId = `sync-${rec.id}-${j.id}`;
-        if (dataset.traces.some((t) => t.id === traceId)) continue;
         if (!j.geometry || j.geometry.length < 2) continue;
-        const structMap: Record<string, StripStructureTypeId> = {
-          bedding: 'Bedding',
-          fault: 'Fault',
-          shear: 'Shear Zone',
-          foliation: 'JS1 - Foliation',
-          fracture: 'Fractured',
-          joint: 'JS2 - Main Joint',
-        };
+        const traceId = `${recPrefix}tr-${j.id}`;
         const mappedPts: Point2D[] = j.geometry.map((pt, idx) => {
-          const fracX = idx / Math.max(1, j.geometry.length - 1);
-          const rdX = Number((interval.fromRd + fracX * pullSpan).toFixed(2));
-          const perimY = Number(
-            Math.max(
-              0.4,
-              Math.min(
-                totalPerimM - 0.4,
-                totalPerimM * 0.5 + (pt.y - (rec.geometry?.height || 7) * 0.5) * 1.4
-              )
-            ).toFixed(2)
+          const vFrac = idx / Math.max(1, j.geometry.length - 1);
+          return mapUnwrappedSurfacePointTo3DStrip(
+            pt,
+            j.surface || 'face',
+            interval,
+            roundLen,
+            recGeom,
+            recLeftWallArc,
+            recCrownArc,
+            recRightWallArc,
+            recTotalPerim,
+            j.dipDirection,
+            j.dip,
+            driveAz,
+            vFrac
           );
-          return { x: rdX, y: perimY };
         });
+
+        // Sort points by chainage RD if they span across RD so trend alignment works smoothly
+        const sortedPts = [...mappedPts].sort((a, b) => a.x - b.x);
+        const setLabel = j.set || 'JS1';
+        let structureType: StripStructureTypeId =
+          structMap[j.featureType || 'joint'] || 'JS2 - Main Joint';
+        if (j.featureType === 'joint') {
+          if (setLabel === 'J1' || setLabel === 'JS1') structureType = 'JS1 - Foliation';
+          else if (setLabel === 'J2' || setLabel === 'JS2') structureType = 'JS2 - Main Joint';
+          else if (setLabel === 'J3' || setLabel === 'JS3') structureType = 'JS3 - Main Joint';
+          else structureType = 'Secondary Joint';
+        }
+
         dataset.traces.push({
           id: traceId,
-          structureType: structMap[j.featureType || 'joint'] || 'JS2 - Main Joint',
-          setId: j.set || 'JS1',
-          orientationLabel: `${String(Math.round(j.dipDirection)).padStart(3, '0')}/${Math.round(j.dip)}`,
+          structureType,
+          setId: setLabel,
+          orientationLabel: `${String(Math.round(j.dipDirection)).padStart(3, '0')}/${String(
+            Math.round(j.dip)
+          ).padStart(2, '0')}`,
           dipDirectionDeg: Math.round(j.dipDirection),
           dipDeg: Math.round(j.dip),
-          fillingThickness: 'Clay Coated',
-          rawPoints: mappedPts,
-          points: mappedPts,
+          fillingThickness: mapInfillingToFillingThickness(j.infilling, j.apertureMm),
+          rawPoints: sortedPts,
+          points: sortedPts,
         });
+
+        // If joint has wet/dripping/flowing groundwater condition, also place a water symbol at its midpoint
+        if (
+          j.waterCondition &&
+          j.waterCondition !== 'Dry' &&
+          j.waterCondition !== 'Completely Dry'
+        ) {
+          const midPt = sortedPts[Math.floor(sortedPts.length / 2)];
+          if (midPt) {
+            const condMap: Record<string, StripGroundwaterId> = {
+              Damp: 'Moist/Damp',
+              Moist: 'Moist/Damp',
+              Wet: 'Wet',
+              Dripping: 'Dripping',
+              Flowing: 'Flowing',
+            };
+            dataset.waterSymbols.push({
+              id: `${recPrefix}jw-${j.id}`,
+              condition: condMap[j.waterCondition] || 'Wet',
+              position: { x: midPt.x, y: midPt.y },
+              label: j.waterCondition,
+            });
+          }
+        }
+      }
+
+      // 2. Sync All Unwrapped & Face Lithology Regions into 3D Strip Lithology Zones
+      if (rec.lithologyRegions && rec.lithologyRegions.length > 0) {
+        for (const lr of rec.lithologyRegions) {
+          const polyPts = lr.polygon || lr.polygonPoints || [];
+          if (polyPts.length < 3) continue;
+          const rockMeta = mapRawRockToStripRockType(
+            `${lr.lithologyName} ${lr.patternType || ''}`
+          );
+          const mappedPoly = polyPts.map((pt, idx) =>
+            mapUnwrappedSurfacePointTo3DStrip(
+              pt,
+              lr.surface || 'face',
+              interval,
+              roundLen,
+              recGeom,
+              recLeftWallArc,
+              recCrownArc,
+              recRightWallArc,
+              recTotalPerim,
+              undefined,
+              undefined,
+              driveAz,
+              idx / Math.max(1, polyPts.length - 1)
+            )
+          );
+          const patLower = (lr.patternType || '').toLowerCase();
+          dataset.lithologyZones.push({
+            id: `${recPrefix}lith-${lr.id}`,
+            rockType: rockMeta.rockType,
+            codeSymbol: rockMeta.codeSymbol,
+            label: `${rockMeta.codeSymbol} - ${lr.lithologyName} (RD ${interval.fromRd}–${interval.toRd}m)`,
+            polygon: mappedPoly,
+            isIntrusionBody:
+              rockMeta.rockType === 'Quartz veins' ||
+              rockMeta.rockType === 'Dolerite' ||
+              patLower.includes('vein') ||
+              patLower.includes('dolerite'),
+            isFracturedZone:
+              patLower.includes('fractured') ||
+              patLower.includes('shear') ||
+              patLower.includes('breccia') ||
+              patLower.includes('fault'),
+          });
+        }
+      } else {
+        // Ensure a base lithology zone covers this pull interval if user specified rockType in summary/settings
+        dataset.lithologyZones.push({
+          id: `${recPrefix}lith-base`,
+          rockType: mappedRockMeta.rockType,
+          codeSymbol: mappedRockMeta.codeSymbol,
+          label: `${mappedRockMeta.codeSymbol} - ${primaryRockName} (RD ${interval.fromRd}–${interval.toRd}m)`,
+          polygon: [
+            { x: interval.fromRd, y: 0 },
+            { x: interval.toRd, y: 0 },
+            { x: interval.toRd, y: recTotalPerim },
+            { x: interval.fromRd, y: recTotalPerim },
+          ],
+        });
+      }
+
+      // 3. Sync Placed Geological Symbols (Water Seepage, Water Flow, Shear/Fault/Vein markers)
+      for (const sym of rec.placedSymbols || []) {
+        if (sym.visible === false) continue;
+        const stripPt = mapUnwrappedSurfacePointTo3DStrip(
+          sym.point,
+          sym.surface || 'face',
+          interval,
+          roundLen,
+          recGeom,
+          recLeftWallArc,
+          recCrownArc,
+          recRightWallArc,
+          recTotalPerim,
+          sym.dipDirectionDeg,
+          sym.dipDeg,
+          driveAz,
+          0.5
+        );
+        if (sym.symbolType === 'water_seepage' || sym.symbolType === 'water_flow') {
+          dataset.waterSymbols.push({
+            id: `${recPrefix}sym-${sym.id}`,
+            condition: sym.symbolType === 'water_flow' ? 'Flowing' : 'Dripping',
+            position: stripPt,
+            label: sym.label || (sym.symbolType === 'water_flow' ? 'Flowing' : 'Seepage'),
+          });
+        }
       }
     }
 
     dataset.pulls = normalizePullsWithMissingGaps(dataset.pulls);
     if (dataset.pulls.length > 0) {
-      dataset.viewFromRd = Math.min(dataset.viewFromRd, dataset.pulls[0].fromRd);
-      dataset.viewToRd = Math.max(
-        dataset.viewToRd,
-        dataset.pulls[dataset.pulls.length - 1].toRd
-      );
+      const mappedPulls = dataset.pulls.filter((p) => p.status === 'MAPPED');
+      const minP = Math.min(...dataset.pulls.map((p) => p.fromRd));
+      const maxP = Math.max(...dataset.pulls.map((p) => p.toRd));
+      dataset.viewFromRd = minP;
+      dataset.viewToRd = Math.max(minP + 10, maxP);
+
+      // Auto-populate engineering report narrative bullets from the synced pulls if empty
+      if (!dataset.narrativeBullets || dataset.narrativeBullets.length === 0) {
+        const uniqueRocks = Array.from(new Set(mappedPulls.map((p) => p.rockType))).join(', ');
+        const uniqueWeath = Array.from(new Set(mappedPulls.map((p) => p.weatheringCondition))).join(', ');
+        const avgRmr = Math.round(
+          mappedPulls.reduce((a, b) => a + (b.rmrValue ?? 60), 0) / Math.max(1, mappedPulls.length)
+        );
+        const avgRqd = Math.round(
+          mappedPulls.reduce((a, b) => a + (b.rqdValue ?? 75), 0) / Math.max(1, mappedPulls.length)
+        );
+        dataset.narrativeBullets = [
+          `UNWRAPPED & FACE LOG AUTO-SYNCED: ${mappedPulls.length} excavation pull(s) from Ch. ${minP.toFixed(1)}m to ${maxP.toFixed(1)}m in ${dataset.tunnelLocationName}.`,
+          `ROCK TYPE & WEATHERING: Encountered lithology is ${uniqueRocks} with weathering condition ${uniqueWeath}.`,
+          `ROCK MASS CLASSIFICATION: Mean RMR = ${avgRmr} and Mean RQD = ${avgRqd}% across mapped pulls.`,
+          `PROJECTION CONVENTION: Unfolded perimeter map displays Left Wall (0–${leftWallArc}m), Crown Arch (${leftWallArc}–${(leftWallArc + crownArc).toFixed(1)}m), and Right Wall (${(leftWallArc + crownArc).toFixed(1)}–${totalPerimM}m).`,
+        ];
+      }
     }
   });
 

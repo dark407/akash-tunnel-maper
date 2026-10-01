@@ -217,6 +217,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   const [userOverlayJointsOnQuantity, setOverlayJointsOnQuantity] = useState<boolean>(false);
   const [userArrangement, setArrangement] = useState<SheetLayoutArrangement>('AUTO_INTELLIGENT');
   const [showConfidenceLabels, setShowConfidenceLabels] = useState<boolean>(false);
+  const [show3DAppendixOnSheet, setShow3DAppendixOnSheet] = useState<boolean>(true);
   const [sheetZoomMode, setSheetZoomMode] = useState<'auto_fit' | '100' | '125' | '150'>('auto_fit');
   const svgRef = useRef<SVGSVGElement | null>(null);
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
@@ -486,22 +487,27 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     getSheetPhotoSvgTransform,
   } = layout;
 
+  const appendixSnapshots = settings.strikeDip3DSnapshots || [];
+  const hasActive3DAppendix = show3DAppendixOnSheet && appendixSnapshots.length > 0;
+  const appendixBlockHeight = hasActive3DAppendix ? 320 : 0;
+  const totalSheetH = sheetH + appendixBlockHeight;
+
   const renderedSheetDimensions = useMemo(() => {
     if (sheetZoomMode !== 'auto_fit') {
       const pct = Number(sheetZoomMode) / 100;
       return {
         width: Math.round(sheetW * pct),
-        height: Math.round(sheetH * pct),
+        height: Math.round(totalSheetH * pct),
       };
     }
     const padX = responsive.isCompactScreen ? 6 : 12;
     const padY = responsive.isCompactScreen ? 6 : 10;
     const availW = Math.max(320, previewBounds.width - padX);
     const availH = Math.max(240, previewBounds.height - padY);
-    const fitScale = Math.min(availW / sheetW, availH / sheetH);
+    const fitScale = Math.min(availW / sheetW, availH / totalSheetH);
     return {
       width: Math.floor(sheetW * fitScale),
-      height: Math.floor(sheetH * fitScale),
+      height: Math.floor(totalSheetH * fitScale),
     };
   }, [
     sheetZoomMode,
@@ -511,7 +517,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     responsive.isCompactScreen,
     responsive.layoutRevision,
     sheetW,
-    sheetH,
+    totalSheetH,
   ]);
 
   // Build SVG polygon path for the authoritative master tunnel Face cross-section
@@ -1433,7 +1439,7 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
     img.onload = () => {
       const canvas = document.createElement('canvas');
       canvas.width = sheetW * 2;
-      canvas.height = sheetH * 2;
+      canvas.height = totalSheetH * 2;
       const ctx = canvas.getContext('2d')!;
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1645,6 +1651,18 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             />
             Show Confidence
           </label>
+
+          {appendixSnapshots.length > 0 && (
+            <label className="flex items-center gap-1.5 text-xs text-emerald-300 cursor-pointer select-none px-2 py-1 rounded bg-emerald-950/60 border border-emerald-700/60 font-mono">
+              <input
+                type="checkbox"
+                checked={show3DAppendixOnSheet}
+                onChange={(e) => setShow3DAppendixOnSheet(e.target.checked)}
+                className="rounded border-emerald-600 bg-slate-900 text-emerald-500"
+              />
+              + 3D Orientation Appendix ({appendixSnapshots.length})
+            </label>
+          )}
 
           {/* Screen Fit / Zoom Selector */}
           <select
@@ -1959,9 +1977,9 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
         >
           <svg
             ref={svgRef}
-            viewBox={`0 0 ${sheetW} ${sheetH}`}
+            viewBox={`0 0 ${sheetW} ${totalSheetH}`}
             width={sheetW}
-            height={sheetH}
+            height={totalSheetH}
             preserveAspectRatio="xMidYMid meet"
             className="block w-full h-full bg-white text-black select-none"
             style={{ fontFamily: "'IBM Plex Mono', monospace" }}
@@ -5065,6 +5083,196 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                     )}
                   </>
                 )}
+              </g>
+            )}
+
+            {/* ================================================================
+                APPENDIX A: CAPTURED 3D JOINT STRIKE & DIP ORIENTATION SNAPSHOTS
+               ================================================================ */}
+            {hasActive3DAppendix && (
+              <g transform={`translate(${margin}, ${sheetH - margin + 6})`}>
+                {/* Outer Appendix Frame */}
+                <rect
+                  x="0"
+                  y="0"
+                  width={sheetW - margin * 2}
+                  height={appendixBlockHeight - 12}
+                  fill="#FFFFFF"
+                  stroke="#0F172A"
+                  strokeWidth="1.8"
+                />
+                {/* Appendix Title Bar */}
+                <rect
+                  x="0"
+                  y="0"
+                  width={sheetW - margin * 2}
+                  height="24"
+                  fill="#0F172A"
+                />
+                <text
+                  x="12"
+                  y="16"
+                  fontSize="10"
+                  fontWeight="700"
+                  fill="#38BDF8"
+                >
+                  APPENDIX A — 3D JOINT STRIKE &amp; DIP ORIENTATION VISUALIZATION (RELATIVE TO TUNNEL DRIVE DIRECTION: {settings.driveDirection}°)
+                </text>
+                <text
+                  x={sheetW - margin * 2 - 12}
+                  y="16"
+                  textAnchor="end"
+                  fontSize="8.5"
+                  fontWeight="600"
+                  fill="#E2E8F0"
+                >
+                  CHAINAGE: {settings.faceChainage || settings.chainage || 'N/A'} · CAPTURED VIEWS: {Math.min(2, appendixSnapshots.length)}
+                </text>
+
+                {appendixSnapshots.slice(0, 2).map((snap, idx, arr) => {
+                  const totalInnerW = sheetW - margin * 2 - 20;
+                  const cardW = arr.length === 1 ? totalInnerW : (totalInnerW - 14) / 2;
+                  const cardX = 10 + idx * (cardW + 14);
+                  const imgW = arr.length === 1 ? Math.min(440, cardW * 0.44) : Math.min(310, cardW * 0.54);
+                  const infoX = cardX + imgW + 14;
+                  const infoW = Math.max(160, cardW - imgW - 22);
+
+                  return (
+                    <g key={snap.id}>
+                      <rect
+                        x={cardX}
+                        y="32"
+                        width={cardW}
+                        height={appendixBlockHeight - 52}
+                        fill="#F8FAFC"
+                        stroke="#CBD5E1"
+                        strokeWidth="1.1"
+                      />
+                      {/* Captured 3D Viewport Image */}
+                      <rect
+                        x={cardX + 6}
+                        y="38"
+                        width={imgW}
+                        height={appendixBlockHeight - 64}
+                        fill="#020617"
+                        stroke="#334155"
+                        strokeWidth="1"
+                      />
+                      <image
+                        href={snap.imageDataUrl}
+                        x={cardX + 6}
+                        y="38"
+                        width={imgW}
+                        height={appendixBlockHeight - 64}
+                        preserveAspectRatio="xMidYMid meet"
+                      />
+
+                      {/* Right-hand Engineering Metadata & Drive Favorability Readout */}
+                      <text
+                        x={infoX}
+                        y="54"
+                        fontSize="10"
+                        fontWeight="700"
+                        fill="#0F172A"
+                      >
+                        VIEW #{idx + 1}: {snap.primaryPlaneLabel.toUpperCase()}
+                      </text>
+                      <text
+                        x={infoX}
+                        y="70"
+                        fontSize="8.5"
+                        fontWeight="600"
+                        fill="#475569"
+                      >
+                        Mode: {snap.viewModeLabel} · Camera: {snap.cameraAnglesLabel} · Time: {snap.capturedAt}
+                      </text>
+
+                      <line
+                        x1={infoX}
+                        y1="78"
+                        x2={infoX + infoW}
+                        y2="78"
+                        stroke="#CBD5E1"
+                        strokeWidth="0.9"
+                      />
+
+                      {/* 3D Strike, Dip Direction, Dip & Drive Angle Box */}
+                      <rect
+                        x={infoX}
+                        y="86"
+                        width={infoW}
+                        height="54"
+                        rx="3"
+                        fill="#FFFFFF"
+                        stroke="#94A3B8"
+                        strokeWidth="0.9"
+                      />
+                      <text x={infoX + 10} y="104" fontSize="9.5" fontWeight="700" fill="#0F172A">
+                        STRIKE (RHR): {String(snap.strikeDeg).padStart(3, '0')}° · DIP DIR: {String(snap.dipDirectionDeg).padStart(3, '0')}° · TRUE DIP: {String(snap.dipDeg).padStart(2, '0')}°
+                      </text>
+                      <text x={infoX + 10} y="122" fontSize="9" fontWeight="700" fill="#0369A1">
+                        TUNNEL DRIVE AZIMUTH: {String(snap.driveAzimuthDeg).padStart(3, '0')}° · STRIKE-TO-DRIVE ANGLE (Δα): {snap.acuteStrikeToDriveAngleDeg}°
+                      </text>
+
+                      {/* Bieniawski RMR89 Favorability Badge */}
+                      <rect
+                        x={infoX}
+                        y="148"
+                        width={infoW}
+                        height="28"
+                        rx="3"
+                        fill={
+                          snap.rmrAdjustmentRating >= -2
+                            ? '#ECFDF5'
+                            : snap.rmrAdjustmentRating >= -5
+                            ? '#FFFBEB'
+                            : '#FFF1F2'
+                        }
+                        stroke={
+                          snap.rmrAdjustmentRating >= -2
+                            ? '#10B981'
+                            : snap.rmrAdjustmentRating >= -5
+                            ? '#F59E0B'
+                            : '#F43F5E'
+                        }
+                        strokeWidth="1"
+                      />
+                      <text
+                        x={infoX + 10}
+                        y="166"
+                        fontSize="9.2"
+                        fontWeight="700"
+                        fill={
+                          snap.rmrAdjustmentRating >= -2
+                            ? '#065F46'
+                            : snap.rmrAdjustmentRating >= -5
+                            ? '#92400E'
+                            : '#9F1239'
+                        }
+                      >
+                        BIENIAWSKI (1989) DRIVE ASSESSMENT: {snap.favorabilityLabel.toUpperCase()} (RMR ADJ: {snap.rmrAdjustmentRating})
+                      </text>
+
+                      {/* Multi-line Engineering Explanation */}
+                      {wrapSheetTextLines(
+                        `GEOTECHNICAL NOTE: ${snap.explanation}`,
+                        Math.max(38, Math.floor(infoW / 5.4)),
+                        3
+                      ).map((line, lIdx) => (
+                        <text
+                          key={lIdx}
+                          x={infoX}
+                          y={196 + lIdx * 14}
+                          fontSize="8.5"
+                          fontWeight="600"
+                          fill="#1E293B"
+                        >
+                          {line}
+                        </text>
+                      ))}
+                    </g>
+                  );
+                })}
               </g>
             )}
           </svg>

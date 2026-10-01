@@ -609,21 +609,86 @@ export function evaluateCustomProfileGeometry(
   const width = Number(Math.max(1.0, maxX - minX).toFixed(3));
   const height = Number(Math.max(1.0, maxY - minY).toFixed(3));
 
-  const rawLeftWallH =
-    leftWallMaxY > leftWallMinY
-      ? Number((leftWallMaxY - leftWallMinY).toFixed(3))
-      : Number((height * 0.58).toFixed(3));
-  const rawRightWallH =
-    rightWallMaxY > rightWallMinY
-      ? Number((rightWallMaxY - rightWallMinY).toFixed(3))
-      : Number((height * 0.58).toFixed(3));
-  const wallHeight = Number(Math.max(1.0, (rawLeftWallH + rawRightWallH) / 2).toFixed(3));
-  const leftWallHeight = wallHeight;
-  const rightWallHeight = wallHeight;
+  const surfCfg = profile.surfaceConfig;
+  const hasLeftWall = surfCfg?.hasLeftWall !== false;
+  const hasRightWall = surfCfg?.hasRightWall !== false;
+  const hasCrown = surfCfg?.hasCrown !== false;
 
-  leftWallArcLength = wallHeight;
-  rightWallArcLength = wallHeight;
-  if (crownArcLength < 0.2) crownArcLength = width * 1.15;
+  // Preserve true drawn Left Wall, Right Wall, and Crown lengths independently!
+  // Never force Left Wall and Right Wall to an equal average length.
+  let computedLeftWallArc = hasLeftWall ? Number(leftWallArcLength.toFixed(3)) : 0;
+  let computedRightWallArc = hasRightWall ? Number(rightWallArcLength.toFixed(3)) : 0;
+  let computedCrownArc = hasCrown ? Number(crownArcLength.toFixed(3)) : 0;
+
+  let computedLeftWallH = hasLeftWall
+    ? leftWallMaxY > leftWallMinY
+      ? Number((leftWallMaxY - leftWallMinY).toFixed(3))
+      : computedLeftWallArc > 0
+      ? computedLeftWallArc
+      : Number((height * 0.58).toFixed(3))
+    : 0;
+
+  let computedRightWallH = hasRightWall
+    ? rightWallMaxY > rightWallMinY
+      ? Number((rightWallMaxY - rightWallMinY).toFixed(3))
+      : computedRightWallArc > 0
+      ? computedRightWallArc
+      : Number((height * 0.58).toFixed(3))
+    : 0;
+
+  if (hasLeftWall && computedLeftWallArc <= 0) {
+    computedLeftWallArc = computedLeftWallH;
+  }
+  if (hasRightWall && computedRightWallArc <= 0) {
+    computedRightWallArc = computedRightWallH;
+  }
+  if (hasCrown && computedCrownArc <= 0) {
+    computedCrownArc = Number(width.toFixed(3));
+  }
+
+  // Apply explicit user length overrides if specified in surfaceConfig
+  if (
+    hasLeftWall &&
+    typeof surfCfg?.overrideLeftWallLength === 'number' &&
+    surfCfg.overrideLeftWallLength > 0
+  ) {
+    computedLeftWallArc = Number(surfCfg.overrideLeftWallLength.toFixed(3));
+    computedLeftWallH = computedLeftWallArc;
+  }
+  if (
+    hasRightWall &&
+    typeof surfCfg?.overrideRightWallLength === 'number' &&
+    surfCfg.overrideRightWallLength > 0
+  ) {
+    computedRightWallArc = Number(surfCfg.overrideRightWallLength.toFixed(3));
+    computedRightWallH = computedRightWallArc;
+  }
+  if (
+    hasCrown &&
+    typeof surfCfg?.overrideCrownLength === 'number' &&
+    surfCfg.overrideCrownLength >= 0
+  ) {
+    computedCrownArc = Number(surfCfg.overrideCrownLength.toFixed(3));
+  }
+
+  const leftWallHeight = computedLeftWallH;
+  const rightWallHeight = computedRightWallH;
+  leftWallArcLength = computedLeftWallArc;
+  rightWallArcLength = computedRightWallArc;
+  crownArcLength = computedCrownArc;
+
+  const wallHeight = Number(
+    Math.max(
+      0.5,
+      hasLeftWall && hasRightWall
+        ? Math.max(leftWallHeight, rightWallHeight)
+        : hasLeftWall
+        ? leftWallHeight
+        : hasRightWall
+        ? rightWallHeight
+        : height
+    ).toFixed(3)
+  );
 
   const totalPerimeterMeters = Number(
     segmentMetrics.reduce((s, m) => s + m.arcLength, 0).toFixed(3)
@@ -689,6 +754,7 @@ export function buildAuthoritativeCustomTunnelGeometry(
 
   const profileTypeMap: Record<CustomTunnelProfileDefinition['category'], ProfileType> = {
     freeform: 'freeform_custom',
+    freeform_polygon: 'freeform_custom',
     powerhouse_cavern: 'powerhouse_cavern',
     transformer_hall: 'transformer_hall',
     cavern_junction: 'cavern_junction',
@@ -707,6 +773,9 @@ export function buildAuthoritativeCustomTunnelGeometry(
     rightWallHeight: evaluated.rightWallHeight,
     leftWallArcLength: evaluated.leftWallArcLength,
     rightWallArcLength: evaluated.rightWallArcLength,
+    hasCrown: profile.surfaceConfig?.hasCrown !== false,
+    hasLeftWall: profile.surfaceConfig?.hasLeftWall !== false,
+    hasRightWall: profile.surfaceConfig?.hasRightWall !== false,
     invertLength: evaluated.invertLength,
     totalPerimeterMeters: evaluated.totalPerimeterMeters,
     designAreaSqMeters: evaluated.designAreaSqMeters,
@@ -735,6 +804,119 @@ export function buildAuthoritativeCustomTunnelGeometry(
     customProfile: profile,
     crossSectionPoints: evaluated.crossSectionPoints,
     crownArcLength: evaluated.crownArcLength,
+  };
+}
+
+/**
+ * Reconstructs or clones an editable `CustomTunnelProfileDefinition` from the active `TunnelGeometry`
+ * so opening "Edit Tunnel Shape" ALWAYS loads the existing shape instead of resetting to a blank canvas.
+ */
+export function deriveEditableCustomProfileFromGeometry(
+  geometry: TunnelGeometry,
+  defaultName = 'Custom Tunnel Shape'
+): CustomTunnelProfileDefinition {
+  if (geometry.customProfile && geometry.customProfile.controlPoints.length > 0) {
+    return {
+      ...geometry.customProfile,
+      controlPoints: geometry.customProfile.controlPoints.map((cp) => ({ ...cp })),
+      segments: geometry.customProfile.segments.map((s) => ({
+        ...s,
+        cp1: s.cp1 ? { ...s.cp1 } : undefined,
+        cp2: s.cp2 ? { ...s.cp2 } : undefined,
+      })),
+      surfaceConfig: {
+        hasCrown: geometry.customProfile.surfaceConfig?.hasCrown ?? geometry.hasCrown ?? true,
+        hasLeftWall:
+          geometry.customProfile.surfaceConfig?.hasLeftWall ?? geometry.hasLeftWall ?? true,
+        hasRightWall:
+          geometry.customProfile.surfaceConfig?.hasRightWall ?? geometry.hasRightWall ?? true,
+        overrideLeftWallLength:
+          geometry.customProfile.surfaceConfig?.overrideLeftWallLength ?? null,
+        overrideRightWallLength:
+          geometry.customProfile.surfaceConfig?.overrideRightWallLength ?? null,
+        overrideCrownLength: geometry.customProfile.surfaceConfig?.overrideCrownLength ?? null,
+      },
+    };
+  }
+
+  // Convert current parametric/CAD geometry into a clean 4-point editable custom profile (Left Wall, Crown Arc/Line, Right Wall, Invert)
+  const w = Math.max(1.5, geometry.width || 8.4);
+  const h = Math.max(1.5, geometry.height || 7.2);
+  const leftH = Math.max(
+    0.5,
+    geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight ?? 4.2
+  );
+  const rightH = Math.max(
+    0.5,
+    geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight ?? 4.2
+  );
+  const halfW = Number((w / 2).toFixed(2));
+  const hasCrown = geometry.hasCrown !== false;
+
+  const controlPoints: ProfileControlPoint[] = [
+    { id: 'cp-1', label: 'P1', x: -halfW, y: 0, role: 'left_invert' },
+    { id: 'cp-2', label: 'P2', x: -halfW, y: Number(leftH.toFixed(2)), role: 'left_wall_top' },
+    { id: 'cp-3', label: 'P3', x: halfW, y: Number(rightH.toFixed(2)), role: 'right_wall_top' },
+    { id: 'cp-4', label: 'P4', x: halfW, y: 0, role: 'right_invert' },
+  ];
+
+  const chord = Math.hypot(w, rightH - leftH);
+  const targetArchRise = Math.max(0, h - Math.max(leftH, rightH));
+  const isArchedCrown = hasCrown && targetArchRise > 0.15 && geometry.crownArcLength > chord + 0.05;
+  const bulge = isArchedCrown
+    ? computeBulgeFromArcLength(chord, Math.max(chord * 1.04, geometry.crownArcLength), 1)
+    : 0;
+
+  const segments: ProfileSegment[] = [
+    {
+      id: 'seg-cp-1-cp-2',
+      fromPointId: 'cp-1',
+      toPointId: 'cp-2',
+      type: 'line',
+      zoneRole: 'leftWall',
+    },
+    {
+      id: 'seg-cp-2-cp-3',
+      fromPointId: 'cp-2',
+      toPointId: 'cp-3',
+      type: isArchedCrown ? 'arc' : 'line',
+      arcBulge: isArchedCrown ? bulge : undefined,
+      arcConvexOutward: true,
+      zoneRole: hasCrown ? 'crown' : 'invert',
+    },
+    {
+      id: 'seg-cp-3-cp-4',
+      fromPointId: 'cp-3',
+      toPointId: 'cp-4',
+      type: 'line',
+      zoneRole: 'rightWall',
+    },
+    {
+      id: 'seg-cp-4-cp-1',
+      fromPointId: 'cp-4',
+      toPointId: 'cp-1',
+      type: 'line',
+      zoneRole: 'invert',
+    },
+  ];
+
+  return {
+    id: geometry.profileId || `custom-prof-${Date.now()}`,
+    name: geometry.profileName || defaultName,
+    category: 'freeform_polygon',
+    controlPoints,
+    segments,
+    isClosed: true,
+    version: geometry.profileVersion || 'v1.0',
+    updatedAt: new Date().toISOString(),
+    surfaceConfig: {
+      hasCrown: geometry.hasCrown !== false,
+      hasLeftWall: geometry.hasLeftWall !== false,
+      hasRightWall: geometry.hasRightWall !== false,
+      overrideLeftWallLength: null,
+      overrideRightWallLength: null,
+      overrideCrownLength: null,
+    },
   };
 }
 

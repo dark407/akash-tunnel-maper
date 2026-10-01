@@ -973,7 +973,7 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
               </div>
             </div>
 
-            {/* ROW 8: ROCK MASS RATING (RMR) & ROCK QUALITY DESIGNATION (RQD) GRAPH (0 - 100) */}
+            {/* ROW 8: ROCK MASS RATING (RMR) & ROCK QUALITY DESIGNATION (RQD) GRAPH (0 - 100) + NUMERIC RMR / RQD / Q / GSI */}
             {sheetConfig.showRmrRqdGraph && (
               <div className="grid grid-cols-12 border-b border-black text-[9.5px]">
                 <div className="col-span-2 border-r border-black px-2 py-2 font-bold flex flex-col justify-center gap-1">
@@ -985,60 +985,86 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
                     <span>ROCK QUALITY DESIGNATION - RQD</span>
                     <span className="border-b-2 border-black w-6 inline-block" />
                   </div>
+                  <div className="text-[8px] text-slate-700 font-semibold pt-0.5 border-t border-black/30">
+                    PULL SUMMARY: RMR / RQD / Q / GSI
+                  </div>
                 </div>
-                <div className="col-span-10 relative h-20 bg-white">
-                  <svg viewBox={`0 0 ${stripSvgW} 80`} className="w-full h-full overflow-visible">
-                    {/* Horizontal 0..100 Grid Lines */}
-                    {[20, 40, 60, 80, 100].map((val) => {
-                      const y = 80 - (val / 100) * 72;
+                <div className="col-span-10 flex flex-col bg-white">
+                  <div className="relative h-20">
+                    <svg viewBox={`0 0 ${stripSvgW} 80`} className="w-full h-full overflow-visible">
+                      {/* Horizontal 0..100 Grid Lines */}
+                      {[20, 40, 60, 80, 100].map((val) => {
+                        const y = 80 - (val / 100) * 72;
+                        return (
+                          <g key={val}>
+                            <line
+                              x1={0}
+                              y1={y}
+                              x2={stripSvgW}
+                              y2={y}
+                              stroke="#94a3b8"
+                              strokeWidth="0.6"
+                            />
+                            <text x="-4" y={y + 3} textAnchor="end" fontSize="7.5" fontWeight="700">
+                              {val}
+                            </text>
+                          </g>
+                        );
+                      })}
+                      {/* RQD Solid Step Line */}
+                      <polyline
+                        fill="none"
+                        stroke="#000"
+                        strokeWidth="1.6"
+                        points={visiblePulls
+                          .flatMap((p) => {
+                            const x1 = rdToX(Math.max(startRd, p.fromRd));
+                            const x2 = rdToX(Math.min(endRd, p.toRd));
+                            const rqd = p.rqdValue ?? 70;
+                            const y = 80 - (rqd / 100) * 72;
+                            return [`${x1.toFixed(1)},${y.toFixed(1)}`, `${x2.toFixed(1)},${y.toFixed(1)}`];
+                          })
+                          .join(' ')}
+                      />
+                      {/* RMR Dashed Step Line */}
+                      <polyline
+                        fill="none"
+                        stroke="#000"
+                        strokeWidth="1.6"
+                        strokeDasharray="6,4"
+                        points={visiblePulls
+                          .flatMap((p) => {
+                            const x1 = rdToX(Math.max(startRd, p.fromRd));
+                            const x2 = rdToX(Math.min(endRd, p.toRd));
+                            const rmr = p.rmrValue ?? 60;
+                            const y = 80 - (rmr / 100) * 72;
+                            return [`${x1.toFixed(1)},${y.toFixed(1)}`, `${x2.toFixed(1)},${y.toFixed(1)}`];
+                          })
+                          .join(' ')}
+                      />
+                    </svg>
+                  </div>
+                  {/* Per-Pull Numeric Classification Values (RMR, RQD, Q, GSI) */}
+                  <div className="flex border-t border-black/40 bg-slate-50/70 text-[8.5px]">
+                    {visiblePulls.map((p) => {
+                      const wPct =
+                        ((Math.min(endRd, p.toRd) - Math.max(startRd, p.fromRd)) / spanM) *
+                        100;
+                      const rmrVal = p.rmrValue ?? 60;
+                      const rqdVal = p.rqdValue ?? 70;
+                      const qVal = p.qValue ?? Number(Math.max(0.1, Math.exp((rmrVal - 44) / 9)).toFixed(2));
+                      const gsiVal = p.gsiValue ?? Math.max(15, rmrVal - 5);
                       return (
-                        <g key={val}>
-                          <line
-                            x1={0}
-                            y1={y}
-                            x2={stripSvgW}
-                            y2={y}
-                            stroke="#94a3b8"
-                            strokeWidth="0.6"
-                          />
-                          <text x="-4" y={y + 3} textAnchor="end" fontSize="7.5" fontWeight="700">
-                            {val}
-                          </text>
-                        </g>
+                        <div
+                          key={p.id}
+                          style={{ width: `${wPct}%` }}
+                          className="border-r border-black last:border-r-0 py-0.5 px-1 text-center font-bold truncate"
+                        >
+                          RMR {rmrVal} | RQD {rqdVal}% | Q {qVal} | GSI {gsiVal}
+                        </div>
                       );
                     })}
-                    {/* RQD Solid Step Line */}
-                    <polyline
-                      fill="none"
-                      stroke="#000"
-                      strokeWidth="1.6"
-                      points={visiblePulls
-                        .flatMap((p) => {
-                          const x1 = rdToX(Math.max(startRd, p.fromRd));
-                          const x2 = rdToX(Math.min(endRd, p.toRd));
-                          const rqd = p.rqdValue ?? 70;
-                          const y = 80 - (rqd / 100) * 72;
-                          return [`${x1.toFixed(1)},${y.toFixed(1)}`, `${x2.toFixed(1)},${y.toFixed(1)}`];
-                        })
-                        .join(' ')}
-                    />
-                    {/* RMR Dashed Step Line */}
-                    <polyline
-                      fill="none"
-                      stroke="#000"
-                      strokeWidth="1.6"
-                      strokeDasharray="6,4"
-                      points={visiblePulls
-                        .flatMap((p) => {
-                          const x1 = rdToX(Math.max(startRd, p.fromRd));
-                          const x2 = rdToX(Math.min(endRd, p.toRd));
-                          const rmr = p.rmrValue ?? 60;
-                          const y = 80 - (rmr / 100) * 72;
-                          return [`${x1.toFixed(1)},${y.toFixed(1)}`, `${x2.toFixed(1)},${y.toFixed(1)}`];
-                        })
-                        .join(' ')}
-                    />
-                  </svg>
+                  </div>
                 </div>
               </div>
             )}

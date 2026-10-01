@@ -217,6 +217,8 @@ export class CanvasCoordinateManager {
   public readonly viewport: CanvasViewportState;
   public readonly stageMetrics: CanvasStageMetrics;
   public readonly photoTransform: SurfaceTransform;
+  private cachedSvgMetrics: ReturnType<typeof getRenderedSvgViewBoxMetrics> | null = null;
+  private cachedSvgMetricsAt = 0;
 
   constructor(config: CanvasCoordinateManagerConfig) {
     this.svgElementRef = config.svgElement;
@@ -232,6 +234,21 @@ export class CanvasCoordinateManager {
 
   public get worldGroupElement(): SVGGElement | null {
     return unwrapElement(this.worldGroupElementRef);
+  }
+
+  private getCachedSvgMetrics(): ReturnType<typeof getRenderedSvgViewBoxMetrics> | null {
+    const svg = this.svgElement;
+    if (!svg) return null;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (!this.cachedSvgMetrics || now - this.cachedSvgMetricsAt > 32) {
+      this.cachedSvgMetrics = getRenderedSvgViewBoxMetrics(
+        svg,
+        this.stageMetrics.viewW,
+        this.stageMetrics.viewH
+      );
+      this.cachedSvgMetricsAt = now;
+    }
+    return this.cachedSvgMetrics;
   }
 
   /**
@@ -305,13 +322,31 @@ export class CanvasCoordinateManager {
    * WORLD `(x, y in meters)` -> SCREEN `(clientX, clientY, cx, cy on stage, u, v on photo)`
    */
   public worldToScreen(worldPoint: Point2D): ScreenPointProjection {
-    return worldToScreen(worldPoint, {
-      svgElement: this.svgElement,
-      worldGroupElement: this.worldGroupElement,
-      viewport: this.viewport,
-      stageMetrics: this.stageMetrics,
-      photoTransform: this.photoTransform,
-    });
+    const { viewW, viewH } = this.stageMetrics;
+    const { cx, cy } = tunnelMetersToCanvasWorld(worldPoint, this.stageMetrics);
+    const halfW = viewW / 2;
+    const halfH = viewH / 2;
+    const rootX = (cx - halfW) * this.viewport.zoom + halfW + this.viewport.panX;
+    const rootY = (cy - halfH) * this.viewport.zoom + halfH + this.viewport.panY;
+
+    const svgMetrics = this.getCachedSvgMetrics();
+    const clientX = svgMetrics ? svgMetrics.letterboxLeft + rootX * svgMetrics.meetScale : cx;
+    const clientY = svgMetrics ? svgMetrics.letterboxTop + rootY * svgMetrics.meetScale : cy;
+
+    const photoUV = canvasWorldToPhotoUV(cx, cy, this.stageMetrics, this.photoTransform);
+
+    return {
+      clientX,
+      clientY,
+      cx,
+      cy,
+      rootX,
+      rootY,
+      u: photoUV.u,
+      v: photoUV.v,
+      x: worldPoint.x,
+      y: worldPoint.y,
+    };
   }
 
   /**

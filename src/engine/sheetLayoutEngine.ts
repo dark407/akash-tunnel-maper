@@ -442,14 +442,26 @@ export function computeFinalSheetAutoLayout(params: {
     outputMode !== 'EXPORT_PHOTO_ONLY';
 
   const roundLen = Math.max(1.5, settings.roundLength || 3.5);
-  const crownSpan = Math.max(1.0, geometry.crownArcLength || geometry.width);
-  const unifiedWallSpan = Math.max(
-    1.0,
-    geometry.wallHeight || geometry.leftWallHeight || geometry.rightWallHeight || 4.2
-  );
-  const leftWallSpan = unifiedWallSpan;
-  const rightWallSpan = unifiedWallSpan;
-  const totalDevelopedWidthMeters = leftWallSpan + crownSpan + rightWallSpan;
+  const hasLeftWall = geometry.hasLeftWall !== false;
+  const hasRightWall = geometry.hasRightWall !== false;
+  const hasCrown =
+    geometry.hasCrown !== false &&
+    (geometry.crownArcLength === undefined || geometry.crownArcLength > 0.05);
+
+  const crownSpan = hasCrown ? Math.max(0.5, geometry.crownArcLength || geometry.width) : 0;
+  const leftWallSpan = hasLeftWall
+    ? Math.max(
+        0.5,
+        geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight ?? 4.2
+      )
+    : 0;
+  const rightWallSpan = hasRightWall
+    ? Math.max(
+        0.5,
+        geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight ?? 4.2
+      )
+    : 0;
+  const totalDevelopedWidthMeters = Math.max(1.0, leftWallSpan + crownSpan + rightWallSpan);
 
   // Minimize empty white space around the Tunnel Face while reserving safe room for dimension lines & callout labels
   const calloutCount = joints.length + placedSymbolCount + controlPointCount;
@@ -489,7 +501,7 @@ export function computeFinalSheetAutoLayout(params: {
   const crownW_px = Number((crownSpan * perimeterPxPerMeter).toFixed(2));
   const leftWallW_px = Number((leftWallSpan * perimeterPxPerMeter).toFixed(2));
   const rightWallW_px = Number((rightWallSpan * perimeterPxPerMeter).toFixed(2));
-  const wallW_px = leftWallW_px;
+  const wallW_px = Math.max(leftWallW_px, rightWallW_px);
   const roundH_px = Number((roundLen * perimeterPxPerMeter).toFixed(2));
 
   // Vertically center the unified [Developed Perimeter + Projection Gap + Tunnel Face] assembly
@@ -500,8 +512,10 @@ export function computeFinalSheetAutoLayout(params: {
     Math.max(22, (drawingArenaBox.height - totalAssemblyHeightPx) / 2);
 
   const planTopY = Number(assemblyTopY.toFixed(1));
-  const crownLeftX = Number((planCenterX - crownW_px / 2).toFixed(2));
-  const leftWallLeftX = Number((crownLeftX - leftWallW_px).toFixed(2));
+  const totalDevelopedW_px = leftWallW_px + crownW_px + rightWallW_px;
+  const stripStartLeftX = Number((planCenterX - totalDevelopedW_px / 2).toFixed(2));
+  const leftWallLeftX = stripStartLeftX;
+  const crownLeftX = Number((leftWallLeftX + leftWallW_px).toFixed(2));
   const rightWallLeftX = Number((crownLeftX + crownW_px).toFixed(2));
 
   const faceCenterX = planCenterX;
@@ -922,8 +936,9 @@ export function computeFinalSheetAutoLayout(params: {
       };
     }
     if (surface === 'crown') {
+      const crownMidX = crownLeftX + crownW_px / 2;
       return {
-        x: Number((planCenterX + pt.x * perimeterPxPerMeter).toFixed(2)),
+        x: Number((crownMidX + pt.x * perimeterPxPerMeter).toFixed(2)),
         y: Number((planTopY + roundH_px - pt.y * perimeterPxPerMeter).toFixed(2)),
       };
     }

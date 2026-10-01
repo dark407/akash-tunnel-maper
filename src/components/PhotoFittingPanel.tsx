@@ -56,6 +56,7 @@ interface PhotoFittingPanelProps {
   canRedoTransform: boolean;
   onApply: () => void;
   onCancel: () => void;
+  onOpenCustomProfileEditor?: () => void;
 }
 
 export const PhotoFittingPanel: React.FC<PhotoFittingPanelProps> = ({
@@ -81,6 +82,7 @@ export const PhotoFittingPanel: React.FC<PhotoFittingPanelProps> = ({
   canRedoTransform,
   onApply,
   onCancel,
+  onOpenCustomProfileEditor,
 }) => {
   const t = currentPhoto.transform;
   const edgeOffsets = t.edgeOffsets || [
@@ -101,6 +103,16 @@ export const PhotoFittingPanel: React.FC<PhotoFittingPanelProps> = ({
           PHOTO FITTING ({activeSurface.toUpperCase()})
         </span>
         <div className="flex items-center gap-1">
+          {onOpenCustomProfileEditor && (
+            <button
+              type="button"
+              onClick={onOpenCustomProfileEditor}
+              title="Edit Master Tunnel Shape & Wall/Crown Sizes"
+              className="px-2 py-0.5 text-[10px] font-mono font-bold bg-sky-600 hover:bg-sky-500 text-white rounded cursor-pointer mr-1"
+            >
+              Edit Tunnel Shape
+            </button>
+          )}
           <button
             onClick={onUndoTransform}
             disabled={!canUndoTransform}
@@ -136,6 +148,15 @@ export const PhotoFittingPanel: React.FC<PhotoFittingPanelProps> = ({
               onChangeSubTab(tab.id);
               onToggleAddingControlPointMode(false);
               onToggleDrawingCustomMaskMode(false);
+              if (tab.id === 'custom_mask' && (!t.customMaskPoints || t.customMaskPoints.length < 3)) {
+                const pts = createTunnelBoundaryCustomMask(activeSurface, geometry, settings);
+                onUpdateTransform((prev) => ({
+                  ...prev,
+                  useCustomMask: true,
+                  cropToGeometry: true,
+                  customMaskPoints: pts,
+                }));
+              }
             }}
             className={`py-1.5 px-1 rounded font-semibold transition-colors text-center ${
               subTab === tab.id
@@ -813,10 +834,22 @@ export const PhotoFittingPanel: React.FC<PhotoFittingPanelProps> = ({
            ================================================================ */}
         {subTab === 'custom_mask' && (
           <div className="space-y-2.5">
-            <div className="p-2 bg-amber-950/30 border border-amber-700/50 rounded text-[10px] text-amber-200 leading-relaxed">
-              <strong>Custom Tunnel Shape Boundary (P1..P{customMaskPts.length || 'n'}):</strong>{' '}
-              Create an irregular boundary matching the real tunnel geometry instead of a simple
-              rectangle. Drag any vertex <strong>P1, P2, P3...</strong> on the canvas.
+            <div className="p-2 bg-amber-950/30 border border-amber-700/50 rounded text-[10px] text-amber-200 leading-relaxed space-y-1.5">
+              <div>
+                <strong>Custom Tunnel Shape Boundary (P1..P{customMaskPts.length || 'n'}):</strong>{' '}
+                Your active tunnel geometry is loaded below. Drag any vertex{' '}
+                <strong>P1, P2, P3...</strong> on the canvas to fit the photo boundary, or open the
+                Master Custom Shape Editor to customize Left Wall, Right Wall &amp; Crown lengths.
+              </div>
+              {onOpenCustomProfileEditor && (
+                <button
+                  type="button"
+                  onClick={onOpenCustomProfileEditor}
+                  className="w-full py-1.5 px-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-bold cursor-pointer text-center"
+                >
+                  Open Master Custom Tunnel Shape Editor →
+                </button>
+              )}
             </div>
 
             <div className="flex items-center justify-between p-2 bg-slate-950 border border-slate-800 rounded">

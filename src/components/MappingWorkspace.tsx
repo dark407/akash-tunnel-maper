@@ -82,6 +82,7 @@ import {
 } from '../engine/canvasTransform';
 import {
   calculateJointOrientation3D,
+  computeVirtualScanlineMetrics,
   JOINT_SET_PALETTE,
   runQualityControlValidation,
 } from '../engine/orientationEngine';
@@ -90,6 +91,7 @@ import {
   createDefaultMeshControlPoints,
   evaluateForwardWarpedUV,
   generatePiecewiseWarpedPhotoDataUrl,
+  getWarpDeformationSignature,
 } from '../engine/photoWarpEngine';
 import { PhotoEditorSubTab, PhotoFittingPanel } from './PhotoFittingPanel';
 import { GeologyAndQIndexDrawer } from './GeologyAndQIndexDrawer';
@@ -153,6 +155,14 @@ import {
   Box,
 } from 'lucide-react';
 import { EswaTunnelLogo } from './EswaBrandIdentity';
+import {
+  SimpleAddonTab,
+  SimpleFullPhotoAndAccuracyModal,
+} from './SimpleFullPhotoAndAccuracyModal';
+import {
+  Interactive3DStrikeDipVisualizerModal,
+  Mini3DStrikeDipPreview,
+} from './Interactive3DStrikeDipVisualizer';
 
 interface MappingWorkspaceProps {
   geometry: TunnelGeometry;
@@ -231,6 +241,8 @@ interface MappingWorkspaceProps {
     tab?: 'projects' | 'sheet_settings' | 'volumes' | 'geometries' | 'continuous_3d_log'
   ) => void;
   onOpenCustomProfileEditor?: () => void;
+  onUpdateGeometry?: (nextGeometry: TunnelGeometry) => void;
+  onUpdateSettings?: React.Dispatch<React.SetStateAction<TunnelSettings>>;
   savedProjects?: SavedProjectRecord[];
   onLoadProjectRecord?: (rec: SavedProjectRecord) => void;
 }
@@ -317,6 +329,8 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   onGenerateSampleAsBuiltProfile,
   onOpenProjectMemoryModal,
   onOpenCustomProfileEditor,
+  onUpdateGeometry,
+  onUpdateSettings,
   savedProjects = [],
   onLoadProjectRecord,
 }) => {
@@ -532,8 +546,13 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   const [showDepthReliefOverlay, setShowDepthReliefOverlay] = useState<boolean>(false);
   const [showPhotogrammetryModal, setShowPhotogrammetryModal] = useState<boolean>(false);
 
-  // Measure tool points in real-world meters
+  // Measure tool points in real-world meters & 2-Point Laser/Tape Scale Calibration input
   const [measurePts, setMeasurePts] = useState<Point2D[]>([]);
+  const [knownScaleDistanceInput, setKnownScaleDistanceInput] = useState<string>('3.50');
+  const [showSimpleAccuracyModal, setShowSimpleAccuracyModal] = useState<boolean>(false);
+  const [simpleAccuracyInitialTab, setSimpleAccuracyInitialTab] =
+    useState<SimpleAddonTab>('full_photo_1ft_scale');
+  const [show3DStrikeDipModal, setShow3DStrikeDipModal] = useState<boolean>(false);
 
   // Live cursor coordinates in real-world meters & canvas pixels
   const [cursorMeters, setCursorMeters] = useState<Point2D | null>(null);
@@ -574,6 +593,18 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   const [initialTransformSnapshot, setInitialTransformSnapshot] =
     useState<SurfaceTransform | null>(null);
   const [liveWarpedImageUrl, setLiveWarpedImageUrl] = useState<string | null>(null);
+  const lastTransformHistoryPushRef = useRef<number>(0);
+
+  // If Crown or a Wall is disabled in Custom Tunnel Shape (e.g. Transformer Hall with Face + Walls only), ensure activeSurface is valid
+  useEffect(() => {
+    if (activeSurface === 'crown' && geometry.hasCrown === false) {
+      onSelectSurface('face');
+    } else if (activeSurface === 'leftWall' && geometry.hasLeftWall === false) {
+      onSelectSurface('face');
+    } else if (activeSurface === 'rightWall' && geometry.hasRightWall === false) {
+      onSelectSurface('face');
+    }
+  }, [activeSurface, geometry.hasCrown, geometry.hasLeftWall, geometry.hasRightWall, onSelectSurface]);
 
   // Collapsible bottom Geological Tables & Barton Q-Index drawer & AI Learning drawer
   const [showSetTableDrawer, setShowSetTableDrawer] = useState<boolean>(false);
@@ -1059,39 +1090,65 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
     );
   }, [currentPhoto.transform.customMaskPoints, surfaceBoundaryPath, coordManager]);
 
-  // Real-time piecewise mesh & perspective canvas rasterization for exact tunnel shape fitting
+  const warpDeformationSig = useMemo(
+    () => getWarpDeformationSignature(currentPhoto.transform),
+    [currentPhoto.transform]
+  );
+  const isActivelyDraggingPhoto = Boolean(draggingPhotoHandle);
+
+  // Real-time piecewise mesh & perspective canvas rasterization ONLY when non-affine warp/crop changes
   useEffect(() => {
     let cancelled = false;
     if (!currentPhoto.image) {
       setLiveWarpedImageUrl(null);
       return;
     }
+    if (warpDeformationSig === 'IDENTITY') {
+      setLiveWarpedImageUrl(currentPhoto.image);
+      if (currentPhoto.warpedImage && currentPhoto.warpedImage !== currentPhoto.image) {
+        onUpdatePhotoSurface(activeSurface, (prev) =>
+          prev.warpedImage === prev.image ? prev : { ...prev, warpedImage: prev.image }
+        );
+      }
+      return;
+    }
+    const debounceMs = isActivelyDraggingPhoto ? 90 : 45;
     const timer = setTimeout(async () => {
       const warpedUrl = await generatePiecewiseWarpedPhotoDataUrl(
         currentPhoto.image!,
-        currentPhoto.transform
+        currentPhoto.transform,
+        isActivelyDraggingPhoto
       );
       if (!cancelled) {
         setLiveWarpedImageUrl(warpedUrl);
-        if (warpedUrl && currentPhoto.warpedImage !== warpedUrl) {
+        if (!isActivelyDraggingPhoto && warpedUrl && currentPhoto.warpedImage !== warpedUrl) {
           onUpdatePhotoSurface(activeSurface, (prev) =>
             prev.warpedImage === warpedUrl ? prev : { ...prev, warpedImage: warpedUrl }
           );
         }
       }
-    }, 55);
+    }, debounceMs);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [currentPhoto.image, currentPhoto.transform, currentPhoto.warpedImage, activeSurface, onUpdatePhotoSurface]);
+  }, [
+    currentPhoto.image,
+    warpDeformationSig,
+    isActivelyDraggingPhoto,
+    activeSurface,
+    onUpdatePhotoSurface,
+  ]);
 
-  // Precompute Multi-Scale Frangi/Steger Hessian Ridge & Geodesic Cost Field on active warped photo
-  // Enables <2ms interactive Magnetic Live-Wire pathfinding, 1-Click Seed Auto-Track, and Crack X-Ray Vision
+  // Precompute Multi-Scale Frangi/Steger Hessian Ridge & Geodesic Cost Field on active photo
+  // Skips computation while dragging/fitting photos so Photo Fit & Edit stays 60fps instant
   useEffect(() => {
+    if (activeTool === 'photo_fit' || isActivelyDraggingPhoto) {
+      return;
+    }
     let cancelled = false;
-    const displayImg = liveWarpedImageUrl || currentPhoto.warpedImage || currentPhoto.image;
+    const displayImg = currentPhoto.warpedImage || currentPhoto.image;
     if (!displayImg) {
       setActivePhotoRidgeField(null);
       return;
@@ -1099,7 +1156,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
     const timer = setTimeout(async () => {
       try {
         const supImg = currentPhoto.supportingPhotos?.[0]?.image || currentPhoto.stereoImage || undefined;
-        const field = await buildPhotoRidgeField(displayImg, 520, supImg);
+        const field = await buildPhotoRidgeField(displayImg, 440, supImg);
         if (!cancelled) {
           setActivePhotoRidgeField(field);
         }
@@ -1108,14 +1165,15 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           setActivePhotoRidgeField(null);
         }
       }
-    }, 90);
+    }, 380);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
   }, [
-    liveWarpedImageUrl,
+    activeTool,
+    isActivelyDraggingPhoto,
     currentPhoto.warpedImage,
     currentPhoto.image,
     currentPhoto.supportingPhotos,
@@ -1224,36 +1282,42 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
         onUpdateLithologyRegions(nextLith);
       }
 
-      onUpdateControlPoints((prevCPs) =>
-        prevCPs.map((cp) => {
-          if (cp.surface !== activeSurface) return cp;
-          const nextPt = coordManager.transformWorldPointForPhotoChange(
-            cp.point,
-            prevT,
-            nextT
-          );
-          return {
-            ...cp,
-            point: nextPt,
-            imageUV: coordManager.worldToPhotoUV(nextPt, nextT),
-          };
-        })
-      );
+      const hasSurfaceCPs = controlPoints.some((cp) => cp.surface === activeSurface);
+      if (hasSurfaceCPs) {
+        onUpdateControlPoints((prevCPs) =>
+          prevCPs.map((cp) => {
+            if (cp.surface !== activeSurface) return cp;
+            const nextPt = coordManager.transformWorldPointForPhotoChange(
+              cp.point,
+              prevT,
+              nextT
+            );
+            return {
+              ...cp,
+              point: nextPt,
+              imageUV: coordManager.worldToPhotoUV(nextPt, nextT),
+            };
+          })
+        );
+      }
 
-      onUpdatePlacedSymbols((prevSyms) =>
-        prevSyms.map((sym) => {
-          if (sym.surface !== activeSurface) return sym;
-          const nextPt = coordManager.transformWorldPointForPhotoChange(
-            sym.point,
-            prevT,
-            nextT
-          );
-          return {
-            ...sym,
-            point: nextPt,
-          };
-        })
-      );
+      const hasSurfaceSyms = placedSymbols.some((sym) => sym.surface === activeSurface);
+      if (hasSurfaceSyms) {
+        onUpdatePlacedSymbols((prevSyms) =>
+          prevSyms.map((sym) => {
+            if (sym.surface !== activeSurface) return sym;
+            const nextPt = coordManager.transformWorldPointForPhotoChange(
+              sym.point,
+              prevT,
+              nextT
+            );
+            return {
+              ...sym,
+              point: nextPt,
+            };
+          })
+        );
+      }
     },
     [
       syncFeaturesWithPhotoTransform,
@@ -1263,17 +1327,23 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
       onUpdateJointsWithHistory,
       lithologyRegions,
       onUpdateLithologyRegions,
+      controlPoints,
       onUpdateControlPoints,
+      placedSymbols,
       onUpdatePlacedSymbols,
     ]
   );
 
-  // Update active surface transform with Undo/Redo history tracking
+  // Update active surface transform with throttled Undo/Redo history tracking
   const handleUpdateTransformWithHistory = useCallback(
     (updater: (prev: SurfaceTransform) => SurfaceTransform) => {
       const prevT = currentPhoto.transform;
       const nextT = updater(prevT);
-      setTransformPast((prev) => [...prev.slice(-18), prevT]);
+      const now = Date.now();
+      if (now - lastTransformHistoryPushRef.current > 350) {
+        setTransformPast((prev) => [...prev.slice(-18), prevT]);
+        lastTransformHistoryPushRef.current = now;
+      }
       setTransformFuture([]);
       onUpdatePhotoSurface(activeSurface, (prev) => ({
         ...prev,
@@ -2981,18 +3051,21 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
     [coordManager]
   );
 
-  // Measure tool distance & angle
+  // Measure tool distance, angle & Virtual Scanline RQD / Priest-Hudson fracture metrics
   const measurementInfo = useMemo(() => {
     if (measurePts.length < 2) return null;
     const [p1, p2] = measurePts;
     const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
     let ang = (Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180) / Math.PI;
     if (ang < 0) ang += 180;
+    const scanline = computeVirtualScanlineMetrics(p1, p2, surfaceJoints);
     return {
+      distNumeric: dist,
       distMeters: dist.toFixed(2),
       angleDeg: ang.toFixed(1),
+      scanline,
     };
-  }, [measurePts]);
+  }, [measurePts, surfaceJoints]);
 
   const { theme } = useTheme();
   const isLight = theme === 'light';
@@ -3348,38 +3421,60 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
               <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 border border-slate-200 rounded-lg">
                 {(
                   [
-                    { id: 'face', label: '1. Face' },
-                    { id: 'crown', label: '2. Crown' },
-                    { id: 'leftWall', label: '3. Left Wall' },
-                    { id: 'rightWall', label: '4. Right Wall' },
-                  ] as { id: SurfaceType; label: string }[]
-                ).map((surf) => {
-                  const hasImg = Boolean(photos[surf.id].image);
-                  const isActive = activeSurface === surf.id;
-                  return (
-                    <button
-                      key={surf.id}
-                      type="button"
-                      onClick={() => {
-                        onSelectSurface(surf.id);
-                        setSelectedJointId(null);
-                        setDraftJointPoints([]);
-                      }}
-                      className={`flex items-center gap-1 px-2 py-1 text-[10px] font-mono font-semibold rounded-md transition-colors cursor-pointer ${
-                        isActive
-                          ? 'bg-white text-sky-700 border border-sky-300 shadow-2xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      <span
-                        className={`w-1.5 h-1.5 rounded-full ${
-                          hasImg ? 'bg-emerald-500' : 'bg-slate-300'
+                    { id: 'face', label: '1. Face', enabled: true },
+                    {
+                      id: 'crown',
+                      label: `2. Crown (${geometry.crownArcLength.toFixed(1)}m)`,
+                      enabled: geometry.hasCrown !== false,
+                    },
+                    {
+                      id: 'leftWall',
+                      label: `3. Left Wall (${(
+                        geometry.leftWallArcLength ??
+                        geometry.leftWallHeight ??
+                        geometry.wallHeight
+                      ).toFixed(1)}m)`,
+                      enabled: geometry.hasLeftWall !== false,
+                    },
+                    {
+                      id: 'rightWall',
+                      label: `4. Right Wall (${(
+                        geometry.rightWallArcLength ??
+                        geometry.rightWallHeight ??
+                        geometry.wallHeight
+                      ).toFixed(1)}m)`,
+                      enabled: geometry.hasRightWall !== false,
+                    },
+                  ] as { id: SurfaceType; label: string; enabled: boolean }[]
+                )
+                  .filter((surf) => surf.enabled)
+                  .map((surf) => {
+                    const hasImg = Boolean(photos[surf.id].image);
+                    const isActive = activeSurface === surf.id;
+                    return (
+                      <button
+                        key={surf.id}
+                        type="button"
+                        onClick={() => {
+                          onSelectSurface(surf.id);
+                          setSelectedJointId(null);
+                          setDraftJointPoints([]);
+                        }}
+                        className={`flex items-center gap-1 px-2 py-1 text-[10px] font-mono font-semibold rounded-md transition-colors cursor-pointer ${
+                          isActive
+                            ? 'bg-white text-sky-700 border border-sky-300 shadow-2xs'
+                            : 'text-slate-600 hover:text-slate-900'
                         }`}
-                      />
-                      <span>{surf.label}</span>
-                    </button>
-                  );
-                })}
+                      >
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            hasImg ? 'bg-emerald-500' : 'bg-slate-300'
+                          }`}
+                        />
+                        <span>{surf.label}</span>
+                      </button>
+                    );
+                  })}
               </div>
 
               {/* Vector Layer Manager Dropdown */}
@@ -3545,6 +3640,46 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                     Edit Tunnel Shape ({geometry.width.toFixed(1)}×{geometry.height.toFixed(1)}m)
                   </button>
                 )}
+
+                <button
+                  onClick={() => {
+                    setSimpleAccuracyInitialTab('full_photo_1ft_scale');
+                    setShowSimpleAccuracyModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded-md shadow-2xs cursor-pointer"
+                  title="Upload overall full tunnel picture with 1-Foot field scale to auto-extract tunnel Width, Height, and where Left Wall, Crown, and Right Wall start & end"
+                >
+                  <Ruler className="w-3.5 h-3.5" />
+                  Full Photo + 1-Ft Scale Setup
+                </button>
+
+                <button
+                  onClick={() => {
+                    setSimpleAccuracyInitialTab('four_part_accuracy');
+                    setShowSimpleAccuracyModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-semibold bg-sky-50 hover:bg-sky-100 text-sky-800 rounded-md border border-sky-200 cursor-pointer"
+                  title="Open 4-Part Simple Accuracy Booster (Corner Linker, Field Compass, RMR/Q Auto-Sync, Wedge Check)"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-sky-600" />
+                  4-Part Simple Accuracy
+                </button>
+
+                <button
+                  onClick={() => {
+                    setActiveTool(activeTool === 'measure' ? 'select' : 'measure');
+                    setMeasurePts([]);
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
+                    activeTool === 'measure'
+                      ? 'bg-emerald-600 text-white border-emerald-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
+                  }`}
+                  title="2-Point Laser/Tape True-Scale Calibrator & Virtual Scanline RQD"
+                >
+                  <Ruler className="w-3.5 h-3.5 text-emerald-600" />
+                  2-Pt Scale &amp; Scanline
+                </button>
               </div>
             )}
 
@@ -3663,6 +3798,43 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 >
                   Trace All 4 Surfaces
                 </button>
+
+                <button
+                  onClick={() => {
+                    setActiveTool(activeTool === 'measure' ? 'select' : 'measure');
+                    setMeasurePts([]);
+                  }}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-medium rounded-md border cursor-pointer ${
+                    activeTool === 'measure'
+                      ? 'bg-emerald-600 text-white border-emerald-500'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-200'
+                  }`}
+                  title="Draw a virtual scanline across mapped joints to compute Scanline RQD (%), Priest-Hudson RQD, Fracture Frequency λ, or calibrate 2-point photo scale"
+                >
+                  <Ruler className="w-3.5 h-3.5 text-emerald-600" />
+                  Scanline RQD &amp; Scale
+                </button>
+
+                <button
+                  onClick={() => {
+                    setSimpleAccuracyInitialTab('four_part_accuracy');
+                    setShowSimpleAccuracyModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-md border border-emerald-200 cursor-pointer"
+                  title="Open 4-Part Simple Accuracy Booster (Corner Trace Linker, Field Compass, RMR/Q Auto-Sync, Wedge Check)"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                  4-Part Simple Accuracy
+                </button>
+
+                <button
+                  onClick={() => setShow3DStrikeDipModal(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-md shadow-2xs cursor-pointer"
+                  title="Open Interactive 3D Joint Strike & Dip Visualizer relative to Tunnel Drive Direction"
+                >
+                  <Box className="w-3.5 h-3.5" />
+                  3D Strike &amp; Dip vs. Drive
+                </button>
               </div>
             )}
 
@@ -3717,6 +3889,15 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 >
                   <Compass className="w-3.5 h-3.5 text-sky-600" />
                   3D Dip Probe
+                </button>
+
+                <button
+                  onClick={() => setShow3DStrikeDipModal(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-md shadow-2xs cursor-pointer"
+                  title="Open Interactive 3D Joint Strike & Dip Visualizer relative to Tunnel Drive Direction"
+                >
+                  <Box className="w-3.5 h-3.5" />
+                  3D Strike &amp; Dip vs. Drive
                 </button>
               </div>
             )}
@@ -5344,7 +5525,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 </g>
               )}
 
-            {/* Measure Tool Overlay */}
+            {/* Measure & Virtual Scanline RQD Tool Overlay */}
             {activeTool === 'measure' && measurePts.length > 0 && (
               <g className="pointer-events-none">
                 {(() => {
@@ -5355,7 +5536,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   if (pts.length < 2) return null;
                   const p1 = coordManager.worldToScreen(pts[0]);
                   const p2 = coordManager.worldToScreen(pts[1]);
-                  const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+                  const scan = computeVirtualScanlineMetrics(pts[0], pts[1], surfaceJoints);
                   return (
                     <>
                       <line
@@ -5364,30 +5545,61 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                         x2={p2.cx}
                         y2={p2.cy}
                         stroke="#22D3EE"
-                        strokeWidth="2"
-                        strokeDasharray="4,3"
+                        strokeWidth="2.2"
+                        strokeDasharray="5,3"
                       />
-                      <circle cx={p1.cx} cy={p1.cy} r="4.5" fill="#22D3EE" />
-                      <circle cx={p2.cx} cy={p2.cy} r="4.5" fill="#22D3EE" />
+                      <circle cx={p1.cx} cy={p1.cy} r="5" fill="#10B981" stroke="#0B0E14" strokeWidth="1.5" />
+                      <circle cx={p2.cx} cy={p2.cy} r="5" fill="#22D3EE" stroke="#0B0E14" strokeWidth="1.5" />
+
+                      {/* Intersected Joint Markers along Virtual Scanline */}
+                      {scan.intersections.map((hit, idx) => {
+                        const hitScr = coordManager.worldToScreen(hit.point);
+                        return (
+                          <g key={`${hit.jointId}-${idx}`}>
+                            <circle
+                              cx={hitScr.cx}
+                              cy={hitScr.cy}
+                              r="5.5"
+                              fill="rgba(245, 158, 11, 0.25)"
+                              stroke="#F59E0B"
+                              strokeWidth="1.8"
+                            />
+                            <circle cx={hitScr.cx} cy={hitScr.cy} r="2" fill="#FDE68A" />
+                            <text
+                              x={hitScr.cx}
+                              y={hitScr.cy - 8}
+                              textAnchor="middle"
+                              fontSize="8.5"
+                              fontWeight="700"
+                              fontFamily="IBM Plex Mono, monospace"
+                              fill={isLight ? '#B45309' : '#FDE68A'}
+                            >
+                              {hit.set} ({hit.distanceAlongM.toFixed(2)}m)
+                            </text>
+                          </g>
+                        );
+                      })}
+
                       <rect
-                        x={(p1.cx + p2.cx) / 2 - 48}
-                        y={(p1.cy + p2.cy) / 2 - 22}
-                        width="96"
-                        height="18"
+                        x={(p1.cx + p2.cx) / 2 - 104}
+                        y={(p1.cy + p2.cy) / 2 - 26}
+                        width="208"
+                        height="20"
                         rx="3"
                         fill={isLight ? '#FFFFFF' : '#0B0E14'}
                         stroke={isLight ? '#0284C7' : '#22D3EE'}
-                        strokeWidth="1"
+                        strokeWidth="1.2"
                       />
                       <text
                         x={(p1.cx + p2.cx) / 2}
-                        y={(p1.cy + p2.cy) / 2 - 9}
+                        y={(p1.cy + p2.cy) / 2 - 12.5}
                         textAnchor="middle"
-                        fontSize="11"
+                        fontSize="10"
+                        fontWeight="700"
                         fontFamily="IBM Plex Mono, monospace"
                         fill={isLight ? '#0369A1' : '#22D3EE'}
                       >
-                        {dist.toFixed(2)} m
+                        L={scan.lengthMeters.toFixed(2)}m · {scan.intersectionCount} Jts · RQD={scan.measuredScanlineRqdPct}%
                       </text>
                     </>
                   );
@@ -6449,6 +6661,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   setDrawingCustomMaskMode(false);
                   setActiveTool('select');
                 }}
+                onOpenCustomProfileEditor={onOpenCustomProfileEditor}
               />
             ) : selectedJoint ? (
               <>
@@ -6544,6 +6757,16 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                           className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-slate-900"
                         />
                       </label>
+                    </div>
+
+                    {/* Interactive Mini 3D Strike & Dip vs. Tunnel Drive Preview */}
+                    <div className="pt-2">
+                      <Mini3DStrikeDipPreview
+                        joint={selectedJoint}
+                        geometry={geometry}
+                        settings={settings}
+                        onOpenFull3DModal={() => setShow3DStrikeDipModal(true)}
+                      />
                     </div>
                   </div>
                 </div>
@@ -7219,28 +7442,166 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                 </button>
               </div>
             ) : activeTool === 'measure' ? (
-              /* TOOL-SPECIFIC CONTROLS: DISTANCE & ANGLE MEASURE */
+              /* TOOL-SPECIFIC CONTROLS: VIRTUAL SCANLINE RQD, FRACTURE FREQUENCY & 2-POINT LASER/TAPE SCALE CALIBRATOR */
               <div className="space-y-3 font-mono text-[11px]">
                 <div className="p-2.5 bg-cyan-50 border border-cyan-200 rounded-lg space-y-2">
-                  <div className="font-bold text-cyan-900">MEASURE DISTANCE &amp; ANGLE</div>
+                  <div className="font-bold text-cyan-900">
+                    VIRTUAL SCANLINE RQD &amp; 2-PT SCALE CALIBRATOR
+                  </div>
                   {measurementInfo ? (
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <div className="p-2 bg-white rounded border border-cyan-200">
-                        <div className="text-[9px] text-slate-500">DISTANCE</div>
-                        <div className="text-sm font-bold text-cyan-700">
-                          {measurementInfo.distMeters} m
+                    <div className="space-y-2 pt-1">
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <div className="p-2 bg-white rounded border border-cyan-200">
+                          <div className="text-[9px] text-slate-500">SCANLINE LENGTH</div>
+                          <div className="text-sm font-bold text-cyan-700">
+                            {measurementInfo.distMeters} m
+                          </div>
+                        </div>
+                        <div className="p-2 bg-white rounded border border-cyan-200">
+                          <div className="text-[9px] text-slate-500">LINE ANGLE</div>
+                          <div className="text-sm font-bold text-cyan-700">
+                            {measurementInfo.angleDeg}°
+                          </div>
+                        </div>
+                        <div className="p-2 bg-white rounded border border-amber-200">
+                          <div className="text-[9px] text-slate-500">INTERSECTED JOINTS</div>
+                          <div className="text-sm font-bold text-amber-700">
+                            {measurementInfo.scanline.intersectionCount} (λ={measurementInfo.scanline.fractureFrequencyLambda}/m)
+                          </div>
+                        </div>
+                        <div className="p-2 bg-white rounded border border-emerald-200">
+                          <div className="text-[9px] text-slate-500">SCANLINE RQD (≥10cm)</div>
+                          <div className="text-sm font-bold text-emerald-700">
+                            {measurementInfo.scanline.measuredScanlineRqdPct}%
+                          </div>
                         </div>
                       </div>
-                      <div className="p-2 bg-white rounded border border-cyan-200">
-                        <div className="text-[9px] text-slate-500">ANGLE</div>
-                        <div className="text-sm font-bold text-cyan-700">
-                          {measurementInfo.angleDeg}°
+
+                      <div className="p-2 bg-white rounded border border-slate-200 text-[10px] space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Priest-Hudson Theoretical RQD:</span>
+                          <span className="font-bold text-indigo-700">
+                            {measurementInfo.scanline.priestHudsonRqdPct}%
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Mean Fracture Spacing:</span>
+                          <span className="font-bold text-slate-800">
+                            {measurementInfo.scanline.meanSpacingMeters.toFixed(2)} m
+                          </span>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const rqdVal = measurementInfo.scanline.measuredScanlineRqdPct;
+                          const spVal = measurementInfo.scanline.meanSpacingMeters;
+                          onUpdateQIndexParams({
+                            ...qIndexParams,
+                            rqd: rqdVal,
+                          });
+                          onUpdateQParamStatus({
+                            ...qParamStatus,
+                            rqd: 'USER_ENTERED',
+                          });
+                          const rqdRating =
+                            rqdVal >= 90 ? 20 : rqdVal >= 75 ? 17 : rqdVal >= 50 ? 13 : rqdVal >= 25 ? 8 : 3;
+                          const spRating =
+                            spVal > 2.0 ? 20 : spVal >= 0.6 ? 15 : spVal >= 0.2 ? 10 : spVal >= 0.06 ? 8 : 5;
+                          onUpdateRmrParams({
+                            ...rmrParams,
+                            rqdPercent: rqdVal,
+                            rqdRating,
+                            spacingMeters: spVal,
+                            spacingRating: spRating,
+                            paramStatus: {
+                              ...rmrParams.paramStatus,
+                              rqd: 'USER_ENTERED',
+                              spacing: 'USER_ENTERED',
+                            },
+                          });
+                          onUpdateStatusMessage?.(
+                            `Applied Scanline RQD (${rqdVal}%) & Mean Spacing (${spVal.toFixed(2)}m) to RMR & Q-System.`
+                          );
+                        }}
+                        className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold cursor-pointer shadow-2xs"
+                      >
+                        ✓ Apply Scanline RQD &amp; Spacing to RMR / Q
+                      </button>
+
+                      {/* 2-Point Laser / Survey Tape True-Scale Photo Calibrator */}
+                      <div className="p-2 bg-amber-50 border border-amber-200 rounded space-y-1.5">
+                        <div className="text-[10px] font-bold text-amber-900">
+                          2-POINT LASER / TAPE PHOTO SCALE CALIBRATOR
+                        </div>
+                        <p className="text-[9.5px] text-amber-800 leading-snug">
+                          Enter known field distance between P1 &amp; P2 to calibrate photo meter scale:
+                        </p>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            step="0.05"
+                            min="0.1"
+                            value={knownScaleDistanceInput}
+                            onChange={(e) => setKnownScaleDistanceInput(e.target.value)}
+                            className="w-24 px-2 py-1 bg-white border border-amber-300 rounded text-slate-900 font-bold"
+                          />
+                          <span className="text-[10px] text-amber-900 font-bold">m</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const knownM = parseFloat(knownScaleDistanceInput);
+                              if (
+                                Number.isNaN(knownM) ||
+                                knownM <= 0.05 ||
+                                measurementInfo.distNumeric <= 0.02
+                              ) {
+                                return;
+                              }
+                              const ratio = knownM / measurementInfo.distNumeric;
+                              handleUpdateTransformWithHistory((prev) => ({
+                                ...prev,
+                                scaleX: Number(
+                                  Math.max(0.2, Math.min(4.0, (prev.scaleX || 1) * ratio)).toFixed(4)
+                                ),
+                                scaleY: Number(
+                                  Math.max(0.2, Math.min(4.0, (prev.scaleY || 1) * ratio)).toFixed(4)
+                                ),
+                              }));
+                              setMeasurePts([
+                                measurePts[0],
+                                {
+                                  x: Number(
+                                    (
+                                      measurePts[0].x +
+                                      (measurePts[1].x - measurePts[0].x) * ratio
+                                    ).toFixed(3)
+                                  ),
+                                  y: Number(
+                                    (
+                                      measurePts[0].y +
+                                      (measurePts[1].y - measurePts[0].y) * ratio
+                                    ).toFixed(3)
+                                  ),
+                                },
+                              ]);
+                              onUpdateStatusMessage?.(
+                                `Calibrated ${activeSurface.toUpperCase()} photo scale by ×${ratio.toFixed(
+                                  3
+                                )} to match field distance ${knownM.toFixed(2)} m.`
+                              );
+                            }}
+                            className="flex-1 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded text-[10px] font-bold cursor-pointer"
+                          >
+                            Calibrate Scale
+                          </button>
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <p className="text-[10px] text-cyan-800">
-                      Click 1st and 2nd point on the tunnel surface to measure real-world distance and dip angle.
+                    <p className="text-[10px] text-cyan-800 leading-relaxed">
+                      Click <strong>P1</strong> and <strong>P2</strong> across the tunnel surface to measure real-world distance, compute <strong>Virtual Scanline RQD (%)</strong> across intersected joints, or calibrate photo scale from a known laser/tape measurement.
                     </p>
                   )}
                   {measurePts.length > 0 && (
@@ -7249,7 +7610,7 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                       onClick={() => setMeasurePts([])}
                       className="w-full py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded font-bold cursor-pointer"
                     >
-                      Clear Measurement
+                      Clear Scanline / Measurement
                     </button>
                   )}
                 </div>
@@ -7308,9 +7669,35 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                           </span>
                         </div>
                         <div className="grid grid-cols-2 px-2.5 py-1.5">
-                          <span className="text-slate-500">L/R Wall Height</span>
+                          <span className="text-slate-500">Left Wall Length</span>
                           <span className="text-slate-800 font-semibold text-right">
-                            {geometry.wallHeight.toFixed(2)} m
+                            {geometry.hasLeftWall === false
+                              ? 'Inactive'
+                              : `${(
+                                  geometry.leftWallArcLength ??
+                                  geometry.leftWallHeight ??
+                                  geometry.wallHeight
+                                ).toFixed(2)} m`}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Right Wall Length</span>
+                          <span className="text-slate-800 font-semibold text-right">
+                            {geometry.hasRightWall === false
+                              ? 'Inactive'
+                              : `${(
+                                  geometry.rightWallArcLength ??
+                                  geometry.rightWallHeight ??
+                                  geometry.wallHeight
+                                ).toFixed(2)} m`}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 px-2.5 py-1.5">
+                          <span className="text-slate-500">Crown Arch Length</span>
+                          <span className="text-sky-700 font-semibold text-right">
+                            {geometry.hasCrown === false
+                              ? 'Face + Walls Only'
+                              : `${geometry.crownArcLength.toFixed(2)} m`}
                           </span>
                         </div>
                         <div className="grid grid-cols-2 px-2.5 py-1.5">
@@ -7838,8 +8225,15 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
         geometry={geometry}
         settings={settings}
         joints={joints}
+        jointSets={jointSets}
         lithologyRegions={lithologyRegions}
         placedSymbols={placedSymbols}
+        overbreakAnalysis={overbreakAnalysis}
+        rmrParams={rmrParams}
+        qIndexParams={qIndexParams}
+        gsiParams={gsiParams}
+        rockMassSummary={rockMassSummary}
+        photos={photos}
         savedProjects={savedProjects}
         onSelectSurface={onSelectSurface}
         onLoadProjectRecord={onLoadProjectRecord}
@@ -7868,6 +8262,86 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
               : 'ENGINEERING_QUANTITY_SHEET'
           )
         }
+      />
+
+      <SimpleFullPhotoAndAccuracyModal
+        isOpen={showSimpleAccuracyModal}
+        initialTab={simpleAccuracyInitialTab}
+        onClose={() => setShowSimpleAccuracyModal(false)}
+        geometry={geometry}
+        settings={settings}
+        photos={photos}
+        activeSurface={activeSurface}
+        joints={joints}
+        jointSets={jointSets}
+        rmrParams={rmrParams}
+        qIndexParams={qIndexParams}
+        qParamStatus={qParamStatus}
+        onApplyExtractedGeometryAndScale={(
+          nextGeometry,
+          calibratedPxPerMeter,
+          fullPhotoDataUrl,
+          targetSurface
+        ) => {
+          onUpdateGeometry?.(nextGeometry);
+          const surfToUpdate = targetSurface || activeSurface;
+          onUpdatePhotoSurface(surfToUpdate, (prev) => ({
+            ...prev,
+            image: fullPhotoDataUrl || prev.image,
+            warpedImage: fullPhotoDataUrl || prev.warpedImage,
+            scale: calibratedPxPerMeter,
+            autoFitted: true,
+          }));
+        }}
+        onUpdateJointsWithHistory={onUpdateJointsWithHistory}
+        onUpdateRmrParams={onUpdateRmrParams}
+        onUpdateQIndexParams={onUpdateQIndexParams}
+        onUpdateQParamStatus={onUpdateQParamStatus}
+        onStatusMessage={onUpdateStatusMessage}
+      />
+
+      <Interactive3DStrikeDipVisualizerModal
+        isOpen={show3DStrikeDipModal}
+        onClose={() => setShow3DStrikeDipModal(false)}
+        geometry={geometry}
+        settings={settings}
+        joints={joints}
+        jointSets={jointSets}
+        initialSelectedJointId={selectedJointId}
+        onUpdateJointOrientation={(jointId, dipDirection, dip) => {
+          const strike = (dipDirection - 90 + 360) % 360;
+          onUpdateJointsWithHistory(
+            joints.map((j) =>
+              j.id === jointId
+                ? {
+                    ...j,
+                    dipDirection,
+                    dip,
+                    strike,
+                    orientationStatus: 'DIRECTLY_MEASURED',
+                  }
+                : j
+            )
+          );
+        }}
+        onCaptureSnapshotToSheetAppendix={(snapshot) => {
+          onUpdateSettings?.((prev) => ({
+            ...prev,
+            strikeDip3DSnapshots: [snapshot, ...(prev.strikeDip3DSnapshots || [])].slice(0, 4),
+          }));
+          onUpdateStatusMessage?.(
+            `Captured 3D Strike & Dip snapshot (${snapshot.primaryPlaneLabel}) to Final Engineering Mapping Sheet Appendix.`
+          );
+        }}
+        onDeleteSnapshotFromSheetAppendix={(snapshotId) => {
+          onUpdateSettings?.((prev) => ({
+            ...prev,
+            strikeDip3DSnapshots: (prev.strikeDip3DSnapshots || []).filter(
+              (s) => s.id !== snapshotId
+            ),
+          }));
+        }}
+        onOpenEngineeringSheet={() => onOpenExportSheet('FINAL_ENGINEERING_SHEET')}
       />
     </div>
   );

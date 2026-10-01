@@ -96,6 +96,10 @@ import { Continuous3DStripLoggerModal } from './components/Continuous3DStripLogg
 import { EswaAiExecutiveChatbot } from './components/EswaAiExecutiveChatbot';
 import { loadSavedSheetConfig, saveSheetConfigToStorage } from './engine/sheetLayoutEngine';
 import { EswaLoadingScreen, EswaTunnelLogo } from './components/EswaBrandIdentity';
+import {
+  SimpleAddonTab,
+  SimpleFullPhotoAndAccuracyModal,
+} from './components/SimpleFullPhotoAndAccuracyModal';
 import { ThemeToggleButton, useTheme } from './context/ThemeContext';
 import { subscribeAdminLicensingData } from './engine/softwareLicensingEngine';
 import { useResponsiveLayout } from './hooks/useResponsiveLayout';
@@ -107,8 +111,10 @@ import {
   Database,
   Download,
   Plus,
+  Ruler,
   Save,
   ShieldCheck,
+  Sparkles,
   Trash2,
   Upload,
   Wand2,
@@ -199,6 +205,9 @@ export default function App({
   // CAD upload status
   const [cadStatus, setCadStatus] = useState<string>('');
   const cadInputRef = useRef<HTMLInputElement | null>(null);
+  const [showPhotoScreenAccuracyModal, setShowPhotoScreenAccuracyModal] = useState<boolean>(false);
+  const [photoScreenAccuracyTab, setPhotoScreenAccuracyTab] =
+    useState<SimpleAddonTab>('full_photo_1ft_scale');
 
   // Tunnel Drive Direction & Header Settings State (Fresh Software Defaults + Persisted Sheet Template Config)
   const [settings, setSettings] = useState<TunnelSettings>(() => {
@@ -795,66 +804,70 @@ export default function App({
     overbreakAnalysis,
   ]);
 
-  // Automatically sync and fit the unfolded log into 3D Continuous Tunnel Logger based on Project, Location, Chainage RD, Pull, and Drive Direction whenever mapping updates
+  // Automatically sync and fit the unfolded log into 3D Continuous Tunnel Logger based on Project, Location, Chainage RD, Pull, and Drive Direction whenever mapping updates (debounced so interactive Photo Fit & Edit never blocks the UI thread)
   useEffect(() => {
     if (screen !== 'mapping') return;
-    const chMeters = parseNumericChainageMeters(settings.faceChainage, settings.chainage);
-    const projName =
-      settings.projectName ||
-      settings.sheetConfig?.projectName ||
-      'Hydroelectric / Underground Tunnel Project';
-    const locName =
-      settings.locationName ||
-      settings.location ||
-      settings.sheetConfig?.location ||
-      'Main Underground Heading';
-    const record: SavedProjectRecord = {
-      id: `proj-${projName.replace(/\s+/g, '_')}-${locName.replace(/\s+/g, '_')}-${settings.tunnelName.replace(/\s+/g, '_')}-${settings.faceChainage.replace(/\s+/g, '_')}-${settings.date}`,
-      projectName: projName,
-      tunnelName: settings.tunnelName,
-      location: locName,
-      chainage: settings.chainage,
-      faceChainage: settings.faceChainage,
-      numericChainageMeters: chMeters,
-      date: settings.date,
-      savedAt: new Date().toISOString(),
-      mappingMode: 'TUNNEL_PROFILE',
-      geometry,
-      settings: {
-        ...settings,
+    const timer = setTimeout(() => {
+      const chMeters = parseNumericChainageMeters(settings.faceChainage, settings.chainage);
+      const projName =
+        settings.projectName ||
+        settings.sheetConfig?.projectName ||
+        'Hydroelectric / Underground Tunnel Project';
+      const locName =
+        settings.locationName ||
+        settings.location ||
+        settings.sheetConfig?.location ||
+        'Main Underground Heading';
+      const record: SavedProjectRecord = {
+        id: `proj-${projName.replace(/\s+/g, '_')}-${locName.replace(/\s+/g, '_')}-${settings.tunnelName.replace(/\s+/g, '_')}-${settings.faceChainage.replace(/\s+/g, '_')}-${settings.date}`,
         projectName: projName,
-        locationName: locName,
-      },
-      sheetConfig: settings.sheetConfig,
-      photos,
-      joints: clusteredJoints,
-      customJointSetOverrides,
-      qIndexParams,
-      selectedClassificationMethod,
-      rmrParams,
-      gsiParams,
-      qParamStatus,
-      rockMassSummary,
-      lithologyRegions,
-      controlPoints,
-      surveyProfile,
-      placedSymbols,
-      quantitySummary: {
-        designAreaSqM: overbreakAnalysis.designAreaSqMeters,
-        surveyedAreaSqM: overbreakAnalysis.surveyedAreaSqMeters,
-        overbreakAreaSqM: overbreakAnalysis.overbreakAreaSqMeters,
-        undercutAreaSqM: overbreakAnalysis.undercutAreaSqMeters,
-        overbreakPct: overbreakAnalysis.overbreakPercentage,
-        undercutPct: overbreakAnalysis.undercutPercentage,
-        maxOverbreakM: overbreakAnalysis.maxRadialOverbreakMeters,
-        maxUndercutM: overbreakAnalysis.maxRadialUndercutMeters,
-        pullIntervalM: overbreakAnalysis.effectivePullIntervalMeters,
-        overbreakVolumeM3: overbreakAnalysis.overbreakVolumeCubicMeters,
-        undercutVolumeM3: overbreakAnalysis.undercutVolumeCubicMeters,
-      },
-    };
-    const { records } = saveProjectRecordToMemory(record);
-    setSavedProjects(records);
+        tunnelName: settings.tunnelName,
+        location: locName,
+        chainage: settings.chainage,
+        faceChainage: settings.faceChainage,
+        numericChainageMeters: chMeters,
+        date: settings.date,
+        savedAt: new Date().toISOString(),
+        mappingMode: 'TUNNEL_PROFILE',
+        geometry,
+        settings: {
+          ...settings,
+          projectName: projName,
+          locationName: locName,
+        },
+        sheetConfig: settings.sheetConfig,
+        photos,
+        joints: clusteredJoints,
+        customJointSetOverrides,
+        qIndexParams,
+        selectedClassificationMethod,
+        rmrParams,
+        gsiParams,
+        qParamStatus,
+        rockMassSummary,
+        lithologyRegions,
+        controlPoints,
+        surveyProfile,
+        placedSymbols,
+        quantitySummary: {
+          designAreaSqM: overbreakAnalysis.designAreaSqMeters,
+          surveyedAreaSqM: overbreakAnalysis.surveyedAreaSqMeters,
+          overbreakAreaSqM: overbreakAnalysis.overbreakAreaSqMeters,
+          undercutAreaSqM: overbreakAnalysis.undercutAreaSqMeters,
+          overbreakPct: overbreakAnalysis.overbreakPercentage,
+          undercutPct: overbreakAnalysis.undercutPercentage,
+          maxOverbreakM: overbreakAnalysis.maxRadialOverbreakMeters,
+          maxUndercutM: overbreakAnalysis.maxRadialUndercutMeters,
+          pullIntervalM: overbreakAnalysis.effectivePullIntervalMeters,
+          overbreakVolumeM3: overbreakAnalysis.overbreakVolumeCubicMeters,
+          undercutVolumeM3: overbreakAnalysis.undercutVolumeCubicMeters,
+        },
+      };
+      const { records } = saveProjectRecordToMemory(record);
+      setSavedProjects(records);
+    }, 1200);
+
+    return () => clearTimeout(timer);
   }, [
     screen,
     settings,
@@ -1706,8 +1719,15 @@ export default function App({
         geometry={geometry}
         settings={settings}
         joints={clusteredJoints}
+        jointSets={jointSets}
         lithologyRegions={lithologyRegions}
         placedSymbols={placedSymbols}
+        overbreakAnalysis={overbreakAnalysis}
+        rmrParams={rmrParams}
+        qIndexParams={qIndexParams}
+        gsiParams={gsiParams}
+        rockMassSummary={rockMassSummary}
+        photos={photos}
         savedProjects={savedProjects}
         onLoadProjectRecord={handleLoadProjectRecord}
         theme={theme}
@@ -2329,7 +2349,13 @@ export default function App({
                   onClick={() => {
                     setIsFirstOpening(false);
                     handleSaveProjectLocationPair(activeProjectName, activeLocationName);
-                    setCustomEditorInitialTab('common_variants');
+                    setCustomEditorInitialTab(
+                      geometry.customProfile ||
+                        geometry.crownGeometry === 'freeform_custom' ||
+                        geometry.source === 'custom_editor'
+                        ? 'freeform_canvas'
+                        : 'common_variants'
+                    );
                     setReturnScreenFromCustomEditor('start');
                     setScreen('geometry_custom');
                   }}
@@ -2952,13 +2978,19 @@ export default function App({
               <button
                 type="button"
                 onClick={() => {
-                  setCustomEditorInitialTab('common_variants');
+                  setCustomEditorInitialTab(
+                    geometry.customProfile ||
+                      geometry.crownGeometry === 'freeform_custom' ||
+                      geometry.source === 'custom_editor'
+                      ? 'freeform_canvas'
+                      : 'common_variants'
+                  );
                   setReturnScreenFromCustomEditor('drive_and_photos');
                   setScreen('geometry_custom');
                 }}
                 className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-mono border border-slate-700 cursor-pointer"
               >
-                Change Shape ({geometry.width.toFixed(1)}m × {geometry.height.toFixed(1)}m)
+                Edit / Change Shape ({geometry.width.toFixed(1)}m × {geometry.height.toFixed(1)}m)
               </button>
             </div>
           </div>
@@ -2988,17 +3020,64 @@ export default function App({
                 </span>
                 <span>·</span>
                 <span>
-                  Shape: <strong>{geometry.width.toFixed(2)}m W × {geometry.height.toFixed(2)}m H (Wall {geometry.wallHeight.toFixed(2)}m)</strong>
+                  Shape:{' '}
+                  <strong>
+                    {geometry.width.toFixed(2)}m W × {geometry.height.toFixed(2)}m H (L-Wall{' '}
+                    {(
+                      geometry.leftWallArcLength ??
+                      geometry.leftWallHeight ??
+                      geometry.wallHeight
+                    ).toFixed(2)}
+                    m · R-Wall{' '}
+                    {(
+                      geometry.rightWallArcLength ??
+                      geometry.rightWallHeight ??
+                      geometry.wallHeight
+                    ).toFixed(2)}
+                    m
+                    {geometry.hasCrown === false
+                      ? ' · Face+Walls Only'
+                      : ` · Crown ${geometry.crownArcLength.toFixed(2)}m`}
+                    )
+                  </strong>
                 </span>
               </div>
             </div>
 
             {/* Section 5: Surface Photograph Inputs */}
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className={`text-xs sm:text-sm font-semibold ${isLight ? 'text-slate-800' : 'text-slate-200'}`}>
                   Tunnel Surface Photographs (Optional Combinations Supported)
                 </h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhotoScreenAccuracyTab('full_photo_1ft_scale');
+                      setShowPhotoScreenAccuracyModal(true);
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-xs cursor-pointer transition-colors"
+                  >
+                    <Ruler className="w-3.5 h-3.5" />
+                    Overall Full Photo + 1-Ft Scale (Auto Size &amp; Wall/Crown)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhotoScreenAccuracyTab('four_part_accuracy');
+                      setShowPhotoScreenAccuracyModal(true);
+                    }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer transition-colors ${
+                      isLight
+                        ? 'bg-sky-50 hover:bg-sky-100 text-sky-800 border-sky-200'
+                        : 'bg-sky-950/60 hover:bg-sky-900/70 text-sky-300 border-sky-700/60'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    4-Part Simple Accuracy
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -3006,26 +3085,32 @@ export default function App({
                   [
                     {
                       id: 'face',
-                      title: '01. Tunnel Face',
-                      desc: `Fits ${geometry.customProfile?.name ? `${geometry.customProfile.name} (${geometry.width}m × ${geometry.height}m)` : `${geometry.width}m × ${geometry.height}m cross-section`}`,
-                    },
-                    {
-                      id: 'leftWall',
-                      title: '02. Left Wall',
-                      desc: `Fits ${settings.roundLength}m pull × ${(geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight).toFixed(2)}m wall`,
-                    },
-                    {
-                      id: 'rightWall',
-                      title: '03. Right Wall',
-                      desc: `Fits ${settings.roundLength}m pull × ${(geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight).toFixed(2)}m wall`,
-                    },
-                    {
-                      id: 'crown',
-                      title: '04. Crown Arch',
-                      desc: `Fits ${geometry.crownArcLength.toFixed(2)}m arch × ${settings.roundLength}m pull`,
-                    },
-                  ] as { id: SurfaceType; title: string; desc: string }[]
-                ).map((slot) => {
+                        title: '01. Tunnel Face',
+                        desc: `Fits ${geometry.customProfile?.name ? `${geometry.customProfile.name} (${geometry.width}m × ${geometry.height}m)` : `${geometry.width}m × ${geometry.height}m cross-section`}`,
+                        enabled: true,
+                      },
+                      {
+                        id: 'leftWall',
+                        title: '02. Left Wall',
+                        desc: `Fits ${settings.roundLength}m pull × ${(geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight).toFixed(2)}m left wall`,
+                        enabled: geometry.hasLeftWall !== false,
+                      },
+                      {
+                        id: 'rightWall',
+                        title: '03. Right Wall',
+                        desc: `Fits ${settings.roundLength}m pull × ${(geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight).toFixed(2)}m right wall`,
+                        enabled: geometry.hasRightWall !== false,
+                      },
+                      {
+                        id: 'crown',
+                        title: '04. Crown Arch',
+                        desc: `Fits ${geometry.crownArcLength.toFixed(2)}m arch × ${settings.roundLength}m pull`,
+                        enabled: geometry.hasCrown !== false,
+                      },
+                    ] as { id: SurfaceType; title: string; desc: string; enabled: boolean }[]
+                  )
+                    .filter((slot) => slot.enabled)
+                    .map((slot) => {
                   const surfPhoto = photos[slot.id];
                   const supPhotos = surfPhoto.supportingPhotos || [];
                   return (
@@ -3206,6 +3291,49 @@ export default function App({
           </div>
         </div>
         {projectMemoryModalNode}
+        <SimpleFullPhotoAndAccuracyModal
+          isOpen={showPhotoScreenAccuracyModal}
+          initialTab={photoScreenAccuracyTab}
+          onClose={() => setShowPhotoScreenAccuracyModal(false)}
+          geometry={geometry}
+          settings={settings}
+          photos={photos}
+          activeSurface={activeSurface}
+          joints={clusteredJoints}
+          jointSets={jointSets}
+          rmrParams={rmrParams}
+          qIndexParams={qIndexParams}
+          qParamStatus={qParamStatus}
+          onApplyExtractedGeometryAndScale={(
+            nextGeometry,
+            calibratedPxPerMeter,
+            fullPhotoDataUrl,
+            targetSurface
+          ) => {
+            setGeometry(nextGeometry);
+            setManWidth(String(nextGeometry.width));
+            setManHeight(String(nextGeometry.height));
+            setManWallHeight(String(nextGeometry.wallHeight));
+            setManCrownRadius(String(nextGeometry.crownRadius));
+            const surf = targetSurface || 'face';
+            setPhotos((prev) => ({
+              ...prev,
+              [surf]: {
+                ...prev[surf],
+                originalImage: fullPhotoDataUrl || prev[surf].originalImage,
+                image: fullPhotoDataUrl || prev[surf].image,
+                warpedImage: fullPhotoDataUrl || prev[surf].warpedImage,
+                scale: calibratedPxPerMeter,
+                autoFitted: true,
+              },
+            }));
+          }}
+          onUpdateJointsWithHistory={updateJointsWithHistory}
+          onUpdateRmrParams={setRmrParams}
+          onUpdateQIndexParams={setQIndexParams}
+          onUpdateQParamStatus={setQParamStatus}
+          onStatusMessage={setStatusMessage}
+        />
       </main>
     );
   }
@@ -3319,6 +3447,14 @@ export default function App({
             setReturnScreenFromCustomEditor('mapping');
             setScreen('geometry_custom');
           }}
+          onUpdateGeometry={(nextGeom) => {
+            setGeometry(nextGeom);
+            setManWidth(String(nextGeom.width));
+            setManHeight(String(nextGeom.height));
+            setManWallHeight(String(nextGeom.wallHeight));
+            setManCrownRadius(String(nextGeom.crownRadius));
+          }}
+          onUpdateSettings={setSettings}
           savedProjects={savedProjects}
           onLoadProjectRecord={handleLoadProjectRecord}
         />

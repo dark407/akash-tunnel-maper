@@ -52,12 +52,17 @@ import {
   trimStripTraceSegment,
 } from '../engine/projectNetworkStripEngine';
 import {
+  GsiParameters,
   Joint,
   JointSet,
   LithologyRegion,
   OverbreakUndercutAnalysis,
+  PhotoSurface,
   PlacedGeologicalSymbol,
   Point2D,
+  QIndexParameters,
+  RmrParameters,
+  RockMassSummaryTable,
   SavedProjectRecord,
   SurfaceType,
   TunnelGeometry,
@@ -115,6 +120,11 @@ export interface Continuous3DStripLoggerModalProps {
   lithologyRegions?: LithologyRegion[];
   placedSymbols?: PlacedGeologicalSymbol[];
   overbreakAnalysis?: OverbreakUndercutAnalysis;
+  rmrParams?: RmrParameters;
+  qIndexParams?: QIndexParameters;
+  gsiParams?: GsiParameters;
+  rockMassSummary?: RockMassSummaryTable;
+  photos?: Record<SurfaceType, PhotoSurface>;
   savedProjects: SavedProjectRecord[];
   onSelectSurface?: (s: SurfaceType) => void;
   onLoadProjectRecord?: (rec: SavedProjectRecord) => void;
@@ -152,8 +162,15 @@ export const Continuous3DStripLoggerModal: React.FC<
   geometry,
   settings,
   joints,
+  jointSets,
   lithologyRegions,
   placedSymbols,
+  overbreakAnalysis,
+  rmrParams,
+  qIndexParams,
+  gsiParams,
+  rockMassSummary,
+  photos,
   savedProjects,
 }) => {
   const [datasets, setDatasets] = useState<ContinuousTunnelStripDataset[]>(() =>
@@ -279,9 +296,8 @@ export const Continuous3DStripLoggerModal: React.FC<
 
   const svgRef = useRef<SVGSVGElement | null>(null);
 
-  // Sync savedProjects into datasets when modal opens (including Intersecting Branch Tunnels)
-  useEffect(() => {
-    if (!isOpen) return;
+  // Sync savedProjects + live active Face/Unwrapped Log into datasets when modal opens
+  const runFullSyncFromFaceAndUnwrappedLog = () => {
     const loaded = loadAllContinuousStripDatasets();
     const synced = ensureIntersectingBranchDatasets(
       syncSavedProjectsIntoStripDatasets(
@@ -291,23 +307,72 @@ export const Continuous3DStripLoggerModal: React.FC<
         geometry,
         joints,
         lithologyRegions,
-        placedSymbols
+        placedSymbols,
+        {
+          settings,
+          geometry,
+          joints,
+          jointSets,
+          lithologyRegions,
+          placedSymbols,
+          rmrParams,
+          qIndexParams,
+          gsiParams,
+          rockMassSummary,
+          overbreakAnalysis,
+          photos,
+        }
       )
     );
     setDatasets(synced);
     saveAllContinuousStripDatasets(synced);
-    if (!synced.some((d) => d.id === activeDatasetId) && synced.length > 0) {
+
+    const targetProj = (settings?.projectName || '').trim().toLowerCase();
+    const targetLoc = (settings?.locationName || settings?.tunnelName || '').trim().toLowerCase();
+    const matchedDs =
+      synced.find(
+        (d) =>
+          targetProj &&
+          targetLoc &&
+          d.projectName.trim().toLowerCase() === targetProj &&
+          d.tunnelLocationName.trim().toLowerCase() === targetLoc
+      ) ||
+      synced.find((d) => d.pulls.length > 0 && d.id !== 'dataset-fresh-workspace') ||
+      synced.find((d) => d.pulls.length > 0);
+
+    if (matchedDs) {
+      if (
+        activeDatasetId === 'dataset-fresh-workspace' ||
+        !synced.some((d) => d.id === activeDatasetId)
+      ) {
+        setActiveDatasetId(matchedDs.id);
+      }
+      if (!selectedPullId && matchedDs.pulls.length > 0) {
+        setSelectedPullId(matchedDs.pulls[matchedDs.pulls.length - 1].id);
+      }
+    } else if (!synced.some((d) => d.id === activeDatasetId) && synced.length > 0) {
       setActiveDatasetId(synced[0].id);
     }
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    runFullSyncFromFaceAndUnwrappedLog();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     isOpen,
     savedProjects,
     settings,
     geometry,
     joints,
+    jointSets,
     lithologyRegions,
     placedSymbols,
-    activeDatasetId,
+    rmrParams,
+    qIndexParams,
+    gsiParams,
+    rockMassSummary,
+    overbreakAnalysis,
   ]);
 
   const activeDataset = useMemo(() => {
@@ -4523,6 +4588,46 @@ export const Continuous3DStripLoggerModal: React.FC<
                   {/* TAB 2: PULL SCHEDULE & DRIVE AZIMUTH CURVATURE */}
                   {inspectorTab === 'PULLS_DRIVE' && (
                     <>
+                      {/* Auto-Sync Status & 1-Click Re-Sync from Unwrapped / Face Log */}
+                      <div
+                        className={`border rounded-lg p-2.5 space-y-1.5 ${
+                          isLight
+                            ? 'bg-emerald-50/80 border-emerald-200'
+                            : 'bg-emerald-950/30 border-emerald-500/40'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`font-bold text-[10.5px] flex items-center gap-1.5 ${
+                              isLight ? 'text-emerald-900' : 'text-emerald-300'
+                            }`}
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                            <span>Auto-Fed from Face &amp; Unwrapped Log</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              runFullSyncFromFaceAndUnwrappedLog();
+                              setCadCmdStatus(
+                                'Synced all Unwrapped & Face Log traces, Lithology, RMR, Q-System, Weathering, UCS & Support into 3D Strip Logger.'
+                              );
+                            }}
+                            className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[9.5px] cursor-pointer shrink-0"
+                          >
+                            Sync Now
+                          </button>
+                        </div>
+                        <div
+                          className={`text-[9.5px] leading-snug ${
+                            isLight ? 'text-slate-600' : 'text-slate-300'
+                          }`}
+                        >
+                          Pulls, Left/Right Wall + Crown + Face traces, Weathering, RMR, RQD, Q,
+                          UCS, Seepage &amp; Support automatically sync by Location &amp; Chainage.
+                        </div>
+                      </div>
+
                       {/* Add Pull Interval Card */}
                       <div
                         className={`border rounded-lg p-2.5 space-y-2 ${
@@ -4587,25 +4692,31 @@ export const Continuous3DStripLoggerModal: React.FC<
                         </button>
                       </div>
 
-                      {/* Selected Pull Editor */}
+                      {/* Selected Pull Editor — Complete Engineering Report Parameters */}
                       {selectedPull && (
                         <div
-                          className={`border rounded-lg p-2.5 space-y-2 ${
+                          className={`border rounded-lg p-2.5 space-y-2.5 ${
                             isLight
                               ? 'bg-amber-50/70 border-amber-300'
                               : 'bg-[#16233E] border-amber-500/50'
                           }`}
                         >
-                          <div
-                            className={`font-bold text-[11px] ${
-                              isLight ? 'text-amber-800' : 'text-amber-300'
-                            }`}
-                          >
-                            Edit Pull Ch. {selectedPull.fromRd}–{selectedPull.toRd}m
+                          <div className="flex items-center justify-between">
+                            <span
+                              className={`font-bold text-[11px] ${
+                                isLight ? 'text-amber-800' : 'text-amber-300'
+                              }`}
+                            >
+                              Pull Report Data: Ch. {selectedPull.fromRd}–{selectedPull.toRd}m
+                            </span>
+                            <span className="text-[9.5px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold">
+                              {selectedPull.rockClass || 'Class II'}
+                            </span>
                           </div>
+
                           <div className="grid grid-cols-2 gap-2">
                             <label className="block">
-                              <span className="text-[10px] text-slate-400">
+                              <span className="text-[9.5px] text-slate-400">
                                 Drive Azimuth (°N)
                               </span>
                               <input
@@ -4613,17 +4724,21 @@ export const Continuous3DStripLoggerModal: React.FC<
                                 step="0.5"
                                 value={selectedPull.driveAzimuthDeg}
                                 onChange={(e) => {
-                                  const az = parseFloat(e.target.value) || 160;
+                                  const az = parseFloat(e.target.value) || 0;
                                   updateActiveDataset((prev) => ({
                                     ...prev,
                                     pulls: prev.pulls.map((p) =>
                                       p.id === selectedPull.id
-                                        ? { ...p, driveAzimuthDeg: az }
+                                        ? {
+                                            ...p,
+                                            driveAzimuthDeg: az,
+                                            leftBoundaryAzimuthDeg: Number(((az + 180) % 360).toFixed(1)),
+                                          }
                                         : p
                                     ),
                                   }));
                                 }}
-                                className={`w-full px-2 py-1 border rounded-md font-bold ${
+                                className={`w-full px-2 py-1 border rounded-md font-bold text-[11px] ${
                                   isLight
                                     ? 'bg-white border-slate-300 text-amber-700'
                                     : 'bg-[#090E1A] border-slate-700 text-amber-300'
@@ -4631,8 +4746,8 @@ export const Continuous3DStripLoggerModal: React.FC<
                               />
                             </label>
                             <label className="block">
-                              <span className="text-[10px] text-slate-400">
-                                Overbreak (m³)
+                              <span className="text-[9.5px] text-slate-400">
+                                Overbreak Vol (m³)
                               </span>
                               <input
                                 type="number"
@@ -4649,7 +4764,7 @@ export const Continuous3DStripLoggerModal: React.FC<
                                     ),
                                   }));
                                 }}
-                                className={`w-full px-2 py-1 border rounded-md ${
+                                className={`w-full px-2 py-1 border rounded-md text-[11px] ${
                                   isLight
                                     ? 'bg-white border-slate-300 text-slate-900'
                                     : 'bg-[#090E1A] border-slate-700 text-white'
@@ -4657,7 +4772,7 @@ export const Continuous3DStripLoggerModal: React.FC<
                               />
                             </label>
                             <label className="block">
-                              <span className="text-[10px] text-slate-400">RMR (0-100)</span>
+                              <span className="text-[9.5px] text-slate-400">RMR89 (0–100)</span>
                               <input
                                 type="number"
                                 value={selectedPull.rmrValue ?? 60}
@@ -4672,7 +4787,7 @@ export const Continuous3DStripLoggerModal: React.FC<
                                     ),
                                   }));
                                 }}
-                                className={`w-full px-2 py-1 border rounded-md font-bold ${
+                                className={`w-full px-2 py-1 border rounded-md font-bold text-[11px] ${
                                   isLight
                                     ? 'bg-white border-slate-300 text-cyan-700'
                                     : 'bg-[#090E1A] border-slate-700 text-cyan-300'
@@ -4680,7 +4795,7 @@ export const Continuous3DStripLoggerModal: React.FC<
                               />
                             </label>
                             <label className="block">
-                              <span className="text-[10px] text-slate-400">RQD (0-100)</span>
+                              <span className="text-[9.5px] text-slate-400">RQD (%)</span>
                               <input
                                 type="number"
                                 value={selectedPull.rqdValue ?? 70}
@@ -4695,10 +4810,375 @@ export const Continuous3DStripLoggerModal: React.FC<
                                     ),
                                   }));
                                 }}
-                                className={`w-full px-2 py-1 border rounded-md font-bold ${
+                                className={`w-full px-2 py-1 border rounded-md font-bold text-[11px] ${
                                   isLight
                                     ? 'bg-white border-slate-300 text-emerald-700'
                                     : 'bg-[#090E1A] border-slate-700 text-emerald-300'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">Q-Index Value</span>
+                              <input
+                                type="number"
+                                step="0.1"
+                                value={selectedPull.qValue ?? 6.5}
+                                onChange={(e) => {
+                                  const v = parseFloat(e.target.value) || 1.0;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, qValue: v }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md font-bold text-[11px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-purple-700'
+                                    : 'bg-[#090E1A] border-slate-700 text-purple-300'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">GSI (0–100)</span>
+                              <input
+                                type="number"
+                                value={selectedPull.gsiValue ?? Math.max(15, (selectedPull.rmrValue ?? 60) - 5)}
+                                onChange={(e) => {
+                                  const v = parseInt(e.target.value, 10) || 55;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, gsiValue: v }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md font-bold text-[11px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-sky-700'
+                                    : 'bg-[#090E1A] border-slate-700 text-sky-300'
+                                }`}
+                              />
+                            </label>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-700/40">
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">
+                                Weathering Grade
+                              </span>
+                              <input
+                                type="text"
+                                value={selectedPull.weatheringCondition || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, weatheringCondition: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                placeholder="W2 (Slightly Weathered)"
+                                className={`w-full px-2 py-1 border rounded-md text-[11px] font-semibold ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-amber-200'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">
+                                Intact Strength (UCS MPa)
+                              </span>
+                              <input
+                                type="text"
+                                value={selectedPull.ucsRangeMpa || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, ucsRangeMpa: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                placeholder="100–200 MPa"
+                                className={`w-full px-2 py-1 border rounded-md text-[11px] font-semibold ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-cyan-200'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">Rock Type</span>
+                              <input
+                                type="text"
+                                value={selectedPull.rockType || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id ? { ...p, rockType: val } : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[11px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">
+                                Groundwater / Seepage
+                              </span>
+                              <input
+                                type="text"
+                                value={selectedPull.seepageCondition || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, seepageCondition: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[11px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-sky-200'
+                                }`}
+                              />
+                            </label>
+                          </div>
+
+                          <div className="space-y-1.5 pt-1 border-t border-slate-700/40">
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">
+                                Rock Description (Report Row)
+                              </span>
+                              <input
+                                type="text"
+                                value={selectedPull.rockDescription || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, rockDescription: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10.5px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">
+                                Structure (Joint Sets, Shear/Fault Zones)
+                              </span>
+                              <textarea
+                                rows={2}
+                                value={selectedPull.structureDescription || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, structureDescription: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9.5px] text-slate-400">
+                                Foliation &amp; Joint Characteristics
+                              </span>
+                              <textarea
+                                rows={2}
+                                value={selectedPull.foliationCharacteristics || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, foliationCharacteristics: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-700/40">
+                            <label className="block">
+                              <span className="text-[9px] text-slate-400">Support Class</span>
+                              <input
+                                type="text"
+                                value={selectedPull.supportClass || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id ? { ...p, supportClass: val } : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10.5px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9px] text-slate-400">Shotcrete (a)</span>
+                              <input
+                                type="text"
+                                value={selectedPull.shotcreteInstalled || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, shotcreteInstalled: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10.5px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9px] text-slate-400">Wire Mesh (b)</span>
+                              <input
+                                type="text"
+                                value={selectedPull.wireMeshInstalled || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, wireMeshInstalled: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10.5px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9px] text-slate-400">Rock Bolts (c)</span>
+                              <input
+                                type="text"
+                                value={selectedPull.rockBoltsInstalled || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, rockBoltsInstalled: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10.5px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9px] text-slate-400">Steel Ribs (d)</span>
+                              <input
+                                type="text"
+                                value={selectedPull.steelRibsInstalled || '-'}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, steelRibsInstalled: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10.5px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
+                                }`}
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[9px] text-slate-400">Forepoling (e)</span>
+                              <input
+                                type="text"
+                                value={selectedPull.forepolingInstalled || '-'}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveDataset((prev) => ({
+                                    ...prev,
+                                    pulls: prev.pulls.map((p) =>
+                                      p.id === selectedPull.id
+                                        ? { ...p, forepolingInstalled: val }
+                                        : p
+                                    ),
+                                  }));
+                                }}
+                                className={`w-full px-2 py-1 border rounded-md text-[10.5px] ${
+                                  isLight
+                                    ? 'bg-white border-slate-300 text-slate-900'
+                                    : 'bg-[#090E1A] border-slate-700 text-white'
                                 }`}
                               />
                             </label>

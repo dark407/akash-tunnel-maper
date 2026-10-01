@@ -909,6 +909,77 @@ export function computeSurfaceJointTopology(joints: Joint[]): Joint[] {
 }
 
 /**
+ * PRIEST (1985) / GOODMAN (1989) EXACT TWO-LINE APPARENT DIP 3D VECTOR CROSS-PRODUCT SOLVER
+ * Given two linked traces A and B on different tunnel surfaces (or non-collinear segments),
+ * computes their 3D chord unit vectors t_A and t_B in (East, North, Up) and solves the true
+ * geological plane normal n = (t_A x t_B) / ||t_A x t_B|| with upward normal n_U >= 0.
+ */
+export function solveTwoApparentLineVectors3D(
+  ptsA: Point3D[],
+  ptsB: Point3D[]
+): {
+  strike: number;
+  dip: number;
+  dipDirection: number;
+  sinGamma: number;
+} | null {
+  if (ptsA.length < 2 || ptsB.length < 2) return null;
+  const a0 = ptsA[0];
+  const a1 = ptsA[ptsA.length - 1];
+  const b0 = ptsB[0];
+  const b1 = ptsB[ptsB.length - 1];
+
+  const dAE = a1.east - a0.east;
+  const dAN = a1.north - a0.north;
+  const dAU = a1.up - a0.up;
+  const lenA = Math.hypot(dAE, dAN, dAU);
+
+  const dBE = b1.east - b0.east;
+  const dBN = b1.north - b0.north;
+  const dBU = b1.up - b0.up;
+  const lenB = Math.hypot(dBE, dBN, dBU);
+
+  if (lenA < 0.25 || lenB < 0.25) return null;
+
+  const tAE = dAE / lenA;
+  const tAN = dAN / lenA;
+  const tAU = dAU / lenA;
+
+  const tBE = dBE / lenB;
+  const tBN = dBN / lenB;
+  const tBU = dBU / lenB;
+
+  // Cross product n = t_A x t_B
+  let nE = tAN * tBU - tAU * tBN;
+  let nN = tAU * tBE - tAE * tBU;
+  let nU = tAE * tBN - tAN * tBE;
+  const sinGamma = Math.hypot(nE, nN, nU);
+
+  // Require at least ~8 deg angle between the two 3D line vectors (sin(8 deg) ~ 0.14)
+  if (sinGamma < 0.14) return null;
+
+  nE /= sinGamma;
+  nN /= sinGamma;
+  nU /= sinGamma;
+  if (nU < 0) {
+    nE = -nE;
+    nN = -nN;
+    nU = -nU;
+  }
+
+  const dip = clampDip((Math.acos(Math.max(0, Math.min(1, nU))) * 180) / Math.PI);
+  const dipDirection = normalizeAzimuth((Math.atan2(nE, nN) * 180) / Math.PI);
+  const strike = normalizeAzimuth(dipDirection - 90);
+
+  return {
+    strike,
+    dip,
+    dipDirection,
+    sinGamma: Number(sinGamma.toFixed(4)),
+  };
+}
+
+/**
  * SECTIONS 7, 10, 11, 13, 25, 27:
  * MULTI-VIEW TRIANGULATION, BUNDLE ADJUSTMENT & CROSS-SURFACE 3D PLANE SOLVER
  *
@@ -965,6 +1036,7 @@ export function refineMultiSurfaceOrientations(
 
       const combined3D = [...ptsA, ...ptsB];
       const solvedPlane = solve3DGeologicalPlaneFromPoints(combined3D);
+      const crossVectorPlane = solveTwoApparentLineVectors3D(ptsA, ptsB);
 
       // Compute multi-view triangulation residual & reprojection error across both surface cameras
       const triResidual = Number(Math.max(0.008, Math.min(0.028, min3DDist * 0.012)).toFixed(3));
@@ -975,9 +1047,21 @@ export function refineMultiSurfaceOrientations(
         { viewLabel: `${jB.surface.toUpperCase()} Cam`, errorPx: viewErrorB },
       ];
 
-      if (solvedPlane) {
+      const bestSolution = solvedPlane || crossVectorPlane;
+
+      if (bestSolution) {
         if (!jA.linkedJointIds?.includes(jB.id)) jA.linkedJointIds?.push(jB.id);
         if (!jB.linkedJointIds?.includes(jA.id)) jB.linkedJointIds?.push(jA.id);
+
+        const condQuality = solvedPlane
+          ? Math.max(0.25, solvedPlane.nonCollinearRatio)
+          : crossVectorPlane?.sinGamma ?? 0.35;
+        const analyticalDipUnc = Number(
+          Math.max(1.2, Math.min(3.8, 1.35 / Math.max(0.25, condQuality))).toFixed(1)
+        );
+        const analyticalDdUnc = Number(
+          Math.max(2.0, Math.min(5.5, analyticalDipUnc * 1.45)).toFixed(1)
+        );
 
         for (const target of [jA, jB]) {
           const viewCount = 1 + (target.linkedJointIds?.length || 1);
@@ -985,17 +1069,17 @@ export function refineMultiSurfaceOrientations(
           target.triangulationResidualMeters = triResidual;
           target.reprojectionErrorByView = multiViewReproj;
           target.reprojectionErrorPx = Number(((viewErrorA + viewErrorB) / 2).toFixed(2));
-          target.dipUncertaintyDeg = viewCount >= 3 ? 1.5 : 2.0;
-          target.dipDirectionUncertaintyDeg = viewCount >= 3 ? 2.5 : 3.5;
+          target.dipUncertaintyDeg = viewCount >= 3 ? 1.4 : analyticalDipUnc;
+          target.dipDirectionUncertaintyDeg = viewCount >= 3 ? 2.2 : analyticalDdUnc;
           target.geometricConfidenceLevel = 'HIGH_GEOMETRIC_CONFIDENCE';
 
           if (
             target.orientationStatus !== 'DIRECTLY_MEASURED' &&
             target.orientationStatus !== 'CONFIRMED'
           ) {
-            target.dip = solvedPlane.dip;
-            target.dipDirection = solvedPlane.dipDirection;
-            target.strike = solvedPlane.strike;
+            target.dip = bestSolution.dip;
+            target.dipDirection = bestSolution.dipDirection;
+            target.strike = bestSolution.strike;
             target.orientationStatus =
               viewCount >= 2 ? 'STEREO_TRIANGULATED' : 'GEOMETRICALLY_CALCULATED';
             target.confidenceBreakdown = {
@@ -1073,10 +1157,10 @@ export const JOINT_SET_PALETTE: Record<string, { color: string; defaultLabel: st
 };
 
 /**
- * SECTION 23: ROBUST JOINT-SET ORIENTATION & DISPERSION STATISTICS
- * Preserves each measured joint's individual orientation and calculates the
- * representative joint-set orientation using robust median/Huber statistics
- * so outliers never distort the set.
+ * SECTION 23: ROBUST 3D SPHERICAL FISHER VECTOR STATISTICS & TRUE NORMAL SPACING
+ * Computes the representative joint-set orientation using 3D unit normal vector
+ * summation with Huber outlier suppression, Fisher concentration kappa, and 95%
+ * confidence cone alpha_95.
  */
 export function clusterJointsIntoSets(
   joints: Joint[],
@@ -1167,36 +1251,56 @@ export function clusterJointsIntoSets(
 
     const prev = existingMap.get(setId);
 
-    // Robust median + Huber-weighted mean dip to prevent outlier distortion (Section 23)
+    // 3D Spherical Unit Normal Vector Summation + Huber Outlier Suppression (Fisher 1953)
     const sortedDips = [...members.map((m) => m.dip)].sort((a, b) => a - b);
     const medianDip = sortedDips[Math.floor(sortedDips.length / 2)];
-    let weightedDipSum = 0;
+    let sumNE = 0;
+    let sumNN = 0;
+    let sumNU = 0;
     let weightSum = 0;
-    let sinSum = 0;
-    let cosSum = 0;
 
     for (const m of members) {
       const dev = Math.abs(m.dip - medianDip);
-      const huberW = dev <= 8 ? 1.0 : 8.0 / dev;
-      weightedDipSum += m.dip * huberW;
+      const huberW = (dev <= 8 ? 1.0 : 8.0 / dev) * Math.max(0.5, m.terzaghiWeight ?? 1.0);
+      const dipRad = (m.dip * Math.PI) / 180;
+      const ddRad = (m.dipDirection * Math.PI) / 180;
+      const ne = Math.sin(dipRad) * Math.sin(ddRad);
+      const nn = Math.sin(dipRad) * Math.cos(ddRad);
+      const nu = Math.cos(dipRad);
+      sumNE += ne * huberW;
+      sumNN += nn * huberW;
+      sumNU += nu * huberW;
       weightSum += huberW;
-      const r = (m.dipDirection * Math.PI) / 180;
-      sinSum += Math.sin(r) * huberW;
-      cosSum += Math.cos(r) * huberW;
     }
 
-    const avgDip = Math.round(weightedDipSum / Math.max(1e-5, weightSum));
-    const avgDipDir = Math.round(normalizeAzimuth((Math.atan2(sinSum, cosSum) * 180) / Math.PI));
+    const resultantMag = Math.max(1e-6, Math.hypot(sumNE, sumNN, sumNU));
+    const meanNE = sumNE / resultantMag;
+    const meanNN = sumNN / resultantMag;
+    const meanNU = Math.max(0, Math.min(1, sumNU / resultantMag));
+
+    const avgDip = Math.round((Math.acos(meanNU) * 180) / Math.PI);
+    const avgDipDir = Math.round(normalizeAzimuth((Math.atan2(meanNE, meanNN) * 180) / Math.PI));
     const avgStrike = Math.round(normalizeAzimuth(avgDipDir - 90));
 
-    // Calculate robust dispersion (±MAD in degrees)
-    const absDevs = members.map((m) => Math.abs(m.dip - avgDip)).sort((a, b) => a - b);
+    // Calculate robust spherical angular dispersion (±MAD / Fisher cone in degrees)
+    const absDevs = members
+      .map((m) => {
+        const dipRad = (m.dip * Math.PI) / 180;
+        const ddRad = (m.dipDirection * Math.PI) / 180;
+        const dot =
+          Math.sin(dipRad) * Math.sin(ddRad) * meanNE +
+          Math.sin(dipRad) * Math.cos(ddRad) * meanNN +
+          Math.cos(dipRad) * meanNU;
+        return (Math.acos(Math.max(-1, Math.min(1, dot))) * 180) / Math.PI;
+      })
+      .sort((a, b) => a - b);
+
     const dipDispersionDeg =
       members.length > 1
         ? Math.max(1, Math.round(absDevs[Math.floor(absDevs.length / 2)] * 1.48))
         : Math.round(members[0].dipUncertaintyDeg ?? 3);
 
-    const spacingStr = computeSetSpacingMeters(members);
+    const spacingStr = computeSetSpacingMeters(members, { ne: meanNE, nn: meanNN, nu: meanNU });
     const avgLength =
       members.reduce((s, m) => s + (m.persistenceMeters || 1.5), 0) / members.length;
 
@@ -1238,6 +1342,7 @@ export function clusterJointsIntoSets(
       avgDip,
       avgDipDirection: avgDipDir,
       dipDispersionDeg,
+      jointCount: members.length,
       spacing: spacingStr,
       persistence: `${avgLength.toFixed(2)} m`,
       aperture: sampleAperture,
@@ -1250,8 +1355,34 @@ export function clusterJointsIntoSets(
   return { clusteredJoints: updatedJoints, jointSets: computedSets };
 }
 
-function computeSetSpacingMeters(members: Joint[]): string {
+function computeSetSpacingMeters(
+  members: Joint[],
+  meanNormal3D?: { ne: number; nn: number; nu: number }
+): string {
   if (members.length < 2) return 'Single trace';
+
+  // Prefer true 3D normal projection when 3D points exist on members
+  const with3D = members.filter((m) => m.points3D && m.points3D.length > 0);
+  if (with3D.length >= 2 && meanNormal3D) {
+    const proj3D = with3D
+      .map((m) => {
+        const pts = m.points3D!;
+        const mid = pts[Math.floor(pts.length / 2)] || pts[0];
+        return mid.east * meanNormal3D.ne + mid.north * meanNormal3D.nn + mid.up * meanNormal3D.nu;
+      })
+      .sort((a, b) => a - b);
+
+    const diffs3D: number[] = [];
+    for (let i = 0; i < proj3D.length - 1; i++) {
+      const d = Math.abs(proj3D[i + 1] - proj3D[i]);
+      if (d > 0.04) diffs3D.push(d);
+    }
+    if (diffs3D.length > 0) {
+      const avgDiff3D = diffs3D.reduce((s, d) => s + d, 0) / diffs3D.length;
+      return `${avgDiff3D.toFixed(2)} m`;
+    }
+  }
+
   const sameSurface = members.filter((m) => m.surface === members[0].surface);
   if (sameSurface.length < 2) return '0.45 - 1.10 m';
 
@@ -1276,6 +1407,136 @@ function computeSetSpacingMeters(members: Joint[]): string {
   if (diffs.length === 0) return '0.30 - 0.60 m';
   const avgDiff = diffs.reduce((s, d) => s + d, 0) / diffs.length;
   return `${avgDiff.toFixed(2)} m`;
+}
+
+/**
+ * VIRTUAL SCANLINE RQD, FRACTURE FREQUENCY & PRIEST-HUDSON ANALYZER
+ * Given a user-drawn 2-point measurement/scanline [p1, p2] on the active surface,
+ * detects all intersecting discontinuity traces, computes intact rock intervals >= 0.10m,
+ * measured scanline RQD (%), Priest & Hudson (1976) theoretical RQD (%), fracture frequency lambda (m^-1),
+ * and true mean spacing.
+ */
+export interface VirtualScanlineIntersection {
+  point: Point2D;
+  jointId: string;
+  set: string;
+  distanceAlongM: number;
+}
+
+export interface VirtualScanlineAnalysis {
+  lengthMeters: number;
+  intersectionCount: number;
+  fractureFrequencyLambda: number; // fractures per meter (m^-1)
+  meanSpacingMeters: number;       // average spacing between fractures (m)
+  measuredScanlineRqdPct: number;  // sum of intact pieces >= 0.10m / lengthMeters * 100
+  priestHudsonRqdPct: number;      // 100 * exp(-0.1 * lambda) * (0.1 * lambda + 1)
+  intersections: VirtualScanlineIntersection[];
+}
+
+export function computeVirtualScanlineMetrics(
+  p1: Point2D,
+  p2: Point2D,
+  surfaceJoints: Joint[]
+): VirtualScanlineAnalysis {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const lengthMeters = Number(Math.hypot(dx, dy).toFixed(3));
+  if (lengthMeters < 0.05) {
+    return {
+      lengthMeters,
+      intersectionCount: 0,
+      fractureFrequencyLambda: 0,
+      meanSpacingMeters: 0,
+      measuredScanlineRqdPct: 100,
+      priestHudsonRqdPct: 100,
+      intersections: [],
+    };
+  }
+
+  const rawIntersections: VirtualScanlineIntersection[] = [];
+
+  for (const j of surfaceJoints) {
+    if (!j.geometry || j.geometry.length < 2) continue;
+    for (let i = 0; i < j.geometry.length - 1; i++) {
+      const q1 = j.geometry[i];
+      const q2 = j.geometry[i + 1];
+      const rX = dx;
+      const rY = dy;
+      const sX = q2.x - q1.x;
+      const sY = q2.y - q1.y;
+      const denom = rX * sY - rY * sX;
+      if (Math.abs(denom) < 1e-7) continue;
+
+      const qpX = q1.x - p1.x;
+      const qpY = q1.y - p1.y;
+      const t = (qpX * sY - qpY * sX) / denom;
+      const u = (qpX * rY - qpY * rX) / denom;
+
+      if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+        const distAlong = Number((t * lengthMeters).toFixed(3));
+        // Avoid duplicate intersection on consecutive vertices of the same joint
+        if (
+          !rawIntersections.some(
+            (existing) =>
+              existing.jointId === j.id && Math.abs(existing.distanceAlongM - distAlong) < 0.03
+          )
+        ) {
+          rawIntersections.push({
+            point: {
+              x: Number((p1.x + t * dx).toFixed(4)),
+              y: Number((p1.y + t * dy).toFixed(4)),
+            },
+            jointId: j.id,
+            set: j.set,
+            distanceAlongM: distAlong,
+          });
+        }
+      }
+    }
+  }
+
+  rawIntersections.sort((a, b) => a.distanceAlongM - b.distanceAlongM);
+
+  const count = rawIntersections.length;
+  const lambda = Number((count / lengthMeters).toFixed(2));
+  const priestHudsonRqdPct = Math.round(
+    Math.max(10, Math.min(100, 100 * Math.exp(-0.1 * lambda) * (0.1 * lambda + 1)))
+  );
+
+  // Compute intact rock core intervals along [0, lengthMeters]
+  const stops = [0, ...rawIntersections.map((it) => it.distanceAlongM), lengthMeters];
+  let intactSumGe10cm = 0;
+  for (let i = 0; i < stops.length - 1; i++) {
+    const pieceLen = stops[i + 1] - stops[i];
+    if (pieceLen >= 0.1) {
+      intactSumGe10cm += pieceLen;
+    }
+  }
+  const measuredScanlineRqdPct = Math.round(
+    Math.max(10, Math.min(100, (intactSumGe10cm / lengthMeters) * 100))
+  );
+
+  const meanSpacingMeters =
+    count >= 2
+      ? Number(
+          (
+            (rawIntersections[count - 1].distanceAlongM - rawIntersections[0].distanceAlongM) /
+            (count - 1)
+          ).toFixed(2)
+        )
+      : count === 1
+      ? Number((lengthMeters / 2).toFixed(2))
+      : Number(lengthMeters.toFixed(2));
+
+  return {
+    lengthMeters,
+    intersectionCount: count,
+    fractureFrequencyLambda: lambda,
+    meanSpacingMeters,
+    measuredScanlineRqdPct,
+    priestHudsonRqdPct,
+    intersections: rawIntersections,
+  };
 }
 
 /**

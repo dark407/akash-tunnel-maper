@@ -300,6 +300,59 @@ export function hasDeformationOrCrop(t: SurfaceTransform): boolean {
 }
 
 /**
+ * Returns a stable signature string covering ONLY the non-affine warp/crop parameters
+ * (flip, crop margins, skew, perspective corners/sliders, edge offsets, mesh control points).
+ * Pan (offsetX/Y), scale (scaleX/Y), zoom, rotation, and customMaskPoints are handled
+ * directly in SVG and do NOT trigger canvas rasterization!
+ */
+export function getWarpDeformationSignature(t: SurfaceTransform): string {
+  if (!hasDeformationOrCrop(t)) return 'IDENTITY';
+  const corners = t.perspectiveCorners.map((c) => `${c.x.toFixed(3)},${c.y.toFixed(3)}`).join(';');
+  const edges = (t.edgeOffsets || []).map((e) => `${e.x.toFixed(3)},${e.y.toFixed(3)}`).join(';');
+  const mesh = (t.meshControlPoints || [])
+    .map((cp) => `${cp.dstU.toFixed(3)},${cp.dstV.toFixed(3)}`)
+    .join(';');
+  return [
+    t.flipH ? 1 : 0,
+    t.flipV ? 1 : 0,
+    (t.cropTop || 0).toFixed(3),
+    (t.cropBottom || 0).toFixed(3),
+    (t.cropLeft || 0).toFixed(3),
+    (t.cropRight || 0).toFixed(3),
+    (t.skewX || 0).toFixed(2),
+    (t.skewY || 0).toFixed(2),
+    (t.perspH || 0).toFixed(3),
+    (t.perspV || 0).toFixed(3),
+    corners,
+    edges,
+    mesh,
+  ].join('|');
+}
+
+const cachedDecodedImages = new Map<string, HTMLImageElement>();
+
+function getDecodedImage(sourceDataUrl: string): Promise<HTMLImageElement> {
+  const existing = cachedDecodedImages.get(sourceDataUrl);
+  if (existing && existing.complete && existing.naturalWidth > 0) {
+    return Promise.resolve(existing);
+  }
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      if (cachedDecodedImages.size > 8) {
+        const firstKey = cachedDecodedImages.keys().next().value;
+        if (firstKey) cachedDecodedImages.delete(firstKey);
+      }
+      cachedDecodedImages.set(sourceDataUrl, img);
+      resolve(img);
+    };
+    img.onerror = (err) => reject(err);
+    img.src = sourceDataUrl;
+  });
+}
+
+/**
  * Renders a piecewise triangle-mesh warped photograph Data URL using an HTML5 Canvas.
  * Subdivides the image into an N x N triangle mesh (e.g. 14x14 = 392 triangles) and
  * draws each triangle with its exact local affine transformation from source cropped UV
@@ -307,96 +360,93 @@ export function hasDeformationOrCrop(t: SurfaceTransform): boolean {
  */
 export async function generatePiecewiseWarpedPhotoDataUrl(
   sourceDataUrl: string,
-  transform: SurfaceTransform
+  transform: SurfaceTransform,
+  fastPreview = false
 ): Promise<string> {
   if (!hasDeformationOrCrop(transform)) {
     return sourceDataUrl;
   }
 
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      try {
-        const outW = Math.min(1100, Math.max(640, img.width));
-        const outH = Math.min(900, Math.max(520, img.height));
-        const canvas = document.createElement('canvas');
-        canvas.width = outW;
-        canvas.height = outH;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(sourceDataUrl);
-          return;
-        }
+  try {
+    const img = await getDecodedImage(sourceDataUrl);
+    const outW = fastPreview
+      ? Math.min(540, Math.max(360, Math.round(img.width * 0.5)))
+      : Math.min(1000, Math.max(600, img.width));
+    const outH = fastPreview
+      ? Math.min(440, Math.max(280, Math.round(img.height * 0.5)))
+      : Math.min(820, Math.max(480, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return sourceDataUrl;
+    }
 
-        const cLeft = Math.max(0, Math.min(0.45, transform.cropLeft || 0));
-        const cRight = Math.max(0, Math.min(0.45, transform.cropRight || 0));
-        const cTop = Math.max(0, Math.min(0.45, transform.cropTop || 0));
-        const cBot = Math.max(0, Math.min(0.45, transform.cropBottom || 0));
+    const cLeft = Math.max(0, Math.min(0.45, transform.cropLeft || 0));
+    const cRight = Math.max(0, Math.min(0.45, transform.cropRight || 0));
+    const cTop = Math.max(0, Math.min(0.45, transform.cropTop || 0));
+    const cBot = Math.max(0, Math.min(0.45, transform.cropBottom || 0));
 
-        const gridN = 14;
-        for (let r = 0; r < gridN; r++) {
-          for (let c = 0; c < gridN; c++) {
-            const u0 = c / gridN;
-            const v0 = r / gridN;
-            const u1 = (c + 1) / gridN;
-            const v1 = (r + 1) / gridN;
+    const gridN = fastPreview ? 8 : 12;
+    for (let r = 0; r < gridN; r++) {
+      for (let c = 0; c < gridN; c++) {
+        const u0 = c / gridN;
+        const v0 = r / gridN;
+        const u1 = (c + 1) / gridN;
+        const v1 = (r + 1) / gridN;
 
-            // Source image pixel coordinates (respecting crop margins)
-            const sx0 = (cLeft + u0 * (1 - cLeft - cRight)) * img.width;
-            const sy0 = (cTop + v0 * (1 - cTop - cBot)) * img.height;
-            const sx1 = (cLeft + u1 * (1 - cLeft - cRight)) * img.width;
-            const sy1 = (cTop + v1 * (1 - cTop - cBot)) * img.height;
+        // Source image pixel coordinates (respecting crop margins)
+        const sx0 = (cLeft + u0 * (1 - cLeft - cRight)) * img.width;
+        const sy0 = (cTop + v0 * (1 - cTop - cBot)) * img.height;
+        const sx1 = (cLeft + u1 * (1 - cLeft - cRight)) * img.width;
+        const sy1 = (cTop + v1 * (1 - cTop - cBot)) * img.height;
 
-            // Warped destination canvas coordinates
-            const d00 = evaluateForwardWarpedUV(u0, v0, transform);
-            const d10 = evaluateForwardWarpedUV(u1, v0, transform);
-            const d11 = evaluateForwardWarpedUV(u1, v1, transform);
-            const d01 = evaluateForwardWarpedUV(u0, v1, transform);
+        // Warped destination canvas coordinates
+        const d00 = evaluateForwardWarpedUV(u0, v0, transform);
+        const d10 = evaluateForwardWarpedUV(u1, v0, transform);
+        const d11 = evaluateForwardWarpedUV(u1, v1, transform);
+        const d01 = evaluateForwardWarpedUV(u0, v1, transform);
 
-            drawTexturedTriangle(
-              ctx,
-              img,
-              sx0,
-              sy0,
-              sx1,
-              sy0,
-              sx1,
-              sy1,
-              d00.u * outW,
-              d00.v * outH,
-              d10.u * outW,
-              d10.v * outH,
-              d11.u * outW,
-              d11.v * outH
-            );
-            drawTexturedTriangle(
-              ctx,
-              img,
-              sx0,
-              sy0,
-              sx1,
-              sy1,
-              sx0,
-              sy1,
-              d00.u * outW,
-              d00.v * outH,
-              d11.u * outW,
-              d11.v * outH,
-              d01.u * outW,
-              d01.v * outH
-            );
-          }
-        }
-
-        resolve(canvas.toDataURL('image/jpeg', 0.92));
-      } catch {
-        resolve(sourceDataUrl);
+        drawTexturedTriangle(
+          ctx,
+          img,
+          sx0,
+          sy0,
+          sx1,
+          sy0,
+          sx1,
+          sy1,
+          d00.u * outW,
+          d00.v * outH,
+          d10.u * outW,
+          d10.v * outH,
+          d11.u * outW,
+          d11.v * outH
+        );
+        drawTexturedTriangle(
+          ctx,
+          img,
+          sx0,
+          sy0,
+          sx1,
+          sy1,
+          sx0,
+          sy1,
+          d00.u * outW,
+          d00.v * outH,
+          d11.u * outW,
+          d11.v * outH,
+          d01.u * outW,
+          d01.v * outH
+        );
       }
-    };
-    img.onerror = () => resolve(sourceDataUrl);
-    img.src = sourceDataUrl;
-  });
+    }
+
+    return canvas.toDataURL('image/jpeg', fastPreview ? 0.76 : 0.9);
+  } catch {
+    return sourceDataUrl;
+  }
 }
 
 function drawTexturedTriangle(

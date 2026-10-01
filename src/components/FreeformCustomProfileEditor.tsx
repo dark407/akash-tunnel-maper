@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BoundaryZoneRole,
   ChainageProfileSegmentRecord,
   CustomSegmentType,
   CustomTunnelProfileDefinition,
@@ -17,6 +18,7 @@ import {
   computeBulgeFromMidpointHandle,
   computeBulgeFromRadius,
   CUSTOM_PROFILE_PRESETS,
+  deriveEditableCustomProfileFromGeometry,
   evaluateCustomProfileGeometry,
 } from '../engine/customProfileEngine';
 import { createTunnelGeometry } from '../engine/geometryEngine';
@@ -130,61 +132,84 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
   onDeleteSavedGeometry,
   onBack,
 }) => {
-  // Normalize initial tab so legacy 'segment_builder' or 'chainage_schedule' map cleanly
+  // Normalize initial tab so custom shapes or 'freeform_canvas' open directly onto the custom canvas
   const [mainTab, setMainTab] = useState<'common_variants' | 'freeform_canvas' | 'dxf_import'>(
     () => {
       if (initialTab === 'dxf_import') return 'dxf_import';
-      if (initialTab === 'freeform_canvas' || initialTab === 'segment_builder')
+      if (
+        initialTab === 'freeform_canvas' ||
+        initialTab === 'segment_builder' ||
+        geometry.isAuthoritativeCustom ||
+        Boolean(geometry.customProfile)
+      ) {
         return 'freeform_canvas';
+      }
       return 'common_variants';
     }
   );
 
   // ============================================================================
-  // MODE 1: COMMON TUNNEL VARIANTS STATE
+  // MODE 1: COMMON TUNNEL VARIANTS STATE (SUPPORTS INDEPENDENT LEFT / RIGHT WALLS)
   // ============================================================================
   const [variantType, setVariantType] = useState<ProfileType>(
     geometry.crownGeometry || 'd_shaped'
   );
   const [varWidth, setVarWidth] = useState<string>(String(geometry.width || 8.4));
   const [varHeight, setVarHeight] = useState<string>(String(geometry.height || 7.2));
-  const [varWallHeight, setVarWallHeight] = useState<string>(String(geometry.wallHeight || 4.2));
+  const [varWallHeight, setVarWallHeight] = useState<string>(
+    String(geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight ?? 4.2)
+  );
+  const [varRightWallHeight, setVarRightWallHeight] = useState<string>(
+    String(geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight ?? 4.2)
+  );
   const [varCrownRadius, setVarCrownRadius] = useState<string>(
     String(geometry.crownRadius || 4.35)
   );
   const [variantShapeName, setVariantShapeName] = useState<string>(
-    `${settings.locationName || 'Heading'} - ${(geometry.crownGeometry || 'd_shaped')
-      .replace(/_/g, ' ')
-      .toUpperCase()}`
+    geometry.profileName ||
+      `${settings.locationName || 'Heading'} - ${(geometry.crownGeometry || 'd_shaped')
+        .replace(/_/g, ' ')
+        .toUpperCase()}`
   );
 
   const previewVariantGeometry = useMemo(() => {
     const w = Math.max(1.5, parseFloat(varWidth) || 8.4);
     const h = Math.max(1.5, parseFloat(varHeight) || 7.2);
-    const wh = Math.min(h - 0.2, Math.max(0.5, parseFloat(varWallHeight) || 4.2));
+    const leftWh = Math.min(h - 0.1, Math.max(0.5, parseFloat(varWallHeight) || 4.2));
+    const rightWh = Math.min(h - 0.1, Math.max(0.5, parseFloat(varRightWallHeight) || leftWh));
     const cr = Math.max(1.0, parseFloat(varCrownRadius) || w / 2);
-    return createTunnelGeometry(w, h, wh, variantType, cr, 'manual');
-  }, [varWidth, varHeight, varWallHeight, varCrownRadius, variantType]);
+    const base = createTunnelGeometry(w, h, Math.max(leftWh, rightWh), variantType, cr, 'manual');
+    return {
+      ...base,
+      leftWallHeight: leftWh,
+      rightWallHeight: rightWh,
+      leftWallArcLength: leftWh,
+      rightWallArcLength: rightWh,
+      profileName: variantShapeName,
+    };
+  }, [varWidth, varHeight, varWallHeight, varRightWallHeight, varCrownRadius, variantType, variantShapeName]);
 
   // ============================================================================
-  // MODE 2: CUSTOM SHAPE (EMPTY BY DEFAULT — LINE, ARC, XY POINT)
+  // MODE 2: CUSTOM SHAPE (LOADS CURRENT TUNNEL SHAPE WHEN EDITING, OR CLEAR TO DRAW FRESH)
   // ============================================================================
-  // Starts completely EMPTY so the user can build from scratch without clutter!
-  const [profile, setProfile] = useState<CustomTunnelProfileDefinition>(() => ({
-    id: `custom-prof-${Date.now()}`,
-    name: `${settings.locationName || 'Custom'} Tunnel Shape`,
-    category: 'freeform_polygon',
-    controlPoints: [],
-    segments: [],
-    isClosed: false,
-    version: 'v1.0',
-    updatedAt: new Date().toISOString(),
-  }));
+  const [profile, setProfile] = useState<CustomTunnelProfileDefinition>(() =>
+    deriveEditableCustomProfileFromGeometry(
+      geometry,
+      `${settings.locationName || 'Custom'} Tunnel Shape`
+    )
+  );
 
-  const [subMode, setSubMode] = useState<CustomShapeSubMode>('LINE');
+  const [subMode, setSubMode] = useState<CustomShapeSubMode>(() =>
+    geometry.customProfile && geometry.customProfile.controlPoints.length >= 3
+      ? 'SELECT_EDIT'
+      : 'LINE'
+  );
   const [showPropertySidebar, setShowPropertySidebar] = useState<boolean>(true);
   // Controls whether the canvas is actively waiting for the next point on a rubber-band line
-  const [isDrawingChainActive, setIsDrawingChainActive] = useState<boolean>(true);
+  const [isDrawingChainActive, setIsDrawingChainActive] = useState<boolean>(() => {
+    const initProf = deriveEditableCustomProfileFromGeometry(geometry);
+    return !initProf.isClosed;
+  });
   const [cursorPreviewPt, setCursorPreviewPt] = useState<Point2D | null>(null);
   const [cursorHoverPt, setCursorHoverPt] = useState<Point2D | null>(null);
   // Default to 0.01m (exact cursor tip) so clicked points and lines match the cursor 1:1
@@ -205,7 +230,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
   const [draggingPointId, setDraggingPointId] = useState<string | null>(null);
   const [draggingArcSegId, setDraggingArcSegId] = useState<string | null>(null);
   const [statusNote, setStatusNote] = useState<string>(
-    'Canvas is empty and ready. Click on the canvas or enter coordinates on the right to start drawing.'
+    'Loaded active tunnel shape. Drag points/arcs, customize Left/Right Wall & Crown portions on the right, or click Clear Empty to draw from scratch.'
   );
 
   // Line Mode numeric inputs (Start X1,Y1 -> Length & Angle OR End X2,Y2)
@@ -1232,6 +1257,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                         setVarWidth(String(v.defaultW));
                         setVarHeight(String(v.defaultH));
                         setVarWallHeight(String(v.defaultWallH));
+                        setVarRightWallHeight(String(v.defaultWallH));
                         setVarCrownRadius(String(v.defaultCrownR));
                         setVariantShapeName(
                           `${settings.locationName || 'Heading'} - ${v.label} (${v.defaultW}m×${
@@ -1262,7 +1288,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               <div className="text-xs font-mono uppercase tracking-wider text-cyan-400 font-bold">
                 2. Enter Exact Tunnel Size (1m Engineering Scale)
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <label className="space-y-1">
                   <span className="text-xs text-slate-300 font-medium">Span Width W (m)</span>
                   <input
@@ -1292,8 +1318,8 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-xs text-slate-300 font-medium">
-                    Left &amp; Right Wall H (m)
+                  <span className="text-xs text-emerald-300 font-medium">
+                    Left Wall H (m)
                   </span>
                   <input
                     type="number"
@@ -1301,7 +1327,20 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                     min="0.5"
                     value={varWallHeight}
                     onChange={(e) => setVarWallHeight(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono text-sm text-white"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-emerald-700/60 font-mono text-sm text-white"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs text-indigo-300 font-medium">
+                    Right Wall H (m)
+                  </span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.5"
+                    value={varRightWallHeight}
+                    onChange={(e) => setVarRightWallHeight(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-indigo-700/60 font-mono text-sm text-white"
                   />
                 </label>
                 <label className="space-y-1">
@@ -1384,8 +1423,9 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                   fontFamily="IBM Plex Mono, monospace"
                 >
                   Width = {previewVariantGeometry.width.toFixed(2)}m · Height ={' '}
-                  {previewVariantGeometry.height.toFixed(2)}m · Wall ={' '}
-                  {previewVariantGeometry.wallHeight.toFixed(2)}m
+                  {previewVariantGeometry.height.toFixed(2)}m · L-Wall ={' '}
+                  {(previewVariantGeometry.leftWallHeight ?? previewVariantGeometry.wallHeight).toFixed(2)}m · R-Wall ={' '}
+                  {(previewVariantGeometry.rightWallHeight ?? previewVariantGeometry.wallHeight).toFixed(2)}m
                 </text>
               </svg>
             </div>
@@ -1659,7 +1699,7 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                   />
                 )}
 
-                {/* Drawn Segments (Lines & Arcs) with Length Labels */}
+                {/* Drawn Segments (Lines & Arcs) with Portion Role & Length Labels */}
                 {evaluatedCustom.segmentMetrics.map((seg) => {
                   const ptsScreen = seg.sampledPoints.map((p) => canvasMetrics.worldToScreen(p));
                   const dPath = ptsScreen
@@ -1667,27 +1707,41 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                     .join(' ');
                   const midS = canvasMetrics.worldToScreen(seg.midHandlePoint);
                   const isSelSeg = seg.segmentId === selectedSegmentId;
+                  const roleShort =
+                    seg.zoneRole === 'leftWall'
+                      ? 'L-Wall'
+                      : seg.zoneRole === 'rightWall'
+                      ? 'R-Wall'
+                      : seg.zoneRole === 'crown'
+                      ? 'Crown'
+                      : 'Invert';
+                  const roleStroke =
+                    isSelSeg
+                      ? '#D97706'
+                      : seg.zoneRole === 'leftWall'
+                      ? '#059669'
+                      : seg.zoneRole === 'rightWall'
+                      ? '#4F46E5'
+                      : seg.zoneRole === 'crown'
+                      ? '#0284C7'
+                      : '#64748B';
+                  const badgeText = `${roleShort} ${seg.arcLength.toFixed(2)}m`;
+                  const badgeW = Math.max(82, badgeText.length * 6.2 + 12);
 
                   return (
                     <g key={seg.segmentId}>
                       <path
                         d={dPath}
                         fill="none"
-                        stroke={
-                          isSelSeg
-                            ? '#D97706'
-                            : seg.type === 'arc'
-                            ? '#0891B2'
-                            : '#0284C7'
-                        }
-                        strokeWidth={isSelSeg ? '3.5' : '2.5'}
+                        stroke={roleStroke}
+                        strokeWidth={isSelSeg ? '3.8' : '2.8'}
                         className="cursor-pointer"
                         onClick={(e) => {
                           e.stopPropagation();
                           setSelectedSegmentId(seg.segmentId);
                         }}
                       />
-                      {/* Segment Length Label */}
+                      {/* Segment Portion Role & Length Label */}
                       <g
                         transform={`translate(${midS.cx}, ${
                           seg.type === 'arc' ? midS.cy - 18 : midS.cy
@@ -1699,27 +1753,25 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                         }}
                       >
                         <rect
-                          x="-34"
+                          x={-badgeW / 2}
                           y="-10"
-                          width="68"
-                          height="16"
-                          rx="3"
+                          width={badgeW}
+                          height="17"
+                          rx="3.5"
                           fill="#FFFFFF"
-                          stroke={seg.type === 'arc' ? '#D97706' : '#0284C7'}
-                          strokeWidth="1.2"
+                          stroke={roleStroke}
+                          strokeWidth={isSelSeg ? '1.8' : '1.2'}
                         />
                         <text
                           x="0"
                           y="1.5"
                           textAnchor="middle"
-                          fontSize="9.5"
+                          fontSize="9.2"
                           fontWeight="700"
                           fontFamily="IBM Plex Mono, monospace"
-                          fill={seg.type === 'arc' ? '#B45309' : '#0369A1'}
+                          fill={roleStroke}
                         >
-                          {seg.type === 'arc'
-                            ? `Arc ${seg.arcLength.toFixed(2)}m`
-                            : `${seg.arcLength.toFixed(2)}m`}
+                          {badgeText}
                         </text>
                       </g>
 
@@ -2653,6 +2705,355 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
               </div>
             )}
 
+            {/* ==============================================================
+                CUSTOM CROWN & WALL PORTION SIZES & ACTIVE SURFACES
+                (Supports Asymmetric Left/Right Walls & Transformer Hall Face+Wall Only)
+               ============================================================== */}
+            <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-500/40 space-y-2.5 font-mono text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-cyan-300 font-bold">
+                  CROWN &amp; WALL PORTIONS (CUSTOM SIZES)
+                </span>
+                <span className="text-[9px] text-emerald-300">Independent Lengths</span>
+              </div>
+
+              {/* Quick Excavation Portion Mode Toggle: Full Tunnel vs Transformer Hall (Face + Wall Only) */}
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setProfile((prev) => ({
+                      ...prev,
+                      category: 'freeform_polygon',
+                      surfaceConfig: {
+                        ...(prev.surfaceConfig || {
+                          hasLeftWall: true,
+                          hasRightWall: true,
+                          hasCrown: true,
+                        }),
+                        hasCrown: true,
+                        hasLeftWall: true,
+                        hasRightWall: true,
+                      },
+                    }))
+                  }
+                  className={`py-1.5 px-2 rounded-lg border text-[10px] font-bold cursor-pointer ${
+                    profile.surfaceConfig?.hasCrown !== false
+                      ? 'bg-cyan-950/90 border-cyan-500 text-cyan-200'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Full Tunnel (Face + Crown + Walls)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setProfile((prev) => ({
+                      ...prev,
+                      category: 'transformer_hall',
+                      surfaceConfig: {
+                        ...(prev.surfaceConfig || {
+                          hasLeftWall: true,
+                          hasRightWall: true,
+                          hasCrown: false,
+                        }),
+                        hasCrown: false,
+                      },
+                    }))
+                  }
+                  className={`py-1.5 px-2 rounded-lg border text-[10px] font-bold cursor-pointer ${
+                    profile.surfaceConfig?.hasCrown === false
+                      ? 'bg-amber-950/90 border-amber-500 text-amber-200'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Transformer Hall (Face + Wall Only)
+                </button>
+              </div>
+
+              {/* Individual Portion Toggles + Custom Independent Lengths */}
+              <div className="space-y-2 pt-1">
+                {/* Left Wall Portion */}
+                <div className="flex items-center justify-between gap-2 p-1.5 rounded bg-slate-900/90 border border-slate-800">
+                  <label className="flex items-center gap-1.5 text-[11px] text-emerald-300 font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={profile.surfaceConfig?.hasLeftWall !== false}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setProfile((prev) => ({
+                          ...prev,
+                          surfaceConfig: {
+                            hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                            hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                            ...prev.surfaceConfig,
+                            hasLeftWall: checked,
+                          },
+                        }));
+                      }}
+                      className="rounded border-slate-700 bg-slate-950 text-emerald-500"
+                    />
+                    <span>Left Wall (m)</span>
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      disabled={profile.surfaceConfig?.hasLeftWall === false}
+                      value={
+                        profile.surfaceConfig?.overrideLeftWallLength ??
+                        (builtCustomGeometry.leftWallArcLength ?? builtCustomGeometry.wallHeight)
+                      }
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setProfile((prev) => ({
+                          ...prev,
+                          surfaceConfig: {
+                            hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                            hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                            hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                            ...prev.surfaceConfig,
+                            overrideLeftWallLength:
+                              !Number.isNaN(val) && val > 0 ? val : null,
+                          },
+                        }));
+                      }}
+                      className="w-20 px-2 py-1 rounded bg-slate-950 border border-emerald-600/50 text-white text-xs text-right disabled:opacity-40"
+                    />
+                    {profile.surfaceConfig?.overrideLeftWallLength && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setProfile((prev) => ({
+                            ...prev,
+                            surfaceConfig: {
+                              hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                              hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                              hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                              ...prev.surfaceConfig,
+                              overrideLeftWallLength: null,
+                            },
+                          }))
+                        }
+                        title="Reset to drawn Left Wall length"
+                        className="px-1.5 py-0.5 rounded bg-slate-800 text-[9px] text-slate-300 hover:text-white"
+                      >
+                        Auto
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Wall Portion (Completely Independent from Left Wall!) */}
+                <div className="flex items-center justify-between gap-2 p-1.5 rounded bg-slate-900/90 border border-slate-800">
+                  <label className="flex items-center gap-1.5 text-[11px] text-indigo-300 font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={profile.surfaceConfig?.hasRightWall !== false}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setProfile((prev) => ({
+                          ...prev,
+                          surfaceConfig: {
+                            hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                            hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                            ...prev.surfaceConfig,
+                            hasRightWall: checked,
+                          },
+                        }));
+                      }}
+                      className="rounded border-slate-700 bg-slate-950 text-indigo-500"
+                    />
+                    <span>Right Wall (m)</span>
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      disabled={profile.surfaceConfig?.hasRightWall === false}
+                      value={
+                        profile.surfaceConfig?.overrideRightWallLength ??
+                        (builtCustomGeometry.rightWallArcLength ?? builtCustomGeometry.wallHeight)
+                      }
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setProfile((prev) => ({
+                          ...prev,
+                          surfaceConfig: {
+                            hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                            hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                            hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                            ...prev.surfaceConfig,
+                            overrideRightWallLength:
+                              !Number.isNaN(val) && val > 0 ? val : null,
+                          },
+                        }));
+                      }}
+                      className="w-20 px-2 py-1 rounded bg-slate-950 border border-indigo-500/50 text-white text-xs text-right disabled:opacity-40"
+                    />
+                    {profile.surfaceConfig?.overrideRightWallLength && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setProfile((prev) => ({
+                            ...prev,
+                            surfaceConfig: {
+                              hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                              hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                              hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                              ...prev.surfaceConfig,
+                              overrideRightWallLength: null,
+                            },
+                          }))
+                        }
+                        title="Reset to drawn Right Wall length"
+                        className="px-1.5 py-0.5 rounded bg-slate-800 text-[9px] text-slate-300 hover:text-white"
+                      >
+                        Auto
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Crown Portion (Can be unchecked for Transformer Hall / Wall-Only sections) */}
+                <div className="flex items-center justify-between gap-2 p-1.5 rounded bg-slate-900/90 border border-slate-800">
+                  <label className="flex items-center gap-1.5 text-[11px] text-cyan-300 font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={profile.surfaceConfig?.hasCrown !== false}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setProfile((prev) => ({
+                          ...prev,
+                          surfaceConfig: {
+                            hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                            hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                            ...prev.surfaceConfig,
+                            hasCrown: checked,
+                          },
+                        }));
+                      }}
+                      className="rounded border-slate-700 bg-slate-950 text-cyan-500"
+                    />
+                    <span>Crown Arch (m)</span>
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      disabled={profile.surfaceConfig?.hasCrown === false}
+                      value={
+                        profile.surfaceConfig?.hasCrown === false
+                          ? 0
+                          : profile.surfaceConfig?.overrideCrownLength ??
+                            builtCustomGeometry.crownArcLength
+                      }
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setProfile((prev) => ({
+                          ...prev,
+                          surfaceConfig: {
+                            hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                            hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                            hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                            ...prev.surfaceConfig,
+                            overrideCrownLength:
+                              !Number.isNaN(val) && val >= 0 ? val : null,
+                          },
+                        }));
+                      }}
+                      className="w-20 px-2 py-1 rounded bg-slate-950 border border-cyan-500/50 text-white text-xs text-right disabled:opacity-40"
+                    />
+                    {profile.surfaceConfig?.overrideCrownLength !== null &&
+                      profile.surfaceConfig?.overrideCrownLength !== undefined && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setProfile((prev) => ({
+                              ...prev,
+                              surfaceConfig: {
+                                hasCrown: prev.surfaceConfig?.hasCrown ?? true,
+                                hasLeftWall: prev.surfaceConfig?.hasLeftWall ?? true,
+                                hasRightWall: prev.surfaceConfig?.hasRightWall ?? true,
+                                ...prev.surfaceConfig,
+                                overrideCrownLength: null,
+                              },
+                            }))
+                          }
+                          title="Reset to drawn Crown length"
+                          className="px-1.5 py-0.5 rounded bg-slate-800 text-[9px] text-slate-300 hover:text-white"
+                        >
+                          Auto
+                        </button>
+                      )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Drawn Segment Portion Role Assignment List */}
+              {evaluatedCustom.segmentMetrics.length > 0 && (
+                <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                  <div className="text-[10px] text-slate-400 font-semibold">
+                    ASSIGN DRAWN SEGMENTS TO PORTIONS (LEFT WALL / CROWN / RIGHT WALL / INVERT)
+                  </div>
+                  <div className="max-h-36 overflow-y-auto space-y-1 pr-0.5">
+                    {evaluatedCustom.segmentMetrics.map((m) => (
+                      <div
+                        key={m.segmentId}
+                        onClick={() => setSelectedSegmentId(m.segmentId)}
+                        className={`flex items-center justify-between gap-1.5 px-2 py-1 rounded border text-[11px] cursor-pointer ${
+                          selectedSegmentId === m.segmentId
+                            ? 'bg-slate-900 border-amber-500/70 text-white'
+                            : 'bg-slate-900/60 border-slate-800 text-slate-300'
+                        }`}
+                      >
+                        <span className="truncate">
+                          <strong>
+                            {m.fromPoint.label}→{m.toPoint.label}
+                          </strong>{' '}
+                          ({m.arcLength.toFixed(2)}m)
+                        </span>
+                        <select
+                          value={m.zoneRole}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            const nextRole = e.target.value as BoundaryZoneRole;
+                            setProfile((prev) => {
+                              const exists = prev.segments.some((s) => s.id === m.segmentId);
+                              const nextSegs = exists
+                                ? prev.segments.map((s) =>
+                                    s.id === m.segmentId ? { ...s, zoneRole: nextRole } : s
+                                  )
+                                : [
+                                    ...prev.segments,
+                                    {
+                                      id: m.segmentId,
+                                      fromPointId: m.fromPoint.id,
+                                      toPointId: m.toPoint.id,
+                                      type: m.type,
+                                      zoneRole: nextRole,
+                                    },
+                                  ];
+                              return { ...prev, segments: nextSegs };
+                            });
+                          }}
+                          className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-[10px] text-cyan-200"
+                        >
+                          <option value="leftWall">Left Wall</option>
+                          <option value="crown">Crown Arch</option>
+                          <option value="rightWall">Right Wall</option>
+                          <option value="invert">Invert / Base</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Live Computed Shape Summary */}
             <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-1.5 font-mono text-xs">
               <div className="text-[11px] text-cyan-400 font-bold">
@@ -2667,9 +3068,27 @@ export const FreeformCustomProfileEditor: React.FC<FreeformCustomProfileEditorPr
                 <strong className="text-white">{builtCustomGeometry.height.toFixed(2)} m</strong>
               </div>
               <div className="flex justify-between text-slate-300">
-                <span>Left &amp; Right Wall Height:</span>
+                <span>Left Wall Length:</span>
                 <strong className="text-emerald-300">
-                  {builtCustomGeometry.wallHeight.toFixed(2)} m
+                  {builtCustomGeometry.hasLeftWall === false
+                    ? 'None (0.00 m)'
+                    : `${(builtCustomGeometry.leftWallArcLength ?? builtCustomGeometry.wallHeight).toFixed(2)} m`}
+                </strong>
+              </div>
+              <div className="flex justify-between text-slate-300">
+                <span>Right Wall Length:</span>
+                <strong className="text-indigo-300">
+                  {builtCustomGeometry.hasRightWall === false
+                    ? 'None (0.00 m)'
+                    : `${(builtCustomGeometry.rightWallArcLength ?? builtCustomGeometry.wallHeight).toFixed(2)} m`}
+                </strong>
+              </div>
+              <div className="flex justify-between text-slate-300">
+                <span>Crown Arch Length:</span>
+                <strong className="text-amber-300">
+                  {builtCustomGeometry.hasCrown === false
+                    ? 'None (Face + Wall Only)'
+                    : `${builtCustomGeometry.crownArcLength.toFixed(2)} m`}
                 </strong>
               </div>
               <div className="flex justify-between text-slate-300">

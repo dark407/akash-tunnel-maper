@@ -418,7 +418,7 @@ export function getSurfaceBoundsMeters(
     }
     case 'crown': {
       // Unfolded Crown surface width strictly equals the actual developed Crown Arc Length (geometry.crownArcLength)
-      const span = Math.max(1.0, geometry.crownArcLength || geometry.width);
+      const span = Math.max(0.5, geometry.crownArcLength || geometry.width);
       return {
         minX: -span / 2,
         maxX: span / 2,
@@ -428,16 +428,32 @@ export function getSurfaceBoundsMeters(
         height: roundLen,
       };
     }
-    case 'leftWall':
-    case 'rightWall': {
-      const wallH = Math.max(1.0, geometry.wallHeight || geometry.leftWallHeight || geometry.rightWallHeight || 4.2);
+    case 'leftWall': {
+      const leftWallH = Math.max(
+        0.5,
+        geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight ?? 4.2
+      );
       return {
         minX: 0,
         maxX: roundLen,
         minY: 0,
-        maxY: wallH,
+        maxY: leftWallH,
         width: roundLen,
-        height: wallH,
+        height: leftWallH,
+      };
+    }
+    case 'rightWall': {
+      const rightWallH = Math.max(
+        0.5,
+        geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight ?? 4.2
+      );
+      return {
+        minX: 0,
+        maxX: roundLen,
+        minY: 0,
+        maxY: rightWallH,
+        width: roundLen,
+        height: rightWallH,
       };
     }
   }
@@ -851,17 +867,104 @@ export function surfaceMetersToImageUV(
  *   Z_local = Elevation above invert [0, height]
  * - Then rotated by Tunnel Drive Azimuth alpha_d into geographic 3D (East, North, Up).
  */
+/**
+ * Samples the exact 2D cross-section coordinate (x = localRight, y = localUp) and inward 2D unit normal (nx, ny)
+ * along the actual tunnel profile boundary (supporting custom freeform, asymmetric walls, transformer halls, and CAD profiles).
+ */
+export function sampleCrossSectionZoneArcLength(
+  zone: 'leftWall' | 'crown' | 'rightWall',
+  ratio01: number,
+  geometry: TunnelGeometry
+): { x: number; y: number; nx: number; ny: number } | null {
+  const pts = geometry.crossSectionPoints;
+  if (!pts || pts.length < 4) return null;
+
+  const t = Math.max(0, Math.min(1, ratio01));
+  const leftSpringH = geometry.leftWallHeight ?? geometry.wallHeight ?? geometry.height * 0.58;
+  const rightSpringH = geometry.rightWallHeight ?? geometry.wallHeight ?? geometry.height * 0.58;
+
+  // Separate perimeter points into Left Wall (bottom->top), Crown (left->right), Right Wall (bottom->top)
+  const leftPts: Point2D[] = [];
+  const crownPts: Point2D[] = [];
+  const rightPts: Point2D[] = [];
+
+  for (const p of pts) {
+    if (p.x <= 0 && p.y <= leftSpringH + 0.08) {
+      leftPts.push(p);
+    }
+    if (p.y >= Math.min(leftSpringH, rightSpringH) - 0.08 && (geometry.hasCrown !== false)) {
+      crownPts.push(p);
+    }
+    if (p.x >= 0 && p.y <= rightSpringH + 0.08) {
+      rightPts.push(p);
+    }
+  }
+
+  leftPts.sort((a, b) => a.y - b.y);
+  crownPts.sort((a, b) => a.x - b.x);
+  rightPts.sort((a, b) => a.y - b.y);
+
+  const targetPoly =
+    zone === 'leftWall' ? leftPts : zone === 'crown' ? crownPts : rightPts;
+  if (targetPoly.length < 2) return null;
+
+  const segLengths: number[] = [];
+  let totalLen = 0;
+  for (let i = 0; i < targetPoly.length - 1; i++) {
+    const d = Math.hypot(
+      targetPoly[i + 1].x - targetPoly[i].x,
+      targetPoly[i + 1].y - targetPoly[i].y
+    );
+    segLengths.push(d);
+    totalLen += d;
+  }
+  if (totalLen < 1e-4) return null;
+
+  const targetDist = t * totalLen;
+  let acc = 0;
+  for (let i = 0; i < segLengths.length; i++) {
+    const sl = segLengths[i];
+    if (acc + sl >= targetDist || i === segLengths.length - 1) {
+      const localT = sl > 1e-6 ? Math.max(0, Math.min(1, (targetDist - acc) / sl)) : 0;
+      const p0 = targetPoly[i];
+      const p1 = targetPoly[i + 1];
+      const x = p0.x + localT * (p1.x - p0.x);
+      const y = p0.y + localT * (p1.y - p0.y);
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      const mag = Math.max(1e-6, Math.hypot(dx, dy));
+      // Point inward toward tunnel centerline (0, wallH/2)
+      let nx = dy / mag;
+      let ny = -dx / mag;
+      const toCenterX = 0 - x;
+      const toCenterY = Math.max(1.0, geometry.wallHeight * 0.5) - y;
+      if (nx * toCenterX + ny * toCenterY < 0) {
+        nx = -nx;
+        ny = -ny;
+      }
+      return { x, y, nx, ny };
+    }
+    acc += sl;
+  }
+  return null;
+}
+
 export function surfacePointTo3DTunnelCoords(
   pt: Point2D,
   surface: SurfaceType,
   geometry: TunnelGeometry,
   settings: TunnelSettings
 ): Point3D {
-  const halfW = geometry.width / 2;
+  const halfW = Math.max(0.5, geometry.width / 2);
   const wallH = geometry.wallHeight;
   const totalH = geometry.height;
   const archRise = Math.max(0.3, totalH - wallH);
   const R = Math.max(halfW, geometry.crownRadius || (halfW * halfW + archRise * archRise) / (2 * archRise));
+  const isCustomOrAsymmetric =
+    Boolean(geometry.isAuthoritativeCustom || geometry.customProfile) ||
+    geometry.crownGeometry === 'freeform_custom' ||
+    geometry.crownGeometry === 'custom_cad' ||
+    Math.abs((geometry.leftWallArcLength ?? wallH) - (geometry.rightWallArcLength ?? wallH)) > 0.05;
 
   let localRight = 0; // Master X: Tunnel Transverse direction (m)
   let localUp = 0;    // Master Y: Tunnel Vertical direction (m)
@@ -877,34 +980,93 @@ export function surfacePointTo3DTunnelCoords(
     localDrive = -0.12 * (1 - radialNorm * radialNorm);
     normal = { nx: 0, ny: 0, nz: -1 };
     surfaceCategory =
-      geometry.crownGeometry === 'custom_cad' ? 'OTHER_CUSTOM_SURFACE' : 'FACE';
+      geometry.crownGeometry === 'custom_cad' || geometry.crownGeometry === 'freeform_custom'
+        ? 'OTHER_CUSTOM_SURFACE'
+        : 'FACE';
   } else if (surface === 'crown') {
-    // Section 14: Crown is NOT a flat rectangle in 3D — intersect with curved crown profile
-    const phi = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pt.x / R));
-    localRight = R * Math.sin(phi);
-    localDrive = -pt.y; // behind face along Z axis
-    const centerY = totalH - R;
-    localUp = Math.max(wallH, centerY + R * Math.cos(phi));
-    // Inward unit normal to curved crown arch
-    normal = {
-      nx: Number((-Math.sin(phi)).toFixed(4)),
-      ny: Number((-Math.cos(phi)).toFixed(4)),
-      nz: 0,
-    };
+    const crownSpan = Math.max(0.5, geometry.crownArcLength || geometry.width);
+    const ratio01 = Math.max(0, Math.min(1, (pt.x + crownSpan / 2) / crownSpan));
+    const customSample = isCustomOrAsymmetric
+      ? sampleCrossSectionZoneArcLength('crown', ratio01, geometry)
+      : null;
+
+    if (customSample) {
+      localRight = customSample.x;
+      localUp = customSample.y;
+      localDrive = -pt.y;
+      normal = {
+        nx: Number(customSample.nx.toFixed(4)),
+        ny: Number(customSample.ny.toFixed(4)),
+        nz: 0,
+      };
+    } else {
+      // Section 14: Crown is NOT a flat rectangle in 3D — intersect with curved crown profile
+      const phi = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pt.x / R));
+      localRight = R * Math.sin(phi);
+      localDrive = -pt.y; // behind face along Z axis
+      const centerY = totalH - R;
+      localUp = Math.max(wallH, centerY + R * Math.cos(phi));
+      // Inward unit normal to curved crown arch
+      normal = {
+        nx: Number((-Math.sin(phi)).toFixed(4)),
+        ny: Number((-Math.cos(phi)).toFixed(4)),
+        nz: 0,
+      };
+    }
     surfaceCategory = 'CROWN';
   } else if (surface === 'leftWall') {
-    // Section 13: Left wall surface in Master Tunnel Coordinate System
-    localRight = -halfW;
-    localDrive = -pt.x;
-    localUp = pt.y;
-    normal = { nx: 1, ny: 0, nz: 0 };
+    const leftSpan = Math.max(
+      0.5,
+      geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight ?? 4.2
+    );
+    const ratio01 = Math.max(0, Math.min(1, pt.y / leftSpan));
+    const customSample = isCustomOrAsymmetric
+      ? sampleCrossSectionZoneArcLength('leftWall', ratio01, geometry)
+      : null;
+
+    if (customSample) {
+      localRight = customSample.x;
+      localUp = customSample.y;
+      localDrive = -pt.x;
+      normal = {
+        nx: Number(customSample.nx.toFixed(4)),
+        ny: Number(customSample.ny.toFixed(4)),
+        nz: 0,
+      };
+    } else {
+      // Section 13: Left wall surface in Master Tunnel Coordinate System
+      localRight = geometry.minX ?? -halfW;
+      localDrive = -pt.x;
+      localUp = pt.y;
+      normal = { nx: 1, ny: 0, nz: 0 };
+    }
     surfaceCategory = 'LEFT_WALL';
   } else {
-    // Section 13: Right wall surface in Master Tunnel Coordinate System
-    localRight = halfW;
-    localDrive = -pt.x;
-    localUp = pt.y;
-    normal = { nx: -1, ny: 0, nz: 0 };
+    const rightSpan = Math.max(
+      0.5,
+      geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight ?? 4.2
+    );
+    const ratio01 = Math.max(0, Math.min(1, pt.y / rightSpan));
+    const customSample = isCustomOrAsymmetric
+      ? sampleCrossSectionZoneArcLength('rightWall', ratio01, geometry)
+      : null;
+
+    if (customSample) {
+      localRight = customSample.x;
+      localUp = customSample.y;
+      localDrive = -pt.x;
+      normal = {
+        nx: Number(customSample.nx.toFixed(4)),
+        ny: Number(customSample.ny.toFixed(4)),
+        nz: 0,
+      };
+    } else {
+      // Section 13: Right wall surface in Master Tunnel Coordinate System
+      localRight = geometry.maxX ?? halfW;
+      localDrive = -pt.x;
+      localUp = pt.y;
+      normal = { nx: -1, ny: 0, nz: 0 };
+    }
     surfaceCategory = 'RIGHT_WALL';
   }
 
