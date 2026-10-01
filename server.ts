@@ -321,7 +321,6 @@ CRITICAL GEOLOGICAL REALISM & MAIN PHOTO RULES:
         message = '',
         history = [],
         softwareContext = {},
-        selectedTemplate = 'AUTO_BEST_TEMPLATE',
       } = req.body || {};
 
       const userPrompt = String(message || '').trim();
@@ -333,19 +332,25 @@ CRITICAL GEOLOGICAL REALISM & MAIN PHOTO RULES:
       const ai = getGeminiClient();
 
       if (ai) {
-        const systemInstruction = `You are ESWA AI — the intelligent assistant embedded in ESWA Tunnel Mapper & ESWACAD.
-You have full access to the live software state and can control workspaces, tunnel geometry, settings, joints, 3D continuous strip logging, and file exports.
+        const systemInstruction = `You are ESWA AI — the senior geotechnical & tunneling engineering AI assistant inside ESWA Tunnel Mapper & ESWACAD.
+You have full access to the live software state, overbreak root-cause & advance predictions, rock strata support system Factor of Safety (FoS), spot bolting locations & historical pull data, and kinematic failure mode Factors of Safety (Wedge, Planar, Keyblock, Buckling, Stress).
 
 LIVE SOFTWARE DATA SNAPSHOT:
 ${JSON.stringify(softwareContext, null, 2)}
 
 CRITICAL RULES FOR YOUR RESPONSE:
-1. Answer ONLY what the user is asking! Do NOT dump unsolicited audit reports or repeat the same generic summary on every message.
-   - If the user says "hi", "hello", or asks a general question, reply naturally, briefly, and conversationally.
-   - If the user asks a specific question about their tunnel (e.g. width, Q-value, RMR, joints, pulls, overbreak), answer that specific question directly and concisely using the live snapshot.
-   - If the user asks a general geotechnical/tunneling engineering question, answer it directly with expert knowledge.
-2. Only set "includeDataSchedule" to true if the user explicitly asks to see a data table/schedule/report or asks to extract/export data into a file. Otherwise set "includeDataSchedule" to false.
-3. Choose "dataCategory" based on what data the user asked for: "STRIP_PULL_LOG_TEMPLATE", "JOINT_DISCONTINUITY_TEMPLATE", "OVERBREAK_SUPPORT_BOQ_TEMPLATE", or "EXECUTIVE_PROJECT_AUDIT_TEMPLATE".
+1. Answer the EXACT question the user is asking directly, accurately, and thoroughly using the live software data!
+   - NEVER dump irrelevant download files or previous unrelated tables.
+   - If the user asks why overbreak happened or whether it is geological vs mechanical/blasting, explain the exact Geological % vs Mechanical % breakdown, zone-by-zone root causes, and Next-Round Advance Prediction from the live data.
+   - If the user asks about Spot Bolting, explain the exact chosen Spot Bolting locations, coordinates, reasons, historical data collected from previous spot-bolt pulls, and the exact number of spot bolts required.
+   - If the user asks about the Support System, Rock Strata Factor of Safety, or Wedge/Failure Mode Factor of Safety, provide the exact Support Pressure Demand (kPa), Installed Capacity (kPa), Rock Strata FoS, and Unbolted vs Supported FoS for Wedge, Planar, Keyblock, and Stress failures, along with actionable engineering recommendations.
+2. Set "includeDataSchedule" to true ONLY if the user explicitly asks for a table/schedule/report to be displayed. Otherwise MUST set "includeDataSchedule" to false.
+3. Choose "dataCategory" matching the user's topic:
+   - "SUPPORT_SPOTBOLT_FOS_TEMPLATE" (for support system, spot bolting, rock strata FoS, wedge/failure FoS)
+   - "OVERBREAK_SUPPORT_BOQ_TEMPLATE" (for overbreak, mechanical vs geological overbreak, undercut, BOQ)
+   - "JOINT_DISCONTINUITY_TEMPLATE" (for joints, dip, strike, discontinuities)
+   - "STRIP_PULL_LOG_TEMPLATE" (for 3D continuous strip logging pulls)
+   - "EXECUTIVE_PROJECT_AUDIT_TEMPLATE" (only if asking for a full project audit)
 4. If the user asks you to perform a software action (e.g. open 3D Continuous Logging, open Face Mapping, change width/height, add a pull, add a joint, switch theme, save section), include it in "executedActions".`;
 
         const historyContents = Array.isArray(history)
@@ -356,8 +361,8 @@ CRITICAL RULES FOR YOUR RESPONSE:
           : [];
 
         const candidateModels = [
-          'gemini-3-flash-preview',
-          'gemini-2.5-flash',
+          'gemini-3.8-flash',
+          'gemini-3.1-flash-lite',
           'gemini-flash-latest',
         ];
 
@@ -374,7 +379,7 @@ CRITICAL RULES FOR YOUR RESPONSE:
               ],
               config: {
                 systemInstruction,
-                temperature: 0.35,
+                temperature: 0.25,
                 responseMimeType: 'application/json',
                 responseSchema: {
                   type: Type.OBJECT,
@@ -382,17 +387,17 @@ CRITICAL RULES FOR YOUR RESPONSE:
                     reply: {
                       type: Type.STRING,
                       description:
-                        'Direct, helpful, and natural answer to the user prompt.',
+                        'Direct, specific, engineering-grade answer to the exact question asked by the user.',
                     },
                     includeDataSchedule: {
                       type: Type.BOOLEAN,
                       description:
-                        'True ONLY if the user asked for a data table, schedule, summary report, or file export.',
+                        'True ONLY if the user explicitly asked to view a table or schedule.',
                     },
                     dataCategory: {
                       type: Type.STRING,
                       description:
-                        'One of: STRIP_PULL_LOG_TEMPLATE, JOINT_DISCONTINUITY_TEMPLATE, OVERBREAK_SUPPORT_BOQ_TEMPLATE, EXECUTIVE_PROJECT_AUDIT_TEMPLATE',
+                        'One of: SUPPORT_SPOTBOLT_FOS_TEMPLATE, OVERBREAK_SUPPORT_BOQ_TEMPLATE, JOINT_DISCONTINUITY_TEMPLATE, STRIP_PULL_LOG_TEMPLATE, EXECUTIVE_PROJECT_AUDIT_TEMPLATE',
                     },
                     executedActions: {
                       type: Type.ARRAY,
@@ -444,6 +449,74 @@ CRITICAL RULES FOR YOUR RESPONSE:
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'ESWA AI Chat error';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/ai/analyze-geotech
+   * Dedicated AI Geotechnical Analysis for Overbreak Root-Cause & Advance Prediction,
+   * Spot Bolting Location Selection, and Rock Strata / Wedge Failure Factor of Safety.
+   */
+  app.post('/api/ai/analyze-geotech', async (req, res) => {
+    try {
+      const { mode = 'FULL_GEOTECH', context = {} } = req.body || {};
+      const ai = getGeminiClient();
+
+      if (ai) {
+        const candidateModels = [
+          'gemini-3.8-flash',
+          'gemini-3.1-flash-lite',
+          'gemini-flash-latest',
+        ];
+        const prompt = `You are a Principal Underground Rock Mechanics & Tunnel Support Engineer.
+Analyze the following live tunnel excavation, discontinuity sets, overbreak profile, historical pulls, and support system data (Mode: ${mode}):
+${JSON.stringify(context, null, 2)}
+
+Provide a concise, authoritative engineering analysis covering:
+1. Overbreak Root-Cause Diagnosis (Geological Wedge/Joint vs. Mechanical Drill-Lookout/Blasting) and Advance Prediction for the next round.
+2. Spot Bolting Locations Chosen, historical pull correlation, and exact number of spot bolts required.
+3. Rock Strata Support System Factor of Safety (FoS) and Wedge / Planar / Keyblock Failure Mode FoS recommendations.`;
+
+        for (const modelName of candidateModels) {
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+              config: {
+                temperature: 0.2,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    overbreakExecutiveSummary: { type: Type.STRING },
+                    nextAdvanceMitigation: { type: Type.STRING },
+                    supportAndFosRecommendation: { type: Type.STRING },
+                    spotBoltingJustification: { type: Type.STRING },
+                  },
+                  required: [
+                    'overbreakExecutiveSummary',
+                    'nextAdvanceMitigation',
+                    'supportAndFosRecommendation',
+                    'spotBoltingJustification',
+                  ],
+                },
+              },
+            });
+            if (response.text) {
+              const parsed = JSON.parse(response.text.trim());
+              res.json({ ...parsed, engine: modelName });
+              return;
+            }
+          } catch {
+            // Try next model
+          }
+        }
+      }
+
+      res.json({ fallback: true });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Geotech AI analysis error';
       res.status(500).json({ error: message });
     }
   });

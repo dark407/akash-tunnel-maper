@@ -503,42 +503,47 @@ export function createBlankRmrParameters(version: RmrMethodologyVersion = 'RMR89
  * If any parameter is MISSING (or null), it reports "Required input not available" and does not fabricate a rating.
  */
 export function calculateBieniawskiRmr(params: RmrParameters): RmrCalculationResult {
+  const safeParams = params || createBlankRmrParameters();
+  const subRatings = safeParams.conditionSubRatings;
+  const useDetailed = Boolean(subRatings?.useDetailedSubRatings);
+  const detailedSum = useDetailed && subRatings
+    ? (subRatings.persistenceRating ?? 4) +
+      (subRatings.apertureRating ?? 4) +
+      (subRatings.roughnessRating ?? 5) +
+      (subRatings.infillingRating ?? 6) +
+      (subRatings.weatheringRating ?? 5)
+    : safeParams.conditionRating;
+
   const paramMeta: { key: RmrParamKey; label: string; rating: number | null }[] = [
     {
       key: 'intactStrength',
       label: '1. Intact Rock Strength (UCS / Point Load)',
-      rating: params.intactStrengthRating,
+      rating: safeParams.intactStrengthRating,
     },
     {
       key: 'rqd',
       label: '2. Rock Quality Designation (RQD)',
-      rating: params.rqdRating,
+      rating: safeParams.rqdRating,
     },
     {
       key: 'spacing',
       label: '3. Spacing of Discontinuities',
-      rating: params.spacingRating,
+      rating: safeParams.spacingRating,
     },
     {
       key: 'condition',
       label: '4. Condition of Discontinuities',
-      rating: params.conditionSubRatings.useDetailedSubRatings
-        ? params.conditionSubRatings.persistenceRating +
-          params.conditionSubRatings.apertureRating +
-          params.conditionSubRatings.roughnessRating +
-          params.conditionSubRatings.infillingRating +
-          params.conditionSubRatings.weatheringRating
-        : params.conditionRating,
+      rating: detailedSum,
     },
     {
       key: 'groundwater',
       label: '5. Groundwater Conditions',
-      rating: params.groundwaterRating,
+      rating: safeParams.groundwaterRating,
     },
     {
       key: 'orientationAdjustment',
       label: '6. Discontinuity Orientation Adjustment',
-      rating: params.orientationAdjustmentRating,
+      rating: safeParams.orientationAdjustmentRating,
     },
   ];
 
@@ -546,7 +551,7 @@ export function calculateBieniawskiRmr(params: RmrParameters): RmrCalculationRes
   const unconfirmedParamLabels: string[] = [];
 
   for (const item of paramMeta) {
-    const status = params.paramStatus?.[item.key] || 'USER_ENTERED';
+    const status = safeParams.paramStatus?.[item.key] || 'USER_ENTERED';
     if (status === 'MISSING' || item.rating === null || item.rating === undefined) {
       missingParamLabels.push(item.label);
     } else if (status === 'AI_SUGGESTED_UNCONFIRMED') {
@@ -555,24 +560,18 @@ export function calculateBieniawskiRmr(params: RmrParameters): RmrCalculationRes
   }
 
   const r1 =
-    params.paramStatus?.intactStrength === 'MISSING' ? null : params.intactStrengthRating;
-  const r2 = params.paramStatus?.rqd === 'MISSING' ? null : params.rqdRating;
-  const r3 = params.paramStatus?.spacing === 'MISSING' ? null : params.spacingRating;
+    safeParams.paramStatus?.intactStrength === 'MISSING' ? null : safeParams.intactStrengthRating;
+  const r2 = safeParams.paramStatus?.rqd === 'MISSING' ? null : safeParams.rqdRating;
+  const r3 = safeParams.paramStatus?.spacing === 'MISSING' ? null : safeParams.spacingRating;
   const r4 =
-    params.paramStatus?.condition === 'MISSING'
+    safeParams.paramStatus?.condition === 'MISSING'
       ? null
-      : params.conditionSubRatings.useDetailedSubRatings
-      ? params.conditionSubRatings.persistenceRating +
-        params.conditionSubRatings.apertureRating +
-        params.conditionSubRatings.roughnessRating +
-        params.conditionSubRatings.infillingRating +
-        params.conditionSubRatings.weatheringRating
-      : params.conditionRating;
-  const r5 = params.paramStatus?.groundwater === 'MISSING' ? null : params.groundwaterRating;
+      : detailedSum;
+  const r5 = safeParams.paramStatus?.groundwater === 'MISSING' ? null : safeParams.groundwaterRating;
   const rAdj =
-    params.paramStatus?.orientationAdjustment === 'MISSING'
+    safeParams.paramStatus?.orientationAdjustment === 'MISSING'
       ? null
-      : params.orientationAdjustmentRating;
+      : safeParams.orientationAdjustmentRating;
 
   const isComplete = missingParamLabels.length === 0;
   const hasUnconfirmedSuggestions = unconfirmedParamLabels.length > 0;

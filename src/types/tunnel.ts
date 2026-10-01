@@ -940,6 +940,7 @@ export interface RockMassSummaryTable {
   overbreakCondition: string;   // e.g., "Minor wedge overbreak at crown arch (0.2–0.4m)"
   installedSupport: string;     // e.g., "SFRS 75mm + Systematic Rock Bolts L=4.0m @ 1.5m c/c"
   geologistRemarks: string;
+  supportSystemOverrides?: Partial<RockStrataSupportSystemAnalysis>;
 }
 
 /**
@@ -1250,6 +1251,164 @@ export interface PhotogrammetricStructuralSummary {
   kinematicWedges: KinematicWedgeCandidate[];
   pointCloudCount: number;
 }
+
+export interface SpotBoltLocationRecord {
+  id: string;                   // e.g. 'SB-1', 'SB-2'
+  sectorLabel: string;          // e.g. 'Crown Apex', 'Right Shoulder / Haunch', 'Left Haunch'
+  locationSector: string;
+  surface?: SurfaceType;
+  coordinateX: number;          // Transverse X coordinate on profile (m)
+  coordinateY: number;          // Vertical Y elevation on profile (m)
+  xMeters: number;
+  yMeters: number;
+  boltsRequired: number;        // Number of spot bolts required at this location
+  boltLengthMeters: number;     // Recommended bolt length (m)
+  boltDiameterMm: number;       // e.g. 25 mm
+  boltCapacityKn?: number;      // Ultimate/Working tensile capacity (kN), e.g. 200 kN
+  installationAngleDeg: number; // Plunge/radial angle (°)
+  inclinationDeg: number;
+  linkedJointSets: string;      // e.g. 'J1 × J2'
+  controllingJointSets: string;
+  reasonChosen: string;         // AI-determined reason why this spot bolting area was chosen
+  aiReasonForChoice: string;
+  historicalReference: string;  // Data collected from previous spot-bolt pulls/stations
+  historicalReferenceSummary: string;
+  userModified?: boolean;
+  isUserModified?: boolean;
+}
+
+export type UndergroundFailureModeType =
+  | 'WEDGE_FAILURE'
+  | 'PLANAR_SLIDING'
+  | 'GRAVITY_KEYBLOCK'
+  | 'FOLIATION_BUCKLING'
+  | 'STRESS_SPALLING_SQUEEZING';
+
+export interface FailureModeSafetyRecord {
+  id: string;
+  failureMode: UndergroundFailureModeType;
+  failureTitle: string;         // e.g. '3D Tetrahedral Wedge Failure (J1 × J2)'
+  failureModeLabel: string;
+  locationSector: string;       // e.g. 'Crown & Right Shoulder'
+  governingSetsOrStrata: string;// e.g. 'J1 (055°/52°) × J2 (145°/64°)'
+  controllingSets: string;
+  blockMassTonnesOrStress: string; // e.g. '5.8 t block (Apex 1.42 m)'
+  apexHeightMeters: number;
+  estimatedWeightTonnes: number;
+  drivingForceKn: number;
+  resistingForceKn: number;
+  supportedResistingForceKn: number;
+  fosUnbolted: number;          // Unreinforced Factor of Safety
+  unboltedFactorOfSafety: number;
+  fosSupported: number;         // Supported Factor of Safety (with systematic + spot bolts + SFRS)
+  supportedFactorOfSafety: number;
+  requiredFos: number;          // Target design FoS (e.g. 1.50)
+  requiredTargetFos: number;
+  recommendedExtraBolts: number;
+  status: 'SAFE' | 'MARGINAL' | 'CRITICAL';
+  stabilityStatus: 'STABLE' | 'MARGINAL' | 'CRITICAL_UNSTABLE';
+  aiDataRecommendation: string; // AI-generated data & support recommendation (editable by user)
+  aiSupportRecommendation: string;
+  engineerRemarks: string;      // Engineer modification / override notes
+  userModified?: boolean;
+  isUserModified?: boolean;
+}
+
+export interface HistoricalSpotBoltPullEntry {
+  chainageLabel: string;
+  chainage: string;
+  sector: string;
+  dominantLocationSector: string;
+  spotBoltsUsed: number;
+  spotBoltsInstalled: number;
+  boltLengthM: number;
+  boltLengthMeters: number;
+  overbreakM3: number;
+  reason: string;
+  geologicalReason: string;
+}
+
+export interface RockStrataSupportSystemAnalysis {
+  supportCategoryLabel: string;
+  recommendedSupportCategory: string;
+  systematicBoltLengthM: number;
+  systematicBoltSpacingM: number;
+  systematicBoltsPerRing: number;
+  systematicRingsPerRound: number;
+  systematicBoltsTotalRound: number;
+  spotBoltsTotalRound: number;
+  totalSpotBoltsRequired: number;
+  totalBoltsRequiredRound: number;
+  boltDiameterMm: number;
+  boltCapacityKn: number;
+  systematicBoltCapacityKn: number;
+  shotcreteThicknessMm: number;
+  wireMeshLayers: number;
+  steelRibsPrescription: string;
+  steelRibsSpacingM: number; // 0 if none
+  supportPressureDemandKpa: number;    // P_req from Barton Q & RMR rock load (kPa)
+  strataDemandPressureKpa: number;
+  installedSupportCapacityKpa: number; // P_cap from bolts + SFRS + ribs + spot bolts (kPa)
+  strataSupportFactorOfSafety: number; // FoS_strata = P_cap / P_req
+  strataFactorOfSafety: number;
+  requiredStrataFos: number;           // Default 1.50
+  strataTargetFos: number;
+  strataSafetyStatus: 'SAFE' | 'MARGINAL' | 'CRITICAL';
+  strataStabilityStatus: 'ADEQUATE' | 'MARGINAL' | 'CRITICAL';
+  spotBoltLocations: SpotBoltLocationRecord[];
+  historicalAvgSpotBoltsPerPull: number;
+  historicalSpotBoltPulls: HistoricalSpotBoltPullEntry[];
+  previousPullsSpotBoltSummary: {
+    totalPreviousPullsAnalyzed: number;
+    avgSpotBoltsPerPull: number;
+    totalHistoricalSpotBolts: number;
+    dominantHistoricalSector: string;
+    historicalRecords: HistoricalSpotBoltPullEntry[];
+  };
+  failureModes: FailureModeSafetyRecord[];
+  aiExecutiveRecommendation: string;
+}
+
+export interface AdvancedOverbreakZonePrediction {
+  zoneId: string;
+  locationLabel: string;
+  areaSqMeters: number;
+  maxRadialMeters: number;
+  predictedCategory: OverbreakReasonCategory;
+  geologicalScorePct: number;
+  mechanicalScorePct: number;
+  confidencePct: number;
+  primaryMechanism: string;
+  detailedExplanation: string;
+  linkedJointSets: string;
+  controllingJointSets: string;
+  advancedReasonDetail: string;
+  recommendedSpotBolts: number;
+}
+
+export interface AdvancedOverbreakPredictionResult {
+  geologicalProbabilityPct: number;
+  geologicalSharePct: number;
+  mechanicalProbabilityPct: number;
+  mechanicalSharePct: number;
+  primaryClassification: 'GEOLOGICAL' | 'MECHANICAL_EXCAVATION' | 'COMBINED_GEO_MECHANICAL';
+  overallDominantCategory: OverbreakReasonCategory;
+  advanceLevelRootCauseSummary: string;
+  confidencePct: number;
+  geologicalDrivers: string[];
+  mechanicalDrivers: string[];
+  predictedNextPullOverbreakPct: number;
+  nextPullPredictedOverbreakPct: number;
+  predictedNextPullOverbreakM3: number;
+  nextPullPredictedOverbreakAreaSqM: number;
+  nextPullPredictedMaxRadialM: number;
+  predictedCriticalSectors: string[];
+  nextPullCriticalSectors: string;
+  recommendedBlastAndSupportMitigation: string;
+  recommendedBlastingAndSupportMitigation: string;
+  zonePredictions: AdvancedOverbreakZonePrediction[];
+}
+
 
 
 

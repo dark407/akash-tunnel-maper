@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
+  FailureModeSafetyRecord,
   GsiParameters,
   Joint,
   JointSet,
   OutputSheetMode,
+  OverbreakUndercutAnalysis,
   ParameterInputStatus,
   QIndexParameters,
   QSystemParamKey,
@@ -13,10 +15,12 @@ import {
   RockMassClassificationMethodId,
   RockMassSummaryTable,
   SavedProjectRecord,
+  SpotBoltLocationRecord,
   SurfaceType,
   TunnelGeometry,
   TunnelSettings,
 } from '../types/tunnel';
+import { computeRockStrataSupportSpotBoltingAndFailureFos } from '../engine/supportSpotBoltFailureEngine';
 import { exportGeologyAndQIndexToCSV } from '../engine/photoWarpEngine';
 import {
   buildLongitudinalChainageLog,
@@ -93,6 +97,7 @@ interface GeologyAndQIndexDrawerProps {
   onOpenExportSheet: (mode?: OutputSheetMode) => void;
   onOpenKinematics?: () => void;
   savedProjects?: SavedProjectRecord[];
+  overbreakAnalysis?: OverbreakUndercutAnalysis;
 }
 
 const JN_OPTIONS = [
@@ -178,11 +183,12 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   onOpenExportSheet,
   onOpenKinematics,
   savedProjects = [],
+  overbreakAnalysis,
 }) => {
   const [mergeSourceSet, setMergeSourceSet] = useState<string>('J2');
   const [mergeTargetSet, setMergeTargetSet] = useState<string>('J1');
   const [classificationSubView, setClassificationSubView] = useState<
-    'parameters' | 'support_chart' | 'chainage_log'
+    'parameters' | 'support_chart' | 'chainage_log' | 'support_spotbolt_fos'
   >('parameters');
   const [demoAlignmentStations, setDemoAlignmentStations] = useState<LongitudinalStationLogRow[] | null>(
     null
@@ -193,6 +199,137 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
   const qResult = evaluateQSystemWithValidation(qIndexParams, geometry.width, qParamStatus);
   const rmrResult = calculateBieniawskiRmr(rmrParams);
   const gsiResult = calculateHoekGsi(gsiParams);
+
+  const supportAndFos = useMemo(
+    () =>
+      computeRockStrataSupportSpotBoltingAndFailureFos(
+        geometry,
+        settings,
+        joints,
+        jointSets,
+        qIndexParams,
+        rmrParams,
+        rockMassSummary,
+        overbreakAnalysis,
+        savedProjects
+      ),
+    [
+      geometry,
+      settings,
+      joints,
+      jointSets,
+      qIndexParams,
+      rmrParams,
+      rockMassSummary,
+      overbreakAnalysis,
+      savedProjects,
+    ]
+  );
+
+  const updateSupportOverrides = (
+    patch: Partial<NonNullable<RockMassSummaryTable['supportSystemOverrides']>>
+  ) => {
+    const nextOverrides = {
+      ...(rockMassSummary.supportSystemOverrides || {}),
+      ...patch,
+    };
+    const nextBoltLen =
+      nextOverrides.systematicBoltLengthM ?? supportAndFos.systematicBoltLengthM;
+    const nextBoltSp =
+      nextOverrides.systematicBoltSpacingM ?? supportAndFos.systematicBoltSpacingM;
+    const nextShotcrete =
+      nextOverrides.shotcreteThicknessMm ?? supportAndFos.shotcreteThicknessMm;
+    const nextRibs =
+      nextOverrides.steelRibsPrescription ?? supportAndFos.steelRibsPrescription;
+    const nextSpotCount = (
+      nextOverrides.spotBoltLocations ?? supportAndFos.spotBoltLocations
+    ).reduce((acc, s) => acc + s.boltsRequired, 0);
+
+    onUpdateRockMassSummary({
+      ...rockMassSummary,
+      installedSupport: `Bolts L=${nextBoltLen}m @ ${nextBoltSp}m c/c + ${nextShotcrete}mm Sfr + ${nextSpotCount} Spot Bolts (${nextRibs})`,
+      supportSystemOverrides: nextOverrides,
+    });
+  };
+
+  const handleUpdateSpotBoltRow = (
+    id: string,
+    patch: Partial<SpotBoltLocationRecord>
+  ) => {
+    const currentList =
+      rockMassSummary.supportSystemOverrides?.spotBoltLocations ||
+      supportAndFos.spotBoltLocations;
+    const nextList = currentList.map((row) =>
+      row.id === id ? { ...row, ...patch, isUserModified: true } : row
+    );
+    updateSupportOverrides({ spotBoltLocations: nextList });
+  };
+
+  const handleAddCustomSpotBoltLocation = () => {
+    const currentList =
+      rockMassSummary.supportSystemOverrides?.spotBoltLocations ||
+      supportAndFos.spotBoltLocations;
+    const nextIdx = currentList.length + 1;
+    const newSpot: SpotBoltLocationRecord = {
+      id: `spot-user-${Date.now()}`,
+      locationSector: `Crown / Shoulder Sector #${nextIdx}`,
+      surface: activeSurface,
+      xMeters: 0.0,
+      yMeters: Number((geometry.height * 0.85).toFixed(2)),
+      boltsRequired: 3,
+      boltLengthMeters: supportAndFos.systematicBoltLengthM,
+      boltDiameterMm: 25,
+      inclinationDeg: 15,
+      controllingJointSets: jointSets.slice(0, 2).map((s) => s.id).join(' + ') || 'J1 + J2',
+      aiReasonForChoice:
+        'User-specified local rock block / wedge pinning reinforcement.',
+      historicalReferenceSummary: `Historical Pulls Avg: ${supportAndFos.historicalAvgSpotBoltsPerPull} spot bolts/pull`,
+      isUserModified: true,
+    };
+    updateSupportOverrides({ spotBoltLocations: [...currentList, newSpot] });
+  };
+
+  const handleDeleteSpotBoltLocation = (id: string) => {
+    const currentList =
+      rockMassSummary.supportSystemOverrides?.spotBoltLocations ||
+      supportAndFos.spotBoltLocations;
+    updateSupportOverrides({
+      spotBoltLocations: currentList.filter((r) => r.id !== id),
+    });
+  };
+
+  const handleUpdateFailureModeRow = (
+    id: string,
+    patch: Partial<FailureModeSafetyRecord>
+  ) => {
+    const currentModes =
+      rockMassSummary.supportSystemOverrides?.failureModes ||
+      supportAndFos.failureModes;
+    const nextModes = currentModes.map((fm) => {
+      if (fm.id !== id) return fm;
+      const updated = { ...fm, ...patch, isUserModified: true };
+      if (patch.recommendedExtraBolts !== undefined) {
+        const extraResist =
+          patch.recommendedExtraBolts * supportAndFos.systematicBoltCapacityKn * 0.85;
+        updated.supportedResistingForceKn = Number(
+          (fm.resistingForceKn + extraResist).toFixed(1)
+        );
+        updated.supportedFactorOfSafety = Number(
+          (
+            updated.supportedResistingForceKn / Math.max(1, fm.drivingForceKn)
+          ).toFixed(2)
+        );
+        updated.stabilityStatus =
+          updated.supportedFactorOfSafety >= updated.requiredTargetFos
+            ? 'STABLE'
+            : updated.supportedFactorOfSafety >= 1.15
+            ? 'MARGINAL'
+            : 'CRITICAL_UNSTABLE';
+      }
+      return updated;
+    });
+    updateSupportOverrides({ failureModes: nextModes });
+  };
 
   const handleDownloadCSV = () => {
     const baseCsv = exportGeologyAndQIndexToCSV(
@@ -756,10 +893,22 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
               <label className="flex items-center gap-1 text-[9px] text-cyan-300 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={rmrParams.conditionSubRatings.useDetailedSubRatings}
+                  checked={Boolean(rmrParams.conditionSubRatings?.useDetailedSubRatings)}
                   onChange={(e) => {
                     const useSub = e.target.checked;
-                    const sub = rmrParams.conditionSubRatings;
+                    const sub = rmrParams.conditionSubRatings || {
+                      useDetailedSubRatings: false,
+                      persistenceRating: 4,
+                      persistenceValue: '1 - 3 m',
+                      apertureRating: 4,
+                      apertureValue: '0.1 - 1.0 mm',
+                      roughnessRating: 5,
+                      roughnessValue: 'Rough',
+                      infillingRating: 4,
+                      infillingValue: 'Hard filling < 5 mm',
+                      weatheringRating: 5,
+                      weatheringValue: 'Slightly weathered',
+                    };
                     const sum =
                       sub.persistenceRating +
                       sub.apertureRating +
@@ -780,7 +929,7 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
               </label>
             </div>
 
-            {!rmrParams.conditionSubRatings.useDetailedSubRatings ? (
+            {!rmrParams.conditionSubRatings?.useDetailedSubRatings ? (
               <select
                 value={rmrParams.conditionRating ?? ''}
                 onChange={(e) => {
@@ -1879,6 +2028,21 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
             2. ROCK MASS CLASSIFICATION ({getMethodSummaryBadge()})
           </button>
 
+          <button
+            onClick={() => {
+              onChangeTab('q_index');
+              setClassificationSubView('support_spotbolt_fos');
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-bold transition-colors cursor-pointer ${
+              activeTab === 'q_index' && classificationSubView === 'support_spotbolt_fos'
+                ? 'bg-emerald-600 text-white shadow'
+                : 'bg-emerald-950/70 text-emerald-300 border border-emerald-500/50 hover:bg-emerald-900/70'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            3. SUPPORT SYSTEM, SPOT BOLTING &amp; FoS (Strata FoS={supportAndFos.strataFactorOfSafety.toFixed(2)} · {supportAndFos.totalSpotBoltsRequired} Spot Bolts)
+          </button>
+
           {/* Method Selection Switcher (Always accessible, never deletes geological mapping) */}
           <div className="flex items-center gap-1 bg-slate-950/90 border border-slate-700/80 rounded px-2 py-0.5 ml-1">
             <span className="text-[10px] font-mono text-slate-400 uppercase font-bold mr-1">
@@ -2243,6 +2407,28 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
                     className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-slate-100"
                   />
                 </label>
+
+                {/* Live Support System, Spot Bolting & Factor of Safety Summary Strip inside Geological Table */}
+                <div className="col-span-2 mt-1 p-2 rounded bg-emerald-950/30 border border-emerald-500/40 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[10px] space-y-0.5">
+                    <div className="font-bold text-emerald-300">
+                      SUPPORT SYSTEM &amp; FACTOR OF SAFETY: {supportAndFos.recommendedSupportCategory}
+                    </div>
+                    <div className="text-slate-300">
+                      Strata FoS: <strong className="text-emerald-300">{supportAndFos.strataFactorOfSafety.toFixed(2)}</strong> · Systematic Bolts: <strong className="text-cyan-300">L={supportAndFos.systematicBoltLengthM}m @ {supportAndFos.systematicBoltSpacingM}m c/c</strong> · AI Spot Bolts: <strong className="text-amber-300">{supportAndFos.totalSpotBoltsRequired} bolts ({supportAndFos.spotBoltLocations.length} zones)</strong> · Wedge FoS: <strong className="text-emerald-300">{supportAndFos.failureModes[0]?.supportedFactorOfSafety.toFixed(2) ?? '1.65'}</strong>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onChangeTab('q_index');
+                      setClassificationSubView('support_spotbolt_fos');
+                    }}
+                    className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold cursor-pointer shrink-0"
+                  >
+                    Edit Support, Spot Bolts &amp; FoS →
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2352,7 +2538,485 @@ export const GeologyAndQIndexDrawer: React.FC<GeologyAndQIndexDrawerProps> = ({
              side-by-side when BOTH_RMR_AND_Q is selected without mixing them).
              ==================================================================== */
           <div className="space-y-4">
-            {classificationSubView === 'support_chart' ? (
+            {classificationSubView === 'support_spotbolt_fos' ? (
+              <div className="space-y-4">
+                {/* SECTION A: ROCK STRATA SUPPORT SYSTEM & FACTOR OF SAFETY (USER EDITABLE) */}
+                <div className="p-3 bg-slate-950 border border-emerald-500/50 rounded space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                    <div>
+                      <span className="font-bold text-emerald-300 text-xs flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                        A. ROCK STRATA SUPPORT SYSTEM &amp; FACTOR OF SAFETY ({settings.faceChainage})
+                      </span>
+                      <p className="text-[10px] text-slate-400 mt-0.5">
+                        Evaluates Arch Rock Load Demand vs. Installed Support Pressure (Bolts + Sfr Shotcrete + Steel Ribs). Every value is user-editable and updates Output Sheets &amp; ESWA AI.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`px-2.5 py-1 rounded text-xs font-bold border ${
+                          supportAndFos.strataStabilityStatus === 'ADEQUATE'
+                            ? 'bg-emerald-950 text-emerald-300 border-emerald-500/60'
+                            : supportAndFos.strataStabilityStatus === 'MARGINAL'
+                            ? 'bg-amber-950 text-amber-300 border-amber-500/60'
+                            : 'bg-rose-950 text-rose-300 border-rose-500/60'
+                        }`}
+                      >
+                        Rock Strata FoS = {supportAndFos.strataFactorOfSafety.toFixed(2)} (Target ≥{' '}
+                        {supportAndFos.strataTargetFos.toFixed(2)} · {supportAndFos.strataStabilityStatus})
+                      </span>
+                      {rockMassSummary.supportSystemOverrides && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateRockMassSummary({
+                              ...rockMassSummary,
+                              supportSystemOverrides: undefined,
+                            })
+                          }
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] flex items-center gap-1 cursor-pointer"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          Reset to AI Default
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2.5 text-[11px]">
+                    <label className="p-2 bg-slate-900 rounded border border-slate-800 space-y-1">
+                      <span className="text-[10px] text-slate-400 block">
+                        Systematic Bolt Length (m)
+                      </span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="1.5"
+                        value={supportAndFos.systematicBoltLengthM}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          if (!Number.isNaN(v)) {
+                            updateSupportOverrides({ systematicBoltLengthM: v });
+                          }
+                        }}
+                        className="w-full px-2 py-1 bg-slate-950 border border-cyan-600/50 rounded text-cyan-300 font-bold"
+                      />
+                    </label>
+
+                    <label className="p-2 bg-slate-900 rounded border border-slate-800 space-y-1">
+                      <span className="text-[10px] text-slate-400 block">
+                        Bolt Pattern Spacing c/c (m)
+                      </span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0.6"
+                        value={supportAndFos.systematicBoltSpacingM}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          if (!Number.isNaN(v)) {
+                            updateSupportOverrides({ systematicBoltSpacingM: v });
+                          }
+                        }}
+                        className="w-full px-2 py-1 bg-slate-950 border border-cyan-600/50 rounded text-amber-300 font-bold"
+                      />
+                    </label>
+
+                    <label className="p-2 bg-slate-900 rounded border border-slate-800 space-y-1">
+                      <span className="text-[10px] text-slate-400 block">
+                        Single Bolt Capacity (kN)
+                      </span>
+                      <input
+                        type="number"
+                        step="10"
+                        min="50"
+                        value={supportAndFos.systematicBoltCapacityKn}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          if (!Number.isNaN(v)) {
+                            updateSupportOverrides({ systematicBoltCapacityKn: v });
+                          }
+                        }}
+                        className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100 font-bold"
+                      />
+                    </label>
+
+                    <label className="p-2 bg-slate-900 rounded border border-slate-800 space-y-1">
+                      <span className="text-[10px] text-slate-400 block">
+                        Shotcrete Thickness (mm Sfr)
+                      </span>
+                      <input
+                        type="number"
+                        step="10"
+                        min="0"
+                        value={supportAndFos.shotcreteThicknessMm}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          if (!Number.isNaN(v)) {
+                            updateSupportOverrides({ shotcreteThicknessMm: v });
+                          }
+                        }}
+                        className="w-full px-2 py-1 bg-slate-950 border border-emerald-600/50 rounded text-emerald-300 font-bold"
+                      />
+                    </label>
+
+                    <label className="p-2 bg-slate-900 rounded border border-slate-800 space-y-1">
+                      <span className="text-[10px] text-slate-400 block">
+                        Steel Ribs / Lattice Girders
+                      </span>
+                      <input
+                        type="text"
+                        value={supportAndFos.steelRibsPrescription}
+                        onChange={(e) =>
+                          updateSupportOverrides({ steelRibsPrescription: e.target.value })
+                        }
+                        className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-100"
+                      />
+                    </label>
+
+                    <div className="p-2 bg-slate-900 rounded border border-emerald-500/40 space-y-0.5">
+                      <span className="text-[10px] text-slate-400 block">
+                        Demand vs Capacity (kPa)
+                      </span>
+                      <div className="text-xs font-bold text-white">
+                        {supportAndFos.strataDemandPressureKpa.toFixed(1)} vs{' '}
+                        <span className="text-emerald-300">
+                          {supportAndFos.installedSupportCapacityKpa.toFixed(1)} kPa
+                        </span>
+                      </div>
+                      <div className="text-[9px] text-emerald-400 font-semibold">
+                        FoS = Cap / Demand = {supportAndFos.strataFactorOfSafety.toFixed(2)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* SECTION B: AI SPOT BOLTING LOCATIONS & HISTORICAL PULL BOLT COLLECTOR */}
+                <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+                  <div className="xl:col-span-8 p-3 bg-slate-950 border border-cyan-500/50 rounded space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-1.5">
+                      <div>
+                        <span className="font-bold text-cyan-300 text-xs flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                          B1. AI SPOT BOLTING LOCATION ANALYSIS &amp; BOLT REQUIREMENT SCHEDULE (
+                          {supportAndFos.totalSpotBoltsRequired} Bolts Required)
+                        </span>
+                        <p className="text-[10px] text-slate-400">
+                          AI selects exact spot-bolting sectors from wedge intersections, overbreak cavities &amp; previous pull history. Click any cell to modify.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleAddCustomSpotBoltLocation}
+                        className="px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-[10px] font-bold cursor-pointer"
+                      >
+                        + Add Spot Bolt Location
+                      </button>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-[11px]">
+                        <thead>
+                          <tr className="border-b border-slate-800 bg-slate-900 text-slate-400 text-[10px]">
+                            <th className="py-1.5 px-2">CHOSEN AREA / SECTOR</th>
+                            <th className="py-1.5 px-2">COORDS (X, Y m)</th>
+                            <th className="py-1.5 px-2">BOLTS REQ</th>
+                            <th className="py-1.5 px-2">LEN / ANGLE</th>
+                            <th className="py-1.5 px-2">SETS</th>
+                            <th className="py-1.5 px-2">AI REASON FOR LOCATION &amp; HISTORY</th>
+                            <th className="py-1.5 px-1"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {supportAndFos.spotBoltLocations.map((sp) => (
+                            <tr
+                              key={sp.id}
+                              className="border-b border-slate-800/70 hover:bg-slate-900/50"
+                            >
+                              <td className="py-1.5 px-1.5">
+                                <input
+                                  type="text"
+                                  value={sp.locationSector}
+                                  onChange={(e) =>
+                                    handleUpdateSpotBoltRow(sp.id, {
+                                      locationSector: e.target.value,
+                                    })
+                                  }
+                                  className="w-40 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-cyan-200 font-semibold"
+                                />
+                              </td>
+                              <td className="py-1.5 px-1.5">
+                                <div className="flex items-center gap-1">
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    value={sp.xMeters}
+                                    onChange={(e) =>
+                                      handleUpdateSpotBoltRow(sp.id, {
+                                        xMeters: parseFloat(e.target.value) || 0,
+                                      })
+                                    }
+                                    className="w-14 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                                  />
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    value={sp.yMeters}
+                                    onChange={(e) =>
+                                      handleUpdateSpotBoltRow(sp.id, {
+                                        yMeters: parseFloat(e.target.value) || 0,
+                                      })
+                                    }
+                                    className="w-14 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                                  />
+                                </div>
+                              </td>
+                              <td className="py-1.5 px-1.5">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="20"
+                                  value={sp.boltsRequired}
+                                  onChange={(e) =>
+                                    handleUpdateSpotBoltRow(sp.id, {
+                                      boltsRequired: Math.max(
+                                        1,
+                                        parseInt(e.target.value, 10) || 1
+                                      ),
+                                    })
+                                  }
+                                  className="w-14 bg-slate-900 border border-amber-500/60 rounded px-1.5 py-0.5 text-amber-300 font-bold text-center"
+                                />
+                              </td>
+                              <td className="py-1.5 px-1.5">
+                                <div className="flex items-center gap-1">
+                                  <input
+                                    type="number"
+                                    step="0.5"
+                                    value={sp.boltLengthMeters}
+                                    onChange={(e) =>
+                                      handleUpdateSpotBoltRow(sp.id, {
+                                        boltLengthMeters: parseFloat(e.target.value) || 3.5,
+                                      })
+                                    }
+                                    className="w-12 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                                  />
+                                  <span className="text-[9px] text-slate-500">m @</span>
+                                  <input
+                                    type="number"
+                                    step="5"
+                                    value={sp.inclinationDeg}
+                                    onChange={(e) =>
+                                      handleUpdateSpotBoltRow(sp.id, {
+                                        inclinationDeg: parseFloat(e.target.value) || 15,
+                                      })
+                                    }
+                                    className="w-11 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-100"
+                                  />
+                                  <span className="text-[9px] text-slate-500">°</span>
+                                </div>
+                              </td>
+                              <td className="py-1.5 px-1.5">
+                                <input
+                                  type="text"
+                                  value={sp.controllingJointSets}
+                                  onChange={(e) =>
+                                    handleUpdateSpotBoltRow(sp.id, {
+                                      controllingJointSets: e.target.value,
+                                    })
+                                  }
+                                  className="w-20 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-emerald-300 font-semibold"
+                                />
+                              </td>
+                              <td className="py-1.5 px-1.5">
+                                <input
+                                  type="text"
+                                  value={sp.aiReasonForChoice}
+                                  onChange={(e) =>
+                                    handleUpdateSpotBoltRow(sp.id, {
+                                      aiReasonForChoice: e.target.value,
+                                    })
+                                  }
+                                  className="w-full min-w-[240px] bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-slate-200"
+                                />
+                                <div className="text-[9px] text-cyan-400 mt-0.5">
+                                  {sp.historicalReferenceSummary}
+                                </div>
+                              </td>
+                              <td className="py-1.5 px-1 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteSpotBoltLocation(sp.id)}
+                                  className="text-slate-500 hover:text-rose-400 px-1 cursor-pointer"
+                                  title="Delete Spot Bolt Location"
+                                >
+                                  ✕
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* B2: HISTORICAL SPOT BOLTING DATA COLLECTED FROM PREVIOUS PULLS */}
+                  <div className="xl:col-span-4 p-3 bg-slate-950 border border-amber-500/50 rounded space-y-2">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                      <span className="font-bold text-amber-300 text-xs">
+                        B2. PREVIOUS PULLS SPOT BOLT MEMORY
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-600/50 text-[10px] font-bold">
+                        Avg: {supportAndFos.historicalAvgSpotBoltsPerPull} bolts/pull
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-400">
+                      AI automatically collects spot bolt locations &amp; counts from previous tunnel pulls to calibrate current round requirements:
+                    </p>
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                      {supportAndFos.historicalSpotBoltPulls.map((hp, idx) => (
+                        <div
+                          key={`${hp.chainage}-${idx}`}
+                          className="p-2 bg-slate-900 border border-slate-800 rounded text-[10px] space-y-0.5"
+                        >
+                          <div className="flex items-center justify-between font-bold">
+                            <span className="text-cyan-300">
+                              Pull {hp.chainage} ({hp.dominantLocationSector})
+                            </span>
+                            <span className="text-amber-300">
+                              {hp.spotBoltsInstalled} Spot Bolts (L={hp.boltLengthMeters}m)
+                            </span>
+                          </div>
+                          <div className="text-slate-400">{hp.geologicalReason}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* SECTION C: WEDGE, PLANAR, TOPPLING & RAVELLING FAILURE FACTOR OF SAFETY (USER EDITABLE) */}
+                <div className="p-3 bg-slate-950 border border-indigo-500/50 rounded space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-1.5">
+                    <div>
+                      <span className="font-bold text-indigo-300 text-xs">
+                        C. POSSIBLE FAILURE MODES (3D WEDGE, PLANAR SLIDING, TOPPLING &amp; RAVELLING) — FACTOR OF SAFETY &amp; AI RECOMMENDATIONS
+                      </span>
+                      <p className="text-[10px] text-slate-400">
+                        AI evaluates every potential kinematic &amp; gravity failure mode. Users can directly modify Additional Spot Bolts, Target FoS, and Support Recommendations.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-[11px]">
+                      <thead>
+                        <tr className="border-b border-slate-800 bg-slate-900 text-slate-400 text-[10px]">
+                          <th className="py-1.5 px-2">FAILURE MODE &amp; SECTOR</th>
+                          <th className="py-1.5 px-2">SETS</th>
+                          <th className="py-1.5 px-2">BLOCK MASS</th>
+                          <th className="py-1.5 px-2">UNBOLTED FoS</th>
+                          <th className="py-1.5 px-2">SUPPORTED FoS</th>
+                          <th className="py-1.5 px-2">EXTRA BOLTS</th>
+                          <th className="py-1.5 px-2">STATUS</th>
+                          <th className="py-1.5 px-2">AI RECOMMENDATION (USER EDITABLE)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {supportAndFos.failureModes.map((fm) => (
+                          <tr
+                            key={fm.id}
+                            className="border-b border-slate-800/70 hover:bg-slate-900/50"
+                          >
+                            <td className="py-1.5 px-2">
+                              <div className="font-bold text-white">{fm.failureModeLabel}</div>
+                              <div className="text-[10px] text-cyan-300">{fm.locationSector}</div>
+                            </td>
+                            <td className="py-1.5 px-2 font-semibold text-emerald-300">
+                              {fm.controllingSets}
+                            </td>
+                            <td className="py-1.5 px-2 text-slate-200">
+                              {fm.apexHeightMeters}m · {fm.estimatedWeightTonnes}t
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <span
+                                className={`font-bold ${
+                                  fm.unboltedFactorOfSafety < 1.0
+                                    ? 'text-rose-400'
+                                    : fm.unboltedFactorOfSafety < 1.5
+                                    ? 'text-amber-300'
+                                    : 'text-emerald-300'
+                                }`}
+                              >
+                                {fm.unboltedFactorOfSafety.toFixed(2)}
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <input
+                                type="number"
+                                step="0.05"
+                                value={fm.supportedFactorOfSafety}
+                                onChange={(e) =>
+                                  handleUpdateFailureModeRow(fm.id, {
+                                    supportedFactorOfSafety:
+                                      parseFloat(e.target.value) || fm.supportedFactorOfSafety,
+                                  })
+                                }
+                                className="w-16 bg-slate-900 border border-emerald-500/60 rounded px-1.5 py-0.5 text-emerald-300 font-bold"
+                              />
+                              <span className="text-[9px] text-slate-500 ml-1">
+                                (Req ≥{fm.requiredTargetFos})
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <input
+                                type="number"
+                                min="0"
+                                max="24"
+                                value={fm.recommendedExtraBolts}
+                                onChange={(e) =>
+                                  handleUpdateFailureModeRow(fm.id, {
+                                    recommendedExtraBolts: Math.max(
+                                      0,
+                                      parseInt(e.target.value, 10) || 0
+                                    ),
+                                  })
+                                }
+                                className="w-14 bg-slate-900 border border-amber-500/60 rounded px-1.5 py-0.5 text-amber-300 font-bold text-center"
+                              />
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                  fm.stabilityStatus === 'STABLE'
+                                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-600/50'
+                                    : fm.stabilityStatus === 'MARGINAL'
+                                    ? 'bg-amber-950 text-amber-300 border border-amber-600/50'
+                                    : 'bg-rose-950 text-rose-300 border border-rose-600/50'
+                                }`}
+                              >
+                                {fm.stabilityStatus}
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <input
+                                type="text"
+                                value={fm.aiSupportRecommendation}
+                                onChange={(e) =>
+                                  handleUpdateFailureModeRow(fm.id, {
+                                    aiSupportRecommendation: e.target.value,
+                                  })
+                                }
+                                className="w-full min-w-[260px] bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-slate-100"
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            ) : classificationSubView === 'support_chart' ? (
               (() => {
                 const sup = computeEmpiricalSupportRecommendation(
                   geometry,

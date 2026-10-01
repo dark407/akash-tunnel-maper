@@ -704,18 +704,22 @@ export default function App({
   );
 
   const handleGenerateSampleAsBuiltProfile = useCallback(() => {
+    // Radial Overbreak on Crown, Left Wall & Right Wall is geometrically defined on the Tunnel Face ('face') cross-section
     const sample = generateRealisticSampleSurveyedProfile(
       geometry,
-      activeSurface,
+      'face',
       settings.roundLength > 0 ? settings.roundLength : 3.5
     );
     setControlPoints((prev) => [
-      ...prev.filter((c) => c.surface !== activeSurface),
+      ...prev.filter((c) => c.surface !== 'face'),
       ...sample.controlPoints,
     ]);
     setSurveyProfile(sample.profile);
+    if (activeSurface !== 'face') {
+      setActiveSurface('face');
+    }
     setStatusMessage(
-      `Generated & connected 14 As-Built Survey Control Points (CP1→CP14) on ${activeSurface.toUpperCase()}.`
+      'Generated Crown, Left Wall & Right Wall As-Built Overbreak Profile (CP1→CP14) on 1. FACE cross-section (radial overbreak cannot be plotted on flat unwrapped Wall/Crown views).'
     );
   }, [geometry, activeSurface, settings.roundLength]);
 
@@ -1729,6 +1733,10 @@ export default function App({
         rockMassSummary={rockMassSummary}
         photos={photos}
         savedProjects={savedProjects}
+        onSelectSurface={(surf) => {
+          setActiveSurface(surf);
+          setScreen('mapping');
+        }}
         onLoadProjectRecord={handleLoadProjectRecord}
         theme={theme}
         onToggleTheme={toggleTheme}

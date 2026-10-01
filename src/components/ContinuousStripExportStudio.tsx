@@ -20,6 +20,7 @@ import {
   ContinuousTunnelStripDataset,
   exportContinuousStripToDXF,
   getDefaultSheetConfig,
+  resolveStripTraceColor,
   SheetCustomizationConfig,
 } from '../engine/continuous3DStripEngine';
 import { buildProjectNetworkCanvasLayout } from '../engine/projectNetworkStripEngine';
@@ -792,8 +793,16 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
                       const midIdx = Math.floor(activePts.length / 2);
                       const pA = activePts[Math.max(0, midIdx - 1)];
                       const pB = activePts[Math.min(activePts.length - 1, midIdx)];
-                      const mx = rdToX((pA.x + pB.x) / 2);
-                      const my = perimToY((pA.y + pB.y) / 2);
+                      const ax = rdToX(pA.x);
+                      const ay = perimToY(pA.y);
+                      const bx = rdToX(pB.x);
+                      const by = perimToY(pB.y);
+                      const mx = (ax + bx) / 2;
+                      const my = (ay + by) / 2;
+                      let traceAngleDeg = (Math.atan2(by - ay, bx - ax) * 180) / Math.PI;
+                      if (traceAngleDeg > 90) traceAngleDeg -= 180;
+                      if (traceAngleDeg < -90) traceAngleDeg += 180;
+                      const traceColor = resolveStripTraceColor(tr.setId, tr.structureType);
 
                       return (
                         <g key={tr.id}>
@@ -821,7 +830,7 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
                             <polyline
                               points={polyStr}
                               fill="none"
-                              stroke="#000"
+                              stroke={traceColor}
                               strokeWidth="5.2"
                               strokeOpacity="0.22"
                             />
@@ -829,8 +838,10 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
                           <polyline
                             points={polyStr}
                             fill="none"
-                            stroke="#000"
-                            strokeWidth={isShearZone ? 2.5 : isShearJoint ? 1.9 : 1.3}
+                            stroke={traceColor}
+                            strokeWidth={isShearZone ? 2.5 : isShearJoint ? 1.9 : 1.5}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
                             strokeDasharray={
                               tr.structureType === 'Geological Boundary'
                                 ? '8,3'
@@ -840,30 +851,23 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
                             }
                           />
 
-                          {/* Strike & Dip Tick Callout Box */}
+                          {/* On-Line Joint Set & Orientation Value (Small Font, No Box) */}
                           {activeLayers.strikeDipLabels && (
-                            <g transform={`translate(${mx}, ${my})`}>
-                              <line x1="-5" y1="0" x2="5" y2="0" stroke="#000" strokeWidth="1.3" />
-                              <line x1="0" y1="0" x2="0" y2="6.5" stroke="#000" strokeWidth="1.3" />
-                              <rect
-                                x="3.5"
-                                y="-10.5"
-                                width="42"
-                                height="10.5"
-                                fill="#fff"
-                                stroke="#000"
-                                strokeWidth="0.6"
-                              />
-                              <text
-                                x="24.5"
-                                y="-3"
-                                textAnchor="middle"
-                                fontSize="7"
-                                fontWeight="800"
-                              >
-                                {tr.setId}:{tr.dipDeg}°
-                              </text>
-                            </g>
+                            <text
+                              x={mx}
+                              y={my - 2.5}
+                              textAnchor="middle"
+                              fontSize="6.8"
+                              fontWeight="800"
+                              fontFamily="monospace"
+                              fill={traceColor}
+                              stroke="#ffffff"
+                              strokeWidth="2.2"
+                              paintOrder="stroke"
+                              transform={`rotate(${traceAngleDeg.toFixed(1)}, ${mx.toFixed(1)}, ${my.toFixed(1)})`}
+                            >
+                              {tr.setId} {tr.orientationLabel}
+                            </text>
                           )}
                         </g>
                       );
@@ -1807,29 +1811,51 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
                   return `${svgPt.x.toFixed(1)},${svgPt.y.toFixed(1)}`;
                 })
                 .join(' ');
-              const mid = pts[Math.floor(pts.length / 2)];
-              const midSvg = ribbon.mapRdPerimToSvg(
-                Math.max(startRd, Math.min(endRd, mid.x)),
-                mid.y
+              const midIdx = Math.floor(pts.length / 2);
+              const pA = pts[Math.max(0, midIdx - 1)];
+              const pB = pts[Math.min(pts.length - 1, midIdx)];
+              const svgA = ribbon.mapRdPerimToSvg(
+                Math.max(startRd, Math.min(endRd, pA.x)),
+                pA.y
               );
+              const svgB = ribbon.mapRdPerimToSvg(
+                Math.max(startRd, Math.min(endRd, pB.x)),
+                pB.y
+              );
+              const midSvg = {
+                x: (svgA.x + svgB.x) * 0.5,
+                y: (svgA.y + svgB.y) * 0.5,
+              };
+              let traceAngleDeg =
+                (Math.atan2(svgB.y - svgA.y, svgB.x - svgA.x) * 180) / Math.PI;
+              if (traceAngleDeg > 90) traceAngleDeg -= 180;
+              if (traceAngleDeg < -90) traceAngleDeg += 180;
+              const traceColor = resolveStripTraceColor(tr.setId, tr.structureType);
 
               return (
                 <g key={tr.id}>
                   <polyline
                     points={mappedStr}
                     fill="none"
-                    stroke="#000"
-                    strokeWidth={tr.structureType.includes('Shear') ? 2.4 : 1.5}
+                    stroke={traceColor}
+                    strokeWidth={tr.structureType.includes('Shear') ? 2.4 : 1.6}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
                   />
                   <text
                     x={midSvg.x}
-                    y={midSvg.y - 5}
+                    y={midSvg.y - 3}
                     textAnchor="middle"
-                    fontSize="8.5"
+                    fontSize="7"
                     fontWeight="800"
-                    fill="#000"
+                    fontFamily="monospace"
+                    fill={traceColor}
+                    stroke="#ffffff"
+                    strokeWidth="2.2"
+                    paintOrder="stroke"
+                    transform={`rotate(${traceAngleDeg.toFixed(1)}, ${midSvg.x.toFixed(1)}, ${midSvg.y.toFixed(1)})`}
                   >
-                    {tr.setId} ({tr.orientationLabel})
+                    {tr.setId} {tr.orientationLabel}
                   </text>
                 </g>
               );
@@ -2064,14 +2090,45 @@ export const ContinuousStripExportStudio: React.FC<ContinuousStripExportStudioPr
                         return `${s.x.toFixed(1)},${s.y.toFixed(1)}`;
                       })
                       .join(' ');
+                    const traceColor = resolveStripTraceColor(tr.setId, tr.structureType);
+                    const midIdx = Math.floor(pts.length / 2);
+                    const sA = pos.mapRdPerimToSvg(
+                      pts[Math.max(0, midIdx - 1)].x,
+                      pts[Math.max(0, midIdx - 1)].y
+                    );
+                    const sB = pos.mapRdPerimToSvg(
+                      pts[Math.min(pts.length - 1, midIdx)].x,
+                      pts[Math.min(pts.length - 1, midIdx)].y
+                    );
+                    const mx = (sA.x + sB.x) * 0.5;
+                    const my = (sA.y + sB.y) * 0.5;
+                    let angDeg = (Math.atan2(sB.y - sA.y, sB.x - sA.x) * 180) / Math.PI;
+                    if (angDeg > 90) angDeg -= 180;
+                    if (angDeg < -90) angDeg += 180;
                     return (
-                      <polyline
-                        key={tr.id}
-                        points={tStr}
-                        fill="none"
-                        stroke="#000"
-                        strokeWidth="1.5"
-                      />
+                      <g key={tr.id}>
+                        <polyline
+                          points={tStr}
+                          fill="none"
+                          stroke={traceColor}
+                          strokeWidth="1.6"
+                        />
+                        <text
+                          x={mx}
+                          y={my - 2.5}
+                          textAnchor="middle"
+                          fontSize="6.5"
+                          fontWeight="800"
+                          fontFamily="monospace"
+                          fill={traceColor}
+                          stroke="#ffffff"
+                          strokeWidth="2"
+                          paintOrder="stroke"
+                          transform={`rotate(${angDeg.toFixed(1)}, ${mx.toFixed(1)}, ${my.toFixed(1)})`}
+                        >
+                          {tr.setId} {tr.orientationLabel}
+                        </text>
+                      </g>
                     );
                   })}
                 </g>

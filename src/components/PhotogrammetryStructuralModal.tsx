@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -35,9 +35,12 @@ import {
   SeepageConditionType,
 } from '../engine/kinematicsSupportAndDxfEngine';
 
+export type PhotogrammetryLabTab = 'kinematic' | 'perimeter' | 'seepage' | 'jrc' | 'pointcloud';
+
 interface PhotogrammetryStructuralModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: PhotogrammetryLabTab;
   joints: Joint[];
   jointSets: JointSet[];
   geometry: TunnelGeometry;
@@ -65,6 +68,7 @@ const SET_COLORS: Record<string, string> = {
 export const PhotogrammetryStructuralModal: React.FC<PhotogrammetryStructuralModalProps> = ({
   isOpen,
   onClose,
+  initialTab = 'kinematic',
   joints,
   jointSets,
   geometry,
@@ -78,11 +82,17 @@ export const PhotogrammetryStructuralModal: React.FC<PhotogrammetryStructuralMod
   onUpdateJoints,
   onApplyGroundwaterToClassification,
 }) => {
-  const [activeTab, setActiveTab] = useState<'kinematic' | 'perimeter' | 'seepage' | 'jrc' | 'pointcloud'>('kinematic');
+  const [activeTab, setActiveTab] = useState<PhotogrammetryLabTab>(initialTab);
   const [frictionAngleDeg, setFrictionAngleDeg] = useState<number>(32);
   const [projectionMode, setProjectionMode] = useState<'equal_angle' | 'equal_area'>('equal_area');
   const { theme } = useTheme();
   const isLight = theme === 'light';
+
+  useEffect(() => {
+    if (isOpen && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
 
   // Groundwater / Seepage Zone Sketching State
   const [seepageZones, setSeepageZones] = useState<GroundwaterSeepageZone[]>([
@@ -894,34 +904,19 @@ export const PhotogrammetryStructuralModal: React.FC<PhotogrammetryStructuralMod
               <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-950/80 border border-slate-800 rounded p-3.5">
                 <div className="text-xs text-slate-300 max-w-3xl">
                   <span className="font-bold text-emerald-300">
-                    Unfolded Perimeter 3D Plane Intersection Strip (Left Wall ↔ Crown ↔ Right Wall):
+                    Unwrapped Wall &amp; Crown 3D Perimeter Strip (Left Wall ↔ Crown ↔ Right Wall):
                   </span>{' '}
-                  Solves the 3D discontinuity plane equation{' '}
-                  <span className="font-mono text-cyan-300">
-                    nₓ(X - X₀) + nᵧ(Y - Y₀) + n₂(Z - Z₀) = 0
-                  </span>{' '}
-                  relative to Tunnel Drive{' '}
+                  Strictly displays traces mapped on the{' '}
+                  <span className="font-mono text-cyan-300">Left Wall</span>,{' '}
+                  <span className="font-mono text-cyan-300">Crown Arch</span>, and{' '}
+                  <span className="font-mono text-cyan-300">Right Wall</span> along Tunnel Drive{' '}
                   <span className="font-mono text-amber-300">
                     N {Math.round(settings.driveDirection)}° E
                   </span>{' '}
-                  and Round Pull{' '}
-                  <span className="font-mono text-amber-300">{settings.roundLength.toFixed(1)} m</span>{' '}
-                  to project face joints across the Left Wall, Crown Arch, and Right Wall.
+                  (Round Pull{' '}
+                  <span className="font-mono text-amber-300">{settings.roundLength.toFixed(1)} m</span>
+                  ). Tunnel Face traces are excluded from the 3D wall/crown strip.
                 </div>
-
-                {onUpdateJoints && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = buildProjectedPerimeterJoints(joints, perimeterProjections);
-                      onUpdateJoints(next);
-                    }}
-                    disabled={perimeterProjections.every((p) => p.alreadyCommitted)}
-                    className="px-3.5 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-xs shadow cursor-pointer"
-                  >
-                    Auto-Project {perimeterProjections.filter((p) => !p.alreadyCommitted).length} Boundary Trace(s) to Walls &amp; Crown
-                  </button>
-                )}
               </div>
 
               {/* Interactive Unfolded Perimeter SVG Strip */}
@@ -942,16 +937,27 @@ export const PhotogrammetryStructuralModal: React.FC<PhotogrammetryStructuralMod
                   const topY = 36;
 
                   const mapSurfPt = (pt: { x: number; y: number }, surf: 'leftWall' | 'crown' | 'rightWall') => {
-                    const py = topY + stripH - (pt.y / pullL) * stripH;
+                    const u2d =
+                      surf === 'crown'
+                        ? Math.max(0, Math.min(1, (pt.x + crownW * 0.5) / Math.max(0.5, crownW)))
+                        : Math.max(0, Math.min(1, pt.x / Math.max(0.5, pullL)));
+                    const v2d =
+                      surf === 'crown'
+                        ? Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.5, pullL)))
+                        : Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.5, wallH)));
+                    // Rotate 2D unwrapped trace 90° clockwise
+                    const u3d = 1 - v2d;
+                    const v3d = u2d;
+                    const py = topY + (1 - u3d) * stripH;
                     if (surf === 'leftWall') {
-                      const px = startX + lwW / 2 + (pt.x / wallH) * lwW;
+                      const px = startX + v3d * lwW;
                       return { x: px, y: py };
                     }
                     if (surf === 'crown') {
-                      const px = startX + lwW + crW / 2 + (pt.x / crownW) * crW;
+                      const px = startX + lwW + v3d * crW;
                       return { x: px, y: py };
                     }
-                    const px = startX + lwW + crW + rwW / 2 + (pt.x / wallH) * rwW;
+                    const px = startX + lwW + crW + v3d * rwW;
                     return { x: px, y: py };
                   };
 
@@ -1045,9 +1051,15 @@ export const PhotogrammetryStructuralModal: React.FC<PhotogrammetryStructuralMod
                         strokeDasharray="4,3"
                       />
 
-                      {/* Existing Mapped Traces on Left Wall, Crown, Right Wall (Solid) */}
+                      {/* Existing Mapped Traces on Left Wall, Crown, Right Wall Only (Face Excluded) */}
                       {joints
-                        .filter((j) => j.surface !== 'face' && j.geometry.length >= 2)
+                        .filter(
+                          (j) =>
+                            (j.surface === 'leftWall' ||
+                              j.surface === 'crown' ||
+                              j.surface === 'rightWall') &&
+                            j.geometry.length >= 2
+                        )
                         .map((j) => {
                           const surf = j.surface as 'leftWall' | 'crown' | 'rightWall';
                           const d = j.geometry
@@ -1057,48 +1069,28 @@ export const PhotogrammetryStructuralModal: React.FC<PhotogrammetryStructuralMod
                             })
                             .join(' ');
                           const col = SET_COLORS[j.set] || '#22C55E';
+                          const midPt = j.geometry[Math.floor(j.geometry.length / 2)] || j.geometry[0];
+                          const mid = mapSurfPt(midPt, surf);
                           return (
-                            <path
-                              key={`mapped-${j.id}`}
-                              d={d}
-                              fill="none"
-                              stroke={col}
-                              strokeWidth="2.4"
-                            />
+                            <g key={`mapped-${j.id}`}>
+                              <path
+                                d={d}
+                                fill="none"
+                                stroke={col}
+                                strokeWidth="2.4"
+                              />
+                              <text
+                                x={mid.x + 4}
+                                y={mid.y - 4}
+                                fontSize="9"
+                                fontWeight="700"
+                                fill={col}
+                              >
+                                {j.set} ({Math.round(j.dip)}°/{Math.round(j.dipDirection)}°)
+                              </text>
+                            </g>
                           );
                         })}
-
-                      {/* Auto-Projected Plane Intersection Traces from Face (Dashed) */}
-                      {perimeterProjections.map((proj) => {
-                        const d = proj.points
-                          .map((pt, idx) => {
-                            const p = mapSurfPt(pt, proj.targetSurface);
-                            return `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
-                          })
-                          .join(' ');
-                        const col = SET_COLORS[proj.set] || '#F59E0B';
-                        const mid = mapSurfPt(proj.points[Math.floor(proj.points.length / 2)], proj.targetSurface);
-                        return (
-                          <g key={proj.id}>
-                            <path
-                              d={d}
-                              fill="none"
-                              stroke={col}
-                              strokeWidth="2.2"
-                              strokeDasharray="6,4"
-                            />
-                            <text
-                              x={mid.x + 5}
-                              y={mid.y - 4}
-                              fontSize="9"
-                              fontWeight="700"
-                              fill={isLight ? '#B45309' : '#FDE68A'}
-                            >
-                              {proj.set} ({proj.dip}°/{proj.dipDirection}°)
-                            </text>
-                          </g>
-                        );
-                      })}
 
                       <text
                         x="390"
@@ -1107,7 +1099,7 @@ export const PhotogrammetryStructuralModal: React.FC<PhotogrammetryStructuralMod
                         fontSize="10"
                         fill={isLight ? '#475569' : '#94A3B8'}
                       >
-                        Solid Lines = Mapped on Wall/Crown · Dashed Lines = 3D Plane Projections from Face Boundary (Z = 0 → {pullL.toFixed(1)}m)
+                        Unwrapped 3D Perimeter Rollout: Strictly Left Wall, Crown Arch &amp; Right Wall Mapped Traces Only (Face Traces Excluded)
                       </text>
                     </svg>
                   );

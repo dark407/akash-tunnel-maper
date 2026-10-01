@@ -644,6 +644,7 @@ interface Interactive3DStrikeDipVisualizerModalProps {
   onCaptureSnapshotToSheetAppendix?: (snapshot: StrikeDip3DSnapshotAppendix) => void;
   onDeleteSnapshotFromSheetAppendix?: (snapshotId: string) => void;
   onOpenEngineeringSheet?: () => void;
+  onOpenUnwrapped3DStrip?: () => void;
 }
 
 export const Interactive3DStrikeDipVisualizerModal: React.FC<
@@ -653,14 +654,34 @@ export const Interactive3DStrikeDipVisualizerModal: React.FC<
   onClose,
   geometry,
   settings,
-  joints,
-  jointSets,
+  joints: rawAllJoints,
+  jointSets: rawAllJointSets,
   initialSelectedJointId,
   onUpdateJointOrientation,
   onCaptureSnapshotToSheetAppendix,
   onDeleteSnapshotFromSheetAppendix,
   onOpenEngineeringSheet,
+  onOpenUnwrapped3DStrip,
 }) => {
+  // 3D is strictly based on Left Wall, Crown, and Right Wall only (Face traces excluded)
+  const joints = useMemo(
+    () =>
+      rawAllJoints.filter(
+        (j) =>
+          j.surface === 'leftWall' ||
+          j.surface === 'crown' ||
+          j.surface === 'rightWall'
+      ),
+    [rawAllJoints]
+  );
+  const jointSets = useMemo(
+    () =>
+      rawAllJointSets.filter((s) =>
+        joints.some((j) => j.set === s.id)
+      ),
+    [rawAllJointSets, joints]
+  );
+
   // Camera Orbit State
   const [yaw, setYaw] = useState<number>(-36);
   const [pitch, setPitch] = useState<number>(25);
@@ -689,6 +710,7 @@ export const Interactive3DStrikeDipVisualizerModal: React.FC<
   const [showDipVectors, setShowDipVectors] = useState<boolean>(true);
   const [showNormalPoles, setShowNormalPoles] = useState<boolean>(false);
   const [showCompassGrid, setShowCompassGrid] = useState<boolean>(true);
+  const [showGeometricPlanes, setShowGeometricPlanes] = useState<boolean>(false);
 
   // Sandbox / Interactive Override Sliders
   const [sandboxDipDir, setSandboxDipDir] = useState<number>(135);
@@ -829,17 +851,35 @@ export const Interactive3DStrikeDipVisualizerModal: React.FC<
   const halfLen = Math.max(3.2, (settings.roundLength || 4.5) * 0.75);
   const centerH = geometry.height / 2;
 
-  // Sample tunnel cross-section points for 3D extrusion
+  // Sample realistic curved tunnel cross-section points for 3D extrusion (no boxy pentagons)
   const rawProfilePts =
-    geometry.crossSectionPoints && geometry.crossSectionPoints.length >= 4
+    geometry.crossSectionPoints && geometry.crossSectionPoints.length >= 10
       ? geometry.crossSectionPoints
-      : [
-          { x: -geometry.width / 2, y: 0 },
-          { x: -geometry.width / 2, y: geometry.wallHeight },
-          { x: 0, y: geometry.height },
-          { x: geometry.width / 2, y: geometry.wallHeight },
-          { x: geometry.width / 2, y: 0 },
-        ];
+      : (() => {
+          const halfW = geometry.width / 2;
+          const wH = Math.min(geometry.height * 0.65, geometry.wallHeight || geometry.height * 0.55);
+          const archRise = Math.max(0.5, geometry.height - wH);
+          const pts: { x: number; y: number }[] = [
+            { x: -halfW, y: 0 },
+            { x: -halfW, y: wH * 0.5 },
+            { x: -halfW, y: wH },
+          ];
+          const archSteps = 14;
+          for (let i = 1; i < archSteps; i++) {
+            const t = i / archSteps;
+            const ang = Math.PI * (1 - t);
+            pts.push({
+              x: Math.cos(ang) * halfW,
+              y: wH + Math.sin(ang) * archRise,
+            });
+          }
+          pts.push(
+            { x: halfW, y: wH },
+            { x: halfW, y: wH * 0.5 },
+            { x: halfW, y: 0 }
+          );
+          return pts;
+        })();
 
   const frontSection2D = rawProfilePts.map((pt) =>
     project3DPoint(
@@ -996,16 +1036,29 @@ export const Interactive3DStrikeDipVisualizerModal: React.FC<
             </div>
             <div>
               <h2 className="font-display font-bold text-sm sm:text-base tracking-wide">
-                Interactive 3D Joint Strike &amp; Dip Visualizer (vs. Tunnel Drive Direction)
+                Interactive 3D Joint Strike &amp; Dip Visualizer (Wall &amp; Crown Only)
               </h2>
               <p className="text-[11px] text-slate-300">
-                3D projection of mapped discontinuity planes, Strike line, Down-Dip vector, and Bieniawski Drive Favorability
+                Strictly based on mapped Left Wall, Crown Arch, and Right Wall traces (2D Face traces excluded from 3D)
               </p>
             </div>
           </div>
 
-          {/* Mode Switcher Tabs */}
+          {/* Mode Switcher Tabs + Unwrapped Wall & Crown Button */}
           <div className="flex items-center gap-2">
+            {onOpenUnwrapped3DStrip && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenUnwrapped3DStrip();
+                }}
+                className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-mono font-bold cursor-pointer shadow-xs"
+                title="Open 3D Unwrapped Wall & Crown Strip Logger"
+              >
+                See Unwrapped Wall &amp; Crown 3D
+              </button>
+            )}
             <div className="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700 text-xs font-mono">
               <button
                 type="button"
@@ -1106,6 +1159,18 @@ export const Interactive3DStrikeDipVisualizerModal: React.FC<
               </div>
 
               <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowGeometricPlanes((p) => !p)}
+                  className={`px-2.5 py-1 rounded border font-bold cursor-pointer ${
+                    showGeometricPlanes
+                      ? 'bg-indigo-600 text-white border-indigo-500'
+                      : 'bg-emerald-50 text-emerald-900 border-emerald-300 hover:bg-emerald-100'
+                  }`}
+                  title="Toggle between Exact Unwrapped Wall & Crown Points Only vs. Extended Geometric Strike/Dip Planes"
+                >
+                  {showGeometricPlanes ? 'Showing Geometric Planes' : 'Exact Unwrapped Points (Realistic)'}
+                </button>
                 <button
                   type="button"
                   onClick={handleCaptureCurrent3DViewToAppendix}
@@ -1372,8 +1437,114 @@ export const Interactive3DStrikeDipVisualizerModal: React.FC<
                   </text>
                 </g>
 
+                {/* 3.5 EXACT UNWRAPPED WALL & CROWN TRACES WRAPPED ONTO REALISTIC 3D TUNNEL ARCH SHELL */}
+                {joints.map((j) => {
+                  if (!j.geometry || j.geometry.length < 2) return null;
+                  const col = JOINT_SET_PALETTE[j.set] || '#38BDF8';
+                  const halfW = geometry.width / 2;
+                  const wH = Math.min(geometry.height * 0.65, geometry.wallHeight || geometry.height * 0.55);
+                  const archRise = Math.max(0.5, geometry.height - wH);
+                  const crownArc = Math.max(3.0, geometry.crownArcLength || geometry.width * 1.25);
+                  const pullLen = Math.max(1.5, settings.roundLength || 4.0);
+
+                  const tracePts2D = j.geometry.map((pt) => {
+                    let localRight = 0;
+                    let localUp = wH;
+                    let localAlongDrive = 0;
+
+                    // 2D unwrapped coordinates (u2d horizontal left-to-right, v2d vertical top-to-bottom)
+                    const u2d =
+                      j.surface === 'crown'
+                        ? Math.max(0, Math.min(1, (pt.x + crownArc * 0.5) / crownArc))
+                        : Math.max(0, Math.min(1, pt.x / pullLen));
+                    const v2d =
+                      j.surface === 'crown'
+                        ? Math.max(0, Math.min(1, 1 - pt.y / pullLen))
+                        : Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.5, wH)));
+
+                    // Rotate 2D unwrapped trace 90° clockwise (2D horizontal -> 3D vertical)
+                    const u3d = 1 - v2d;
+                    const v3d = u2d;
+
+                    if (j.surface === 'leftWall') {
+                      localRight = -halfW;
+                      localUp = v3d * wH;
+                      localAlongDrive = (u3d - 0.5) * halfLen * 2;
+                    } else if (j.surface === 'crown') {
+                      const ang = Math.PI * (1 - v3d);
+                      localRight = Math.cos(ang) * halfW;
+                      localUp = wH + Math.sin(ang) * archRise;
+                      localAlongDrive = (u3d - 0.5) * halfLen * 2;
+                    } else {
+                      localRight = halfW;
+                      localUp = (1 - v3d) * wH;
+                      localAlongDrive = (u3d - 0.5) * halfLen * 2;
+                    }
+
+                    return project3DPoint(
+                      tunnelLocalToWorldENU(
+                        localRight,
+                        localUp,
+                        localAlongDrive,
+                        activeDriveAzimuth,
+                        centerH
+                      ),
+                      yaw,
+                      pitch,
+                      baseScale,
+                      cx,
+                      cy
+                    );
+                  });
+
+                  const dPath = tracePts2D
+                    .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.u} ${p.v}`)
+                    .join(' ');
+                  const midP = tracePts2D[Math.floor(tracePts2D.length / 2)] || tracePts2D[0];
+
+                  return (
+                    <g key={`exact-3d-trace-${j.id}`}>
+                      <path
+                        d={dPath}
+                        fill="none"
+                        stroke={col}
+                        strokeWidth="3.0"
+                        strokeLinecap="round"
+                      />
+                      {tracePts2D.map((tp, tIdx) => (
+                        <circle
+                          key={tIdx}
+                          cx={tp.u}
+                          cy={tp.v}
+                          r="3.8"
+                          fill="#020617"
+                          stroke={col}
+                          strokeWidth="1.8"
+                        />
+                      ))}
+                      {midP && (
+                        <text
+                          x={midP.u}
+                          y={midP.v - 6}
+                          textAnchor="middle"
+                          fontSize="9.5"
+                          fontFamily="IBM Plex Mono, monospace"
+                          fontWeight="bold"
+                          fill={col}
+                          stroke="#020617"
+                          strokeWidth="2.4"
+                          paintOrder="stroke"
+                        >
+                          {j.set} ({Math.round(j.dip)}°/{String(Math.round(j.dipDirection)).padStart(3, '0')}°)
+                        </text>
+                      )}
+                    </g>
+                  );
+                })}
+
                 {/* 4. 3D GEOLOGICAL DISCONTINUITY PLANES, STRIKE LINES & DIP VECTORS */}
-                {planesToRender.map((plane) => {
+                {(showGeometricPlanes || viewMode === 'SANDBOX' || joints.length === 0) &&
+                  planesToRender.map((plane) => {
                   const vecs = computeJointPlane3DVectors(plane.dipDirection, plane.dip);
                   const center3D = tunnelLocalToWorldENU(
                     0,

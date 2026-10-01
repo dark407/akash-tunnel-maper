@@ -1,11 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ConnectedSurveyProfile,
+  Joint,
+  JointSet,
   MappingWorkspaceMode,
   OutputSheetMode,
   OverbreakReasonCategory,
   OverbreakUndercutAnalysis,
   PlaneSurfaceConfig,
+  QIndexParameters,
+  RmrParameters,
+  RockMassSummaryTable,
   SavedDesignGeometryRecord,
   SavedProjectRecord,
   SurfaceType,
@@ -17,6 +22,7 @@ import {
   parseSurveyControlPointsFromText,
   sortControlPointsAroundPerimeter,
 } from '../engine/overbreakEngine';
+import { computeAdvancedOverbreakPrediction } from '../engine/supportSpotBoltFailureEngine';
 import {
   computeSectionToSectionVolumes,
   exportProjectHierarchyRegisterToCSV,
@@ -67,7 +73,15 @@ interface OverbreakAnalysisPanelProps {
   onGenerateSampleAsBuiltProfile: () => void;
   onOpenProjectMemoryModal: () => void;
   onOpenExportSheet?: (mode?: OutputSheetMode) => void;
+  joints?: Joint[];
+  jointSets?: JointSet[];
+  qIndexParams?: QIndexParameters;
+  rmrParams?: RmrParameters;
+  rockMassSummary?: RockMassSummaryTable;
+  onUpdateRockMassSummary?: (next: RockMassSummaryTable) => void;
+  savedProjects?: SavedProjectRecord[];
   embedded?: boolean;
+  onSwitchToFaceSurface?: () => void;
   onClose: () => void;
   onStatusMessage?: (msg: string) => void;
 }
@@ -86,11 +100,114 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
   onGenerateSampleAsBuiltProfile,
   onOpenProjectMemoryModal,
   onOpenExportSheet,
+  joints = [],
+  jointSets = [],
+  qIndexParams,
+  rmrParams,
+  rockMassSummary,
+  onUpdateRockMassSummary,
+  savedProjects = [],
   embedded = false,
+  onSwitchToFaceSurface,
   onClose,
   onStatusMessage,
 }) => {
-  const [subTab, setSubTab] = useState<'profile_points' | 'quantities' | 'reasons'>('quantities');
+  const [subTab, setSubTab] = useState<'profile_points' | 'quantities' | 'reasons' | 'ai_predictor'>('quantities');
+  const [customNextPullPredictionNote, setCustomNextPullPredictionNote] = useState<string>('');
+  const [customMitigationNote, setCustomMitigationNote] = useState<string>('');
+
+  const aiOverbreakPrediction = useMemo(
+    () =>
+      computeAdvancedOverbreakPrediction(
+        geometry,
+        settings,
+        analysis,
+        joints,
+        jointSets,
+        qIndexParams || { rqd: 68, jn: 6, jr: 2, ja: 2, jw: 1, srf: 2.5, esr: 1.0 },
+        rmrParams || {
+          version: 'RMR89',
+          intactStrengthMPa: 75,
+          intactStrengthRating: 7,
+          rqdPercent: 68,
+          rqdRating: 13,
+          spacingMeters: 0.35,
+          spacingRating: 10,
+          conditionRating: 20,
+          conditionDescription: 'Slightly rough',
+          subRatings: {
+            persistenceRating: 4,
+            apertureRating: 4,
+            roughnessRating: 5,
+            infillingRating: 4,
+            weatheringRating: 5,
+          },
+          groundwaterInflowLPerMin10m: 2,
+          groundwaterRating: 15,
+          groundwaterDescription: 'Dry',
+          orientationAdjustment: -5,
+          orientationFavourability: 'Fair',
+          paramStatus: {
+            intactStrength: 'USER_ENTERED',
+            rqd: 'USER_ENTERED',
+            spacing: 'USER_ENTERED',
+            condition: 'USER_ENTERED',
+            groundwater: 'USER_ENTERED',
+            orientationAdjustment: 'USER_ENTERED',
+          },
+        },
+        rockMassSummary || {
+          rockType: settings.lithology || 'Quartzite',
+          rockUnit: 'Main Unit',
+          weatheringGrade: 'W2 (Slightly Weathered)',
+          strengthGrade: 'R4 (Strong, 50–100 MPa)',
+          foliationBeddingOrientation: '045° / 58°',
+          dominantSetOrientation: '132° / 68°',
+          rqdPercent: 68,
+          jointSetCountLabel: 'Three sets (J1, J2, J3)',
+          roughnessSummary: 'Rough undulating',
+          alterationInfillingSummary: 'Surface staining',
+          groundwaterCondition: 'Dry to Damp',
+          overbreakCondition: 'Minor wedge overbreak',
+          installedSupport: 'Systematic Rockbolts + 50mm Sfr',
+          geologistRemarks: '',
+        },
+        savedProjects
+      ),
+    [geometry, settings, analysis, joints, jointSets, qIndexParams, rmrParams, rockMassSummary, savedProjects]
+  );
+
+  const handleApplyAiOverbreakDiagnosisToAllZones = () => {
+    const nextOverrides: ConnectedSurveyProfile['zoneReasonOverrides'] = {
+      ...(surveyProfile.zoneReasonOverrides || {}),
+    };
+    aiOverbreakPrediction.zonePredictions.forEach((zp) => {
+      nextOverrides[zp.zoneId] = {
+        zoneId: zp.zoneId,
+        category: zp.predictedCategory,
+        reasonDetail: `${zp.primaryMechanism} — ${zp.detailedExplanation}`,
+        linkedJointSets: zp.controllingJointSets,
+      };
+    });
+
+    onUpdateSurveyProfile((prev) => ({
+      ...prev,
+      overallOverbreakCategory: aiOverbreakPrediction.overallDominantCategory,
+      overallOverbreakReason: aiOverbreakPrediction.advanceLevelRootCauseSummary,
+      zoneReasonOverrides: nextOverrides,
+    }));
+
+    if (rockMassSummary && onUpdateRockMassSummary) {
+      onUpdateRockMassSummary({
+        ...rockMassSummary,
+        overbreakCondition: `${aiOverbreakPrediction.overallDominantCategory} (${aiOverbreakPrediction.geologicalSharePct}% Geol / ${aiOverbreakPrediction.mechanicalSharePct}% Mech) · Next Pull Pred: ${aiOverbreakPrediction.nextPullPredictedOverbreakPct}% (${aiOverbreakPrediction.nextPullPredictedMaxRadialM}m max)`,
+      });
+    }
+
+    onStatusMessage?.(
+      `AI Overbreak Diagnosis Applied: ${aiOverbreakPrediction.overallDominantCategory} (${aiOverbreakPrediction.geologicalSharePct}% Geological / ${aiOverbreakPrediction.mechanicalSharePct}% Mechanical) + Next Pull Prediction (${aiOverbreakPrediction.nextPullPredictedOverbreakPct}%).`
+    );
+  };
   const [showImportBox, setShowImportBox] = useState<boolean>(false);
   const [importText, setImportText] = useState<string>(
     'CP1, -4.20, 0.00\nCP2, -4.35, 2.20\nCP3, -4.28, 4.25\nCP4, -3.15, 6.18\nCP5, 0.00, 7.62\nCP6, 3.28, 6.24\nCP7, 4.42, 4.20\nCP8, 4.02, 2.10\nCP9, 4.20, 0.00'
@@ -124,9 +241,10 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
     };
   }, [resizingState, dockSide]);
 
+  // Radial Overbreak (Crown, Left Wall & Right Wall Overbreak) is strictly plotted on the Tunnel Face ('face') cross-section
   const surfaceCPs = useMemo(
-    () => controlPoints.filter((c) => c.surface === activeSurface),
-    [controlPoints, activeSurface]
+    () => controlPoints.filter((c) => c.surface === 'face'),
+    [controlPoints]
   );
 
   const connectedIdSet = useMemo(
@@ -143,11 +261,12 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
     const sortedIds = sortControlPointsAroundPerimeter(surfaceCPs, geometry);
     onUpdateSurveyProfile((prev) => ({
       ...prev,
-      surface: activeSurface,
+      surface: 'face',
       orderedControlPointIds: sortedIds,
       isClosed: true,
       visible: true,
     }));
+    onSwitchToFaceSurface?.();
     onStatusMessage?.(
       `Connected ${sortedIds.length} survey control points (${sortedIds
         .map((id) => surfaceCPs.find((c) => c.id === id)?.label || id)
@@ -164,10 +283,11 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
     const ids = surfaceCPs.map((c) => c.id);
     onUpdateSurveyProfile((prev) => ({
       ...prev,
-      surface: activeSurface,
+      surface: 'face',
       orderedControlPointIds: ids,
       visible: true,
     }));
+    onSwitchToFaceSurface?.();
     onStatusMessage?.(
       `Connected ${ids.length} control points in sequence: ${surfaceCPs
         .map((c) => c.label)
@@ -237,7 +357,7 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
     const newCp: SurveyControlPoint = {
       id: `cp-ins-${Date.now()}`,
       label: `CP${surfaceCPs.length + 1}`,
-      surface: activeSurface,
+      surface: 'face',
       point: midPt,
       color: '#10B981',
       visible: true,
@@ -257,26 +377,27 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
     onStatusMessage?.(`Inserted ${newCp.label} at (${midPt.x.toFixed(2)}m, ${midPt.y.toFixed(2)}m).`);
   };
 
-  // Import survey points from text
+  // Import survey points from text (strictly onto Tunnel Face cross-section for Crown & Wall radial overbreak)
   const handleImportSurveyText = () => {
     const parsed = parseSurveyControlPointsFromText(
       importText,
-      activeSurface,
+      'face',
       surfaceCPs.length
     );
     if (parsed.length === 0) {
       onStatusMessage?.('No valid X, Y survey coordinates found in text.');
       return;
     }
-    const otherSurfaceCPs = controlPoints.filter((c) => c.surface !== activeSurface);
+    const otherSurfaceCPs = controlPoints.filter((c) => c.surface !== 'face');
     onUpdateControlPoints([...otherSurfaceCPs, ...parsed]);
     onUpdateSurveyProfile((prev) => ({
       ...prev,
-      surface: activeSurface,
+      surface: 'face',
       orderedControlPointIds: parsed.map((c) => c.id),
       isClosed: true,
       visible: true,
     }));
+    onSwitchToFaceSurface?.();
     setShowImportBox(false);
     onStatusMessage?.(
       `Imported & connected ${parsed.length} surveyed profile control points.`
@@ -373,6 +494,33 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
         </div>
       </div>
 
+      {/* Realistic Tunnel Geometry Rule Banner: Why Crown & Wall Overbreak is Plotted on Tunnel Face */}
+      {activeSurface !== 'face' ? (
+        <div className="mx-2.5 mt-2 p-2.5 rounded-lg bg-amber-950/80 border border-amber-500/60 text-amber-100 space-y-1.5">
+          <div className="text-[10px] font-black text-amber-300 uppercase tracking-wide">
+            Not Possible on Unwrapped {activeSurface === 'crown' ? 'Crown' : activeSurface === 'leftWall' ? 'Left Wall' : 'Right Wall'} View
+          </div>
+          <p className="text-[10px] leading-relaxed text-amber-100/90">
+            Radial Overbreak in the <strong>Crown</strong> and <strong>Walls</strong> cannot be geometrically plotted on a flat 2D unwrapped Wall/Crown plane. That is why{' '}
+            <strong>Crown Overbreak, Left Wall Overbreak &amp; Right Wall Overbreak are realistically plotted on the Tunnel Face (1. Face)</strong> cross-section!
+          </p>
+          {onSwitchToFaceSurface && (
+            <button
+              type="button"
+              onClick={onSwitchToFaceSurface}
+              className="w-full py-1.5 px-2.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-[10px] cursor-pointer"
+            >
+              Switch to 1. Face (Plot Crown &amp; Wall Overbreak) →
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="mx-2.5 mt-2 p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-[10px] text-emerald-200 leading-relaxed">
+          <strong className="text-emerald-300">Realistic Tunnel Shape (1. Face Cross-Section):</strong>{' '}
+          Crown Arch Overbreak, Left Wall Overbreak &amp; Right Wall Overbreak are plotted here on the Face cross-section (since radial overbreak is not geometrically possible on flat unwrapped Wall/Crown views).
+        </div>
+      )}
+
       {/* Quick Action Bar */}
       <div className="p-2.5 bg-slate-900/90 border-b border-slate-800 space-y-2">
         <div className="grid grid-cols-2 gap-1.5">
@@ -457,7 +605,7 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
       </div>
 
       {/* Sub-navigation Tabs */}
-      <div className="grid grid-cols-3 bg-[#0B0E14] border-b border-slate-800 p-1 gap-1">
+      <div className="grid grid-cols-4 bg-[#0B0E14] border-b border-slate-800 p-1 gap-1">
         <button
           type="button"
           onClick={() => setSubTab('quantities')}
@@ -467,7 +615,7 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          1. Quantities &amp; Vol
+          1. Quantities
         </button>
         <button
           type="button"
@@ -478,7 +626,7 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          2. Profile ({analysis.connectedPointsCount} CPs)
+          2. CPs ({analysis.connectedPointsCount})
         </button>
         <button
           type="button"
@@ -490,6 +638,18 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
           }`}
         >
           3. Reasons ({analysis.overbreakRegions.length + analysis.undercutRegions.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setSubTab('ai_predictor')}
+          className={`py-1.5 rounded text-[10px] font-bold transition-colors flex items-center justify-center gap-1 ${
+            subTab === 'ai_predictor'
+              ? 'bg-emerald-600 text-white'
+              : 'text-emerald-400 hover:text-emerald-200 bg-emerald-950/30'
+          }`}
+        >
+          <Sparkles className="w-3 h-3" />
+          4. AI Predict
         </button>
       </div>
 
@@ -935,6 +1095,35 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
 
         {subTab === 'reasons' && (
           <div className="space-y-3">
+            {/* One-Click AI Overbreak Root-Cause Diagnosis Banner */}
+            <div className="p-2.5 bg-emerald-950/30 border border-emerald-500/50 rounded space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-emerald-300 flex items-center gap-1">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  AI ROOT-CAUSE: {aiOverbreakPrediction.overallDominantCategory} ({aiOverbreakPrediction.geologicalSharePct}% GEOL / {aiOverbreakPrediction.mechanicalSharePct}% MECH)
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-300 leading-relaxed">
+                {aiOverbreakPrediction.advanceLevelRootCauseSummary}
+              </p>
+              <div className="flex items-center gap-1.5 pt-1">
+                <button
+                  type="button"
+                  onClick={handleApplyAiOverbreakDiagnosisToAllZones}
+                  className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold cursor-pointer"
+                >
+                  Apply AI Root-Cause Diagnosis to All Zones
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSubTab('ai_predictor')}
+                  className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-600/40 rounded text-[10px] font-semibold cursor-pointer"
+                >
+                  Advance Forecast →
+                </button>
+              </div>
+            </div>
+
             {/* Overall Default Overbreak & Undercut Reason Categories */}
             <div className="p-2.5 bg-slate-900 border border-slate-800 rounded space-y-2">
               <div className="text-[10px] font-bold text-cyan-400">
@@ -1118,6 +1307,148 @@ export const OverbreakAnalysisPanel: React.FC<OverbreakAnalysisPanelProps> = ({
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {subTab === 'ai_predictor' && (
+          <div className="space-y-3">
+            {/* 1. Advance-Level Root Cause Breakdown: Geological vs. Mechanical Overbreak */}
+            <div className="p-2.5 bg-slate-900 border border-emerald-500/50 rounded space-y-2">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                <span className="text-[10px] font-bold text-emerald-300 flex items-center gap-1">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  ADVANCE-LEVEL AI OVERBREAK ROOT-CAUSE DIAGNOSIS
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-700/60 text-[9px] font-bold">
+                  {aiOverbreakPrediction.overallDominantCategory === 'GEOLOGICAL'
+                    ? 'GEOLOGICAL DOMINANT'
+                    : 'MECHANICAL / BLASTING'}
+                </span>
+              </div>
+
+              {/* Progress Split Bar: Geological vs Mechanical */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-[10px] font-semibold">
+                  <span className="text-rose-300">
+                    Geological (Wedge/Joint/Shear): {aiOverbreakPrediction.geologicalSharePct}%
+                  </span>
+                  <span className="text-amber-300">
+                    Mechanical (Blast/Lookout): {aiOverbreakPrediction.mechanicalSharePct}%
+                  </span>
+                </div>
+                <div className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden flex border border-slate-800">
+                  <div
+                    style={{ width: `${aiOverbreakPrediction.geologicalSharePct}%` }}
+                    className="bg-rose-500 h-full"
+                  />
+                  <div
+                    style={{ width: `${aiOverbreakPrediction.mechanicalSharePct}%` }}
+                    className="bg-amber-500 h-full"
+                  />
+                </div>
+              </div>
+
+              <p className="text-[10px] text-slate-200 leading-relaxed bg-slate-950 p-2 rounded border border-slate-800">
+                {aiOverbreakPrediction.advanceLevelRootCauseSummary}
+              </p>
+
+              <button
+                type="button"
+                onClick={handleApplyAiOverbreakDiagnosisToAllZones}
+                className="w-full py-1.5 px-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold cursor-pointer shadow"
+              >
+                Apply AI Diagnosis &amp; Joint Links to All Overbreak Zones
+              </button>
+            </div>
+
+            {/* 2. Next-Pull Advance Overbreak Forecast (Editable by User) */}
+            <div className="p-2.5 bg-slate-900 border border-cyan-500/50 rounded space-y-2">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-1">
+                <span className="text-[10px] font-bold text-cyan-300">
+                  NEXT PULL ADVANCE FORECAST (+{(settings.roundLength || 3.5).toFixed(1)}m ROUND)
+                </span>
+                <span className="text-[10px] font-bold text-amber-300">
+                  Pred OB: {aiOverbreakPrediction.nextPullPredictedOverbreakPct}%
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-[10px]">
+                <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                  <div className="text-slate-400">Predicted Next-Pull Area</div>
+                  <div className="text-sm font-bold text-rose-300">
+                    {aiOverbreakPrediction.nextPullPredictedOverbreakAreaSqM.toFixed(2)} m² (
+                    {aiOverbreakPrediction.nextPullPredictedOverbreakPct}%)
+                  </div>
+                </div>
+                <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                  <div className="text-slate-400">Predicted Max Radial Depth</div>
+                  <div className="text-sm font-bold text-amber-300">
+                    {aiOverbreakPrediction.nextPullPredictedMaxRadialM.toFixed(2)} m
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-[10px] text-slate-300 bg-slate-950 p-2 rounded border border-slate-800">
+                <strong className="text-cyan-300 block mb-0.5">Critical Sectors Ahead:</strong>
+                {customNextPullPredictionNote || aiOverbreakPrediction.nextPullCriticalSectors}
+              </div>
+
+              <label className="block space-y-0.5">
+                <span className="text-[9px] text-slate-400">
+                  Recommended Drilling / Blasting &amp; Pre-Support Mitigation (User Editable):
+                </span>
+                <textarea
+                  rows={2}
+                  value={
+                    customMitigationNote || aiOverbreakPrediction.recommendedBlastingAndSupportMitigation
+                  }
+                  onChange={(e) => {
+                    setCustomMitigationNote(e.target.value);
+                    onUpdateSurveyProfile((prev) => ({
+                      ...prev,
+                      overallOverbreakReason: e.target.value,
+                    }));
+                  }}
+                  className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-[10px] text-slate-100"
+                />
+              </label>
+            </div>
+
+            {/* 3. Per-Zone AI Geological vs Mechanical Breakdown */}
+            <div className="space-y-2">
+              <div className="text-[10px] font-bold text-slate-300">
+                ZONE-BY-ZONE AI DIAGNOSTIC &amp; SPOT BOLTING REQUIREMENT
+              </div>
+              {aiOverbreakPrediction.zonePredictions.map((zp) => (
+                <div
+                  key={zp.zoneId}
+                  className="p-2.5 bg-slate-900 border border-slate-800 rounded space-y-1.5 text-[10px]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-rose-300">
+                      {zp.zoneId} · {zp.locationLabel}
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                        zp.predictedCategory === 'GEOLOGICAL'
+                          ? 'bg-rose-950 text-rose-300 border border-rose-700/60'
+                          : 'bg-amber-950 text-amber-300 border border-amber-700/60'
+                      }`}
+                    >
+                      {zp.predictedCategory} ({zp.confidencePct}% Conf)
+                    </span>
+                  </div>
+                  <div className="text-cyan-300 font-semibold">{zp.primaryMechanism}</div>
+                  <p className="text-slate-300 leading-relaxed">{zp.detailedExplanation}</p>
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-800 text-[9px] text-slate-400">
+                    <span>Controlling Sets: {zp.controllingJointSets}</span>
+                    <span className="text-emerald-300 font-bold">
+                      Spot Bolts Needed: {zp.recommendedSpotBolts} nos
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

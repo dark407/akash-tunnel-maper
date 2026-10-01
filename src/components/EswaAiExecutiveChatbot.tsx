@@ -42,11 +42,16 @@ import {
   loadAllContinuousStripDatasets,
   saveAllContinuousStripDatasets,
 } from '../engine/continuous3DStripEngine';
+import {
+  computeAdvancedOverbreakPrediction,
+  computeRockStrataSupportSpotBoltingAndFailureFos,
+} from '../engine/supportSpotBoltFailureEngine';
 import { EswaTunnelLogo } from './EswaBrandIdentity';
 import { useTheme } from '../context/ThemeContext';
 
 export type EngineeringExportTemplateId =
   | 'AUTO_BEST_TEMPLATE'
+  | 'SUPPORT_SPOTBOLT_FOS_TEMPLATE'
   | 'STRIP_PULL_LOG_TEMPLATE'
   | 'JOINT_DISCONTINUITY_TEMPLATE'
   | 'OVERBREAK_SUPPORT_BOQ_TEMPLATE'
@@ -121,6 +126,7 @@ interface EswaAiExecutiveChatbotProps {
 
 const TEMPLATE_LABELS: Record<EngineeringExportTemplateId, string> = {
   AUTO_BEST_TEMPLATE: 'Auto-Select Best Engineering Template',
+  SUPPORT_SPOTBOLT_FOS_TEMPLATE: 'Support System, Spot Bolting & Factor of Safety (FoS) Template',
   STRIP_PULL_LOG_TEMPLATE: '3D Continuous Strip Pull & Chainage Template',
   JOINT_DISCONTINUITY_TEMPLATE: 'ISRM Structural Joint & Discontinuity Template',
   OVERBREAK_SUPPORT_BOQ_TEMPLATE: 'Overbreak / Undercut & Support BOQ Template',
@@ -236,6 +242,48 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
     return n.toFixed(digits);
   };
 
+  // Live AI Overbreak Root-Cause & Advance Prediction + Support System, Spot Bolting & Failure FoS
+  const overbreakPrediction = useMemo(
+    () =>
+      computeAdvancedOverbreakPrediction(
+        geometry,
+        settings,
+        overbreakAnalysis,
+        joints,
+        jointSets,
+        qIndexParams,
+        rmrParams,
+        savedProjects
+      ),
+    [geometry, settings, overbreakAnalysis, joints, jointSets, qIndexParams, rmrParams, savedProjects]
+  );
+
+  const supportAndFos = useMemo(
+    () =>
+      computeRockStrataSupportSpotBoltingAndFailureFos(
+        geometry,
+        settings,
+        joints,
+        jointSets,
+        qIndexParams,
+        rmrParams,
+        rockMassSummary,
+        overbreakAnalysis,
+        savedProjects
+      ),
+    [
+      geometry,
+      settings,
+      joints,
+      jointSets,
+      qIndexParams,
+      rmrParams,
+      rockMassSummary,
+      overbreakAnalysis,
+      savedProjects,
+    ]
+  );
+
   // Build default initial welcome message with live data package ready to export
   const buildDefaultAuditPackage = (): EswaAiExtractedDataPackage => {
     const pulls = activeStripDs?.pulls || [];
@@ -312,6 +360,58 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
   ): EswaAiExtractedDataPackage => {
     const pulls = activeStripDs?.pulls || [];
     const stripTraces = activeStripDs?.traces || [];
+
+    if (category === 'SUPPORT_SPOTBOLT_FOS_TEMPLATE') {
+      return {
+        title:
+          customTitle ||
+          `${settings.tunnelName} — Support System, Spot Bolting & Failure Mode Factor of Safety Schedule`,
+        subtitle: `Chainage ${settings.faceChainage || settings.chainage} · Strata FoS = ${supportAndFos.strataSupportFactorOfSafety} (Target ≥ ${supportAndFos.requiredStrataFos}) · Total Bolts = ${supportAndFos.totalBoltsRequiredRound} Nos`,
+        templateType: 'SUPPORT_SPOTBOLT_FOS_TEMPLATE',
+        summaryMetrics: [
+          { label: 'Strata Support FoS', value: `${supportAndFos.strataSupportFactorOfSafety} (${supportAndFos.strataSafetyStatus})` },
+          { label: 'Support Capacity / Req', value: `${supportAndFos.installedSupportCapacityKpa} / ${supportAndFos.supportPressureDemandKpa} kPa` },
+          { label: 'Systematic Bolts', value: `${supportAndFos.systematicBoltsTotalRound} Nos (L=${supportAndFos.systematicBoltLengthM}m @ ${supportAndFos.systematicBoltSpacingM}m)` },
+          { label: 'AI Spot Bolts', value: `${supportAndFos.spotBoltsTotalRound} Nos (${supportAndFos.spotBoltLocations.length} Zones)` },
+          { label: 'Shotcrete / Mesh', value: `${supportAndFos.shotcreteThicknessMm}mm SFRS · ${supportAndFos.wireMeshLayers} Mesh` },
+          { label: 'Prev Pulls Avg Spot', value: `${supportAndFos.previousPullsSpotBoltSummary.avgSpotBoltsPerPull} Bolts/Pull` },
+        ],
+        columns: [
+          'Item / Failure / Spot ID',
+          'Location / Sector',
+          'Governing Sets / Coordinates',
+          'Unbolted FoS / Prev Pulls',
+          'Supported FoS / Bolts Req.',
+          'AI Engineering Reason & Recommendation',
+        ],
+        rows: [
+          [
+            'STRATA-SUPPORT',
+            'Full Arch Perimeter',
+            `Span ${fmtNum(geometry.width)}m × ${fmtNum(geometry.height)}m`,
+            `Demand: ${supportAndFos.supportPressureDemandKpa} kPa`,
+            `FoS = ${supportAndFos.strataSupportFactorOfSafety} (Cap ${supportAndFos.installedSupportCapacityKpa} kPa)`,
+            supportAndFos.supportCategoryLabel,
+          ],
+          ...supportAndFos.spotBoltLocations.map((sb) => [
+            sb.id,
+            sb.sectorLabel,
+            `X=${sb.coordinateX}m, Y=${sb.coordinateY}m (${sb.linkedJointSets})`,
+            sb.historicalReference,
+            `${sb.boltsRequired} Bolts (L=${sb.boltLengthMeters}m @ ${sb.installationAngleDeg}°)`,
+            sb.reasonChosen,
+          ]),
+          ...supportAndFos.failureModes.map((fm) => [
+            fm.id,
+            `${fm.failureTitle} (${fm.locationSector})`,
+            `${fm.governingSetsOrStrata} [${fm.blockMassTonnesOrStress}]`,
+            `Unbolted FoS = ${fm.fosUnbolted.toFixed(2)}`,
+            `Supported FoS = ${fm.fosSupported.toFixed(2)} (${fm.status})`,
+            fm.aiDataRecommendation,
+          ]),
+        ],
+      };
+    }
 
     if (category === 'STRIP_PULL_LOG_TEMPLATE') {
       return {
@@ -756,17 +856,12 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
       };
     }
 
-    // 3. Determine whether user is asking for specific topic or table/extraction
+    // 3. Determine whether user explicitly asked to display a table or schedule
     const wantsTableOrExtract =
-      qLower.includes('table') ||
+      qLower.includes('show table') ||
+      qLower.includes('data table') ||
       qLower.includes('schedule') ||
-      qLower.includes('extract') ||
-      qLower.includes('export') ||
-      qLower.includes('download') ||
-      qLower.includes('report') ||
-      qLower.includes('all data') ||
-      qLower.includes('summary') ||
-      qLower.includes('audit');
+      qLower.includes('boq table');
 
     const pulls = activeStripDs?.pulls || [];
     const stripTraces = activeStripDs?.traces || [];
@@ -777,6 +872,94 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
     const ucVol =
       overbreakAnalysis.undercutVolumeCubicMeters ??
       overbreakAnalysis.undercutAreaSqMeters * roundLen;
+
+    // Topic 1: Spot Bolting (AI location choice, reasons, previous spotbolt pull history, number of bolts required)
+    if (
+      qLower.includes('spot bolt') ||
+      qLower.includes('spotbolt') ||
+      qLower.includes('previous spot') ||
+      qLower.includes('bolts required') ||
+      qLower.includes('number of bolt') ||
+      (qLower.includes('bolt') && (qLower.includes('choose') || qLower.includes('location') || qLower.includes('reason') || qLower.includes('previous')))
+    ) {
+      const prevSum = supportAndFos.previousPullsSpotBoltSummary;
+      const spotLines = supportAndFos.spotBoltLocations
+        .map(
+          (sb) =>
+            `- **${sb.id} (${sb.sectorLabel} at X=${sb.coordinateX}m, Y=${sb.coordinateY}m)**: **${sb.boltsRequired} Spot Bolts Required** (L = ${sb.boltLengthMeters}m, Ø${sb.boltDiameterMm}mm @ ${sb.installationAngleDeg}°)\n  • *Reason Chosen*: ${sb.reasonChosen}\n  • *Previous Pull Data*: ${sb.historicalReference}`
+        )
+        .join('\n');
+      const histLines = prevSum.historicalRecords
+        .slice(0, 4)
+        .map(
+          (h) =>
+            `  • **${h.chainageLabel}** (${h.sector}): **${h.spotBoltsUsed} Spot Bolts** (L=${h.boltLengthM}m, OB=${h.overbreakM3}m³) — ${h.reason}`
+        )
+        .join('\n');
+
+      return {
+        reply: `**AI Spot Bolting Analysis & Historical Pull Correlation (${settings.faceChainage || settings.chainage}):**\n\n**1. Chosen Spot Bolting Locations & Bolts Required (Total = ${supportAndFos.spotBoltsTotalRound} Spot Bolts + ${supportAndFos.systematicBoltsTotalRound} Systematic Bolts = ${supportAndFos.totalBoltsRequiredRound} Bolts):**\n${spotLines}\n\n**2. Data Collected from Previous Spot-Bolt Pulls (${prevSum.totalPreviousPullsAnalyzed} Pulls Analyzed · Avg ${prevSum.avgSpotBoltsPerPull} Spot Bolts/Pull):**\n${histLines}\n\n*Note: You can modify and edit every spot bolt location, bolt count, length, and reason in **Step 5: Tables & Output → 3. Support System, Spot Bolting & FoS**.*`,
+        executedActions,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('SUPPORT_SPOTBOLT_FOS_TEMPLATE')
+          : undefined,
+      };
+    }
+
+    // Topic 2: Factor of Safety (Rock Strata Support System FoS, Wedge Failure FoS, Planar / Keyblock / Failure Modes)
+    if (
+      qLower.includes('factor of safety') ||
+      qLower.includes('fos') ||
+      qLower.includes('wedge') ||
+      qLower.includes('failure') ||
+      qLower.includes('strata') ||
+      qLower.includes('support system') ||
+      qLower.includes('where is support')
+    ) {
+      const fmLines = supportAndFos.failureModes
+        .map(
+          (fm) =>
+            `- **${fm.failureTitle} (${fm.locationSector})**:\n  • *Governing*: ${fm.governingSetsOrStrata} (${fm.blockMassTonnesOrStress})\n  • *Factor of Safety*: Unbolted **FoS = ${fm.fosUnbolted.toFixed(2)}** → Supported **FoS = ${fm.fosSupported.toFixed(2)}** (Required ≥ ${fm.requiredFos.toFixed(2)} · **${fm.status}**)\n  • *AI Recommendation*: ${fm.aiDataRecommendation}`
+        )
+        .join('\n');
+
+      return {
+        reply: `**Rock Strata Support System & Failure Mode Factor of Safety (FoS) Analysis:**\n\n**1. Where to Find & Edit Support System in Tables & Output:**\n- Open **Step 5: Tables & Output** and click Tab **3. Support System, Spot Bolting & FoS (AI + Editable)** (also printed directly on the **Final Output Sheet**).\n\n**2. Rock Strata Support System Factor of Safety:**\n- **Rock Load Support Demand ($P_{req}$)**: \`${supportAndFos.supportPressureDemandKpa} kPa\` (Barton Q = ${computedQValue}, RMR = ${computedRmrTotal})\n- **Installed Support Capacity ($P_{cap}$)**: \`${supportAndFos.installedSupportCapacityKpa} kPa\` (${supportAndFos.systematicBoltsTotalRound} Systematic Bolts L=${supportAndFos.systematicBoltLengthM}m @ ${supportAndFos.systematicBoltSpacingM}m c/c + ${supportAndFos.spotBoltsTotalRound} Spot Bolts + ${supportAndFos.shotcreteThicknessMm}mm SFRS${supportAndFos.wireMeshLayers > 0 ? ` + ${supportAndFos.wireMeshLayers} Layer Wire Mesh` : ''})\n- **Overall Rock Strata Support FoS**: **\`FoS = ${supportAndFos.strataSupportFactorOfSafety}\`** vs. Target \`${supportAndFos.requiredStrataFos.toFixed(2)}\` (**${supportAndFos.strataSafetyStatus}**)\n\n**3. Possible Failure Modes (Wedge, Planar, Keyblock, Buckling, Stress) Factor of Safety:**\n${fmLines}\n\n*All support parameters, bolt counts, and failure FoS values can be modified and edited by you in the Support System & FoS tab.*`,
+        executedActions,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('SUPPORT_SPOTBOLT_FOS_TEMPLATE')
+          : undefined,
+      };
+    }
+
+    // Topic 3: Overbreak Root Cause (Geological vs Mechanical/Blasting) & Advance Level Prediction
+    if (
+      qLower.includes('overbreak') ||
+      qLower.includes('undercut') ||
+      qLower.includes('mechanical') ||
+      qLower.includes('blasting') ||
+      qLower.includes('why overbreak') ||
+      qLower.includes('predict') ||
+      qLower.includes('advance')
+    ) {
+      const zoneLines =
+        overbreakPrediction.zonePredictions.length > 0
+          ? overbreakPrediction.zonePredictions
+              .map(
+                (zp) =>
+                  `- **${zp.zoneId} (${zp.locationLabel})**: **${zp.predictedCategory === 'GEOLOGICAL' ? 'GEOLOGICAL' : 'MECHANICAL / BLASTING'}** (Geo ${zp.geologicalScorePct}% / Mech ${zp.mechanicalScorePct}%) · Linked: \`${zp.linkedJointSets}\` · Spot Bolts: **${zp.recommendedSpotBolts} Nos**\n  • *Cause*: ${zp.advancedReasonDetail}`
+              )
+              .join('\n')
+          : `- Overall profile analyzed from Q=${computedQValue}, RMR=${computedRmrTotal}, and ${joints.length} mapped discontinuities.`;
+
+      return {
+        reply: `**AI Advanced Overbreak Root-Cause & Next-Advance Prediction (${settings.faceChainage || settings.chainage}):**\n\n**1. Why Overbreak Happened (Geological vs. Mechanical Classification):**\n- **Primary Diagnosis**: **${overbreakPrediction.primaryClassification.replace(/_/g, ' ')}** (Confidence: ${overbreakPrediction.confidencePct}%)\n- **Probability Breakdown**: **Geological = ${overbreakPrediction.geologicalProbabilityPct}%** | **Mechanical / Blasting = ${overbreakPrediction.mechanicalProbabilityPct}%**\n- **Measured Quantities**: Overbreak = **${fmtNum(overbreakAnalysis.overbreakAreaSqMeters)} m² (${fmtNum(overbreakAnalysis.overbreakPercentage, 1)}%)**, Vol = **${fmtNum(obVol)} m³** (Max radial +${fmtNum(overbreakAnalysis.maxRadialOverbreakMeters)}m) · Undercut = **${fmtNum(ucVol)} m³**\n\n**2. Geological vs. Mechanical Drivers:**\n- *Geological Drivers*: ${overbreakPrediction.geologicalDrivers.join(' ')}\n- *Mechanical / Blasting Drivers*: ${overbreakPrediction.mechanicalDrivers.join(' ')}\n\n**3. Zone-by-Zone Root-Cause Breakdown:**\n${zoneLines}\n\n**4. Advance-Level Prediction for Next Pull (${roundLen}m Advance):**\n- **Predicted Next-Pull Overbreak**: **${overbreakPrediction.predictedNextPullOverbreakPct}% (~${overbreakPrediction.predictedNextPullOverbreakM3} m³)**\n- **Critical Sectors at Risk**: ${overbreakPrediction.predictedCriticalSectors.join(', ')}\n- **Recommended Mitigation**: ${overbreakPrediction.recommendedBlastAndSupportMitigation}`,
+        executedActions,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('OVERBREAK_SUPPORT_BOQ_TEMPLATE')
+          : undefined,
+      };
+    }
 
     // Topic A: Geometry / Width / Height / Shape
     if (
@@ -812,18 +995,17 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
                 ? ` (${jointSets
                     .map(
                       (s) =>
-                        `${s.id}: ${Math.round(s.avgDipDirection ?? 0)}°/${Math.round(s.avgDip ?? 0)}°`
+                        `${s.id}: ${Math.round(s.avgDipDirection ?? 0)}°/${Math.round(s.avgDip ?? 0)}° (${s.roughness}, ${s.infilling})`
                     )
-                    .join(', ')})`
+                    .join('; ')})`
                 : ''
             }\n- **3D Strip Traces**: ${stripTraces.length} continuous traces`;
       return {
         reply: jointReply,
         executedActions,
-        extractedDataPackage:
-          wantsTableOrExtract || joints.length > 0 || stripTraces.length > 0
-            ? buildDataPackageForCategory('JOINT_DISCONTINUITY_TEMPLATE')
-            : undefined,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('JOINT_DISCONTINUITY_TEMPLATE')
+          : undefined,
       };
     }
 
@@ -838,29 +1020,10 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
       qLower.includes('rock mass')
     ) {
       return {
-        reply: `**Rock Mass Classification:**\n- **Barton Q-Value**: \`Q = ${computedQValue}\` (\`RQD = ${qIndexParams.rqd}%\`, \`Jn = ${qIndexParams.jn}\`, \`Jr = ${qIndexParams.jr}\`, \`Ja = ${qIndexParams.ja}\`, \`Jw = ${qIndexParams.jw}\`, \`SRF = ${qIndexParams.srf}\`)\n- **Bieniawski RMR₈₉**: \`${computedRmrTotal} / 100\``,
+        reply: `**Rock Mass Classification & Support Summary:**\n- **Barton Q-Value**: \`Q = ${computedQValue}\` (\`RQD = ${qIndexParams.rqd}%\`, \`Jn = ${qIndexParams.jn}\`, \`Jr = ${qIndexParams.jr}\`, \`Ja = ${qIndexParams.ja}\`, \`Jw = ${qIndexParams.jw}\`, \`SRF = ${qIndexParams.srf}\`)\n- **Bieniawski RMR₈₉**: \`${computedRmrTotal} / 100\`\n- **Support Prescription**: ${supportAndFos.supportCategoryLabel}\n- **Rock Strata Support FoS**: \`FoS = ${supportAndFos.strataSupportFactorOfSafety}\` (Capacity ${supportAndFos.installedSupportCapacityKpa} kPa vs Demand ${supportAndFos.supportPressureDemandKpa} kPa)`,
         executedActions,
         extractedDataPackage: wantsTableOrExtract
-          ? buildDataPackageForCategory('EXECUTIVE_PROJECT_AUDIT_TEMPLATE')
-          : undefined,
-      };
-    }
-
-    // Topic D: Overbreak / Undercut / Volume / Support / BOQ
-    if (
-      qLower.includes('overbreak') ||
-      qLower.includes('undercut') ||
-      qLower.includes('volume') ||
-      qLower.includes('support') ||
-      qLower.includes('bolt') ||
-      qLower.includes('shotcrete') ||
-      qLower.includes('boq')
-    ) {
-      return {
-        reply: `**Excavation & Support Quantities (Round = ${roundLen}m):**\n- **Design Area**: ${fmtNum(overbreakAnalysis.designAreaSqMeters)} m²\n- **Surveyed Area**: ${fmtNum(overbreakAnalysis.surveyedAreaSqMeters)} m²\n- **Overbreak**: ${fmtNum(overbreakAnalysis.overbreakAreaSqMeters)} m² (${fmtNum(overbreakAnalysis.overbreakPercentage, 1)}%) · Volume = ${fmtNum(obVol)} m³\n- **Undercut**: ${fmtNum(overbreakAnalysis.undercutAreaSqMeters)} m² (${fmtNum(overbreakAnalysis.undercutPercentage, 1)}%) · Volume = ${fmtNum(ucVol)} m³`,
-        executedActions,
-        extractedDataPackage: wantsTableOrExtract
-          ? buildDataPackageForCategory('OVERBREAK_SUPPORT_BOQ_TEMPLATE')
+          ? buildDataPackageForCategory('SUPPORT_SPOTBOLT_FOS_TEMPLATE')
           : undefined,
       };
     }
@@ -875,30 +1038,24 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
       const pullReply =
         pulls.length === 0
           ? `**3D Continuous Strip Logger (${activeStripDs?.tunnelLocationName || 'Main Heading'}):**\nCurrently **0 pull intervals** and **${stripTraces.length} traces** are logged. You can add pull intervals or draw traces in the 3D Continuous Logging workspace.`
-          : `**3D Continuous Strip Logger (${activeStripDs?.tunnelLocationName}):**\n- **Logged Pulls**: ${pulls.length} intervals (RD ${pulls[0]?.fromRd ?? 0}m to ${pulls[pulls.length - 1]?.toRd ?? 0}m)\n- **3D Structural Traces**: ${stripTraces.length}\n- **Lithology Zones**: ${activeStripDs?.lithologyZones.length || 0}`;
+          : `**3D Continuous Strip Logger (${activeStripDs?.tunnelLocationName}):**\n- **Logged Pulls**: ${pulls.length} intervals (RD ${pulls[0]?.fromRd ?? 0}m to ${pulls[pulls.length - 1]?.toRd ?? 0}m)\n- **3D Structural Traces**: ${stripTraces.length}\n- **Lithology Zones**: ${activeStripDs?.lithologyZones.length || 0}\n- **Historical Spot Bolting**: Avg ${supportAndFos.previousPullsSpotBoltSummary.avgSpotBoltsPerPull} spot bolts/pull across ${supportAndFos.previousPullsSpotBoltSummary.dominantHistoricalSector}`;
       return {
         reply: pullReply,
         executedActions,
-        extractedDataPackage:
-          wantsTableOrExtract || pulls.length > 0
-            ? buildDataPackageForCategory('STRIP_PULL_LOG_TEMPLATE')
-            : undefined,
+        extractedDataPackage: wantsTableOrExtract
+          ? buildDataPackageForCategory('STRIP_PULL_LOG_TEMPLATE')
+          : undefined,
       };
     }
 
-    // Default: Concise live status answer (only attaches table if user asked for data/report/extract)
-    const chosenTemplate: EngineeringExportTemplateId =
-      selectedTemplate !== 'AUTO_BEST_TEMPLATE'
-        ? selectedTemplate
-        : 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE';
-
-    const reply = `**Current Workspace Status:**\n- **TunnelProfile**: ${fmtNum(geometry.width)}m W × ${fmtNum(geometry.height)}m H (${fmtNum(overbreakAnalysis.designAreaSqMeters)} m²)\n- **Rock Mass**: Q = ${computedQValue} · RMR = ${computedRmrTotal}\n- **Mapped Data**: ${joints.length} face/wall joints · ${pulls.length} 3D strip pulls · ${stripTraces.length} 3D traces\n\nLet me know what specific data you want to inspect, or click **Extract as File** below if you want to export a report.`;
+    // Comprehensive intelligent synthesis for any general or multi-part question
+    const reply = `**ESWA AI Geotechnical & Support Analysis (${settings.faceChainage || settings.chainage}):**\n- **Overbreak Diagnosis & Next-Advance Prediction**: **${overbreakPrediction.primaryClassification.replace(/_/g, ' ')}** (Geological **${overbreakPrediction.geologicalProbabilityPct}%** vs. Mechanical/Blasting **${overbreakPrediction.mechanicalProbabilityPct}%**). Current Overbreak = **${fmtNum(overbreakAnalysis.overbreakPercentage, 1)}% (${fmtNum(obVol)} m³)**; Predicted Next Pull = **${overbreakPrediction.predictedNextPullOverbreakPct}% (${overbreakPrediction.predictedNextPullOverbreakM3} m³)**.\n- **Support System & Rock Strata FoS**: **${supportAndFos.supportCategoryLabel}** — **FoS = ${supportAndFos.strataSupportFactorOfSafety}** (Capacity ${supportAndFos.installedSupportCapacityKpa} kPa vs Demand ${supportAndFos.supportPressureDemandKpa} kPa).\n- **AI Spot Bolting**: **${supportAndFos.spotBoltsTotalRound} Spot Bolts** required across ${supportAndFos.spotBoltLocations.map((s) => `${s.sectorLabel} (${s.boltsRequired} Nos)`).join(', ')} (correlated with ${supportAndFos.previousPullsSpotBoltSummary.totalPreviousPullsAnalyzed} previous pulls).\n- **Governing Wedge Failure FoS**: Unbolted **FoS = ${supportAndFos.failureModes[0]?.fosUnbolted.toFixed(2)}** → Supported **FoS = ${supportAndFos.failureModes[0]?.fosSupported.toFixed(2)}** (${supportAndFos.failureModes[0]?.status}).`;
 
     return {
       reply,
       executedActions,
       extractedDataPackage: wantsTableOrExtract
-        ? buildDataPackageForCategory(chosenTemplate)
+        ? buildDataPackageForCategory('SUPPORT_SPOTBOLT_FOS_TEMPLATE')
         : undefined,
     };
   };
@@ -917,92 +1074,9 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
     setMessages((prev) => [...prev, userMsg]);
     if (!customPrompt) setInputPrompt('');
 
-    // Check if user directly typed a Step-2 file extraction command (e.g. "extract csv", "export dxf", "download word")
-    const qLower = textToSend.toLowerCase();
-    const lastModelMsg = [...messages].reverse().find((m) => m.role === 'model');
-    if (
-      qLower.includes('extract') ||
-      qLower.includes('export') ||
-      qLower.includes('download')
-    ) {
-      const targetPkg =
-        lastModelMsg?.extractedData ||
-        buildDataPackageForCategory(
-          qLower.includes('pull') || qLower.includes('strip')
-            ? 'STRIP_PULL_LOG_TEMPLATE'
-            : qLower.includes('joint')
-            ? 'JOINT_DISCONTINUITY_TEMPLATE'
-            : qLower.includes('overbreak') || qLower.includes('boq')
-            ? 'OVERBREAK_SUPPORT_BOQ_TEMPLATE'
-            : 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE'
-        );
-      const targetText = lastModelMsg?.text || textToSend;
-
-      if (qLower.includes('csv') || qLower.includes('excel')) {
-        handleExportFormat('CSV', targetText, targetPkg);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `ai-${Date.now()}`,
-            role: 'model',
-            text: `Extracted and downloaded **${targetPkg.title}** as **Excel / .CSV**.`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            engineLabel: 'ESWA AI',
-            extractedData: targetPkg,
-          },
-        ]);
-        return;
-      }
-      if (qLower.includes('doc') || qLower.includes('word')) {
-        handleExportFormat('DOC', targetText, targetPkg);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `ai-${Date.now()}`,
-            role: 'model',
-            text: `Extracted and downloaded **${targetPkg.title}** as **Word Report (.DOC)**.`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            engineLabel: 'ESWA AI',
-            extractedData: targetPkg,
-          },
-        ]);
-        return;
-      }
-      if (qLower.includes('dxf') || qLower.includes('cad')) {
-        handleExportFormat('DXF', targetText, targetPkg);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `ai-${Date.now()}`,
-            role: 'model',
-            text: `Extracted and downloaded **${targetPkg.title}** as **ESWACAD Drawing (.DXF)**.`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            engineLabel: 'ESWA AI',
-            extractedData: targetPkg,
-          },
-        ]);
-        return;
-      }
-      if (qLower.includes('pdf') || qLower.includes('sheet') || qLower.includes('print')) {
-        handleExportFormat('PRINT_SHEET', targetText, targetPkg);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `ai-${Date.now()}`,
-            role: 'model',
-            text: `Opened the printable **Engineering Sheet / PDF** view for **${targetPkg.title}**.`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            engineLabel: 'ESWA AI',
-            extractedData: targetPkg,
-          },
-        ]);
-        return;
-      }
-    }
-
     setIsThinking(true);
 
-    // Prepare compact live software context snapshot for Gemini API
+    // Prepare comprehensive live software context snapshot for Gemini API
     const softwareContext = {
       activeTunnel: {
         tunnelName: settings.tunnelName || 'Unassigned',
@@ -1034,7 +1108,9 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
         overbreakPct: overbreakAnalysis.overbreakPercentage,
         overbreakVolM3: overbreakAnalysis.overbreakVolumeCubicMeters,
         undercutVolM3: overbreakAnalysis.undercutVolumeCubicMeters,
+        aiOverbreakPrediction: overbreakPrediction,
       },
+      supportSystemSpotBoltingAndFailureFos: supportAndFos,
       mappedJointsSummary: {
         totalJoints: joints.length,
         jointSets: jointSets.map((s) => ({
@@ -1083,10 +1159,16 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
           executeSoftwareAuthorityActions(actions);
         }
 
-        const cat = (data.dataCategory as EngineeringExportTemplateId) || 'EXECUTIVE_PROJECT_AUDIT_TEMPLATE';
-        const pkg: EswaAiExtractedDataPackage | undefined = data.includeDataSchedule
-          ? buildDataPackageForCategory(cat)
-          : undefined;
+        const cat =
+          (data.dataCategory as EngineeringExportTemplateId) ||
+          'SUPPORT_SPOTBOLT_FOS_TEMPLATE';
+        const userExplicitlyAskedForTable =
+          textToSend.toLowerCase().includes('table') ||
+          textToSend.toLowerCase().includes('schedule');
+        const pkg: EswaAiExtractedDataPackage | undefined =
+          data.includeDataSchedule && userExplicitlyAskedForTable
+            ? buildDataPackageForCategory(cat)
+            : undefined;
 
         const aiMsg: EswaAiChatMessage = {
           id: `ai-${Date.now()}`,
@@ -1519,13 +1601,35 @@ export const EswaAiExecutiveChatbot: React.FC<EswaAiExecutiveChatbotProps> = ({
           {/* Chat Messages Stream (Clean & Uncluttered) */}
           <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3.5 text-xs">
             {messages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3 opacity-80">
+              <div className="h-full flex flex-col items-center justify-center text-center px-4 space-y-3">
                 <EswaTunnelLogo size="md" showBadge={false} />
-                <div className="space-y-1 max-w-xs">
-                  <div className="font-display font-bold text-sm">ESWA AI</div>
+                <div className="space-y-1 max-w-sm">
+                  <div className="font-display font-bold text-sm">ESWA AI Geotechnical Assistant</div>
                   <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Ask anything about your tunnel data, control software tools, or request a data table to extract as a file.
+                    Ask any question about Overbreak (Geological vs. Mechanical &amp; Advance Prediction), Spot Bolting locations &amp; historical pull data, Rock Strata Support Factor of Safety, or Wedge Failure FoS.
                   </p>
+                </div>
+                <div className="w-full max-w-md grid grid-cols-1 gap-1.5 text-left pt-1">
+                  {[
+                    'Why did overbreak happen (Geological vs Mechanical) & predict next advance?',
+                    'Analyze Spot Bolting locations, reasons & bolts required from previous pulls',
+                    'What is our Rock Strata Support System Factor of Safety & Wedge Failure FoS?',
+                    'Where is the Support System in Tables & Output and how can I edit it?',
+                  ].map((qPrompt) => (
+                    <button
+                      key={qPrompt}
+                      type="button"
+                      onClick={() => handleSendMessage(qPrompt)}
+                      className={`px-3 py-2 rounded-xl border text-[11px] font-medium text-left transition-colors cursor-pointer flex items-center justify-between gap-2 ${
+                        isLight
+                          ? 'bg-slate-50 hover:bg-sky-50 border-slate-200 text-slate-700 hover:text-sky-700'
+                          : 'bg-[#11192C] hover:bg-cyan-950/60 border-slate-800 hover:border-cyan-500/50 text-slate-200'
+                      }`}
+                    >
+                      <span>{qPrompt}</span>
+                      <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    </button>
+                  ))}
                 </div>
               </div>
             ) : (

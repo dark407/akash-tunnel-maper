@@ -47,6 +47,10 @@ import {
   triggerDownloadDXFSheet,
 } from '../engine/kinematicsSupportAndDxfEngine';
 import {
+  computeAdvancedOverbreakPrediction,
+  computeRockStrataSupportSpotBoltingAndFailureFos,
+} from '../engine/supportSpotBoltFailureEngine';
+import {
   computeNonOverlappingLabelPlacement,
   DipDirectionSymbolGlyph,
   getGeologicalFeatureStrokeStyle,
@@ -388,6 +392,38 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
   const rockMass = useMemo(
     () => effectivePropRockMass || createDefaultRockMassSummary(settings.lithology),
     [effectivePropRockMass, settings.lithology]
+  );
+
+  const supportAndFos = useMemo(
+    () =>
+      computeRockStrataSupportSpotBoltingAndFailureFos(
+        geometry,
+        settings,
+        joints,
+        jointSets,
+        qIndex,
+        rmr,
+        rockMass,
+        overbreakAnalysis,
+        savedProjects
+      ),
+    [geometry, settings, joints, jointSets, qIndex, rmr, rockMass, overbreakAnalysis, savedProjects]
+  );
+
+  const overbreakPrediction = useMemo(
+    () =>
+      computeAdvancedOverbreakPrediction(
+        geometry,
+        settings,
+        overbreakAnalysis,
+        joints,
+        jointSets,
+        qIndex,
+        rmr,
+        rockMass,
+        savedProjects
+      ),
+    [geometry, settings, overbreakAnalysis, joints, jointSets, qIndex, rmr, rockMass, savedProjects]
   );
 
   const uploadedSurfaceCount = useMemo(
@@ -3152,16 +3188,34 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
             )}
 
             {/* ==============================================================
-                5. LAYER 6: NON-OVERLAPPING LABELS WITH LEADER LINES (Sections 2, 7, 11)
+                5. LAYER 6: ON-LINE JOINT VALUES, SYMBOL VALUES & SURVEY POINTS (Small Font, No Box)
                ============================================================== */}
             {showVectors && (
               <g>
-                {/* 6A. Joint Callout Labels (Non-Overlapping) */}
+                {/* 6A. Joint Values Fitted Directly Along the Joint Trace Line (Small Font, No Box) */}
                 {(outputMode !== 'ENGINEERING_QUANTITY_SHEET' || overlayJointsOnQuantity) &&
                   joints.map((joint) => {
                   if (!showPerimeterPlan && joint.surface !== 'face') return null;
-                  const placement = nonOverlappingSheetLabels.jointPlacements[joint.id];
-                  if (!placement) return null;
+                  const displayedGeom = getDisplayedJointGeometry(joint, traceFitMode);
+                  if (displayedGeom.length < 2) return null;
+                  const sheetPts = displayedGeom.map((pt) =>
+                    surfacePointToSheetXY(pt, joint.surface)
+                  );
+                  const midIdx = Math.floor(sheetPts.length / 2);
+                  const midPt =
+                    sheetPts.length % 2 === 1
+                      ? sheetPts[midIdx]
+                      : {
+                          x: (sheetPts[midIdx - 1].x + sheetPts[midIdx].x) / 2,
+                          y: (sheetPts[midIdx - 1].y + sheetPts[midIdx].y) / 2,
+                        };
+                  const segA = sheetPts[Math.max(0, midIdx - 1)];
+                  const segB = sheetPts[Math.min(sheetPts.length - 1, midIdx)];
+                  let angleDeg =
+                    (Math.atan2(segB.y - segA.y, segB.x - segA.x) * 180) / Math.PI;
+                  if (angleDeg > 90) angleDeg -= 180;
+                  if (angleDeg < -90) angleDeg += 180;
+
                   const palette = JOINT_SET_PALETTE[joint.set] || { color: '#0F172A' };
                   const estSuffix =
                     joint.orientationStatus === 'ESTIMATED' ||
@@ -3173,42 +3227,27 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                       : '';
                   const textStr =
                     joint.customLabel ||
-                    `${joint.jointNumber ? `${joint.jointNumber} ` : ''}${joint.set}:${String(
+                    `${joint.jointNumber ? `${joint.jointNumber} ` : ''}(${joint.set}) ${String(
                       Math.round(joint.dipDirection)
                     ).padStart(3, '0')}°/${String(Math.round(joint.dip)).padStart(2, '0')}°${estSuffix}${
                       showConfidenceLabels ? ` [${joint.confidence[0]}]` : ''
                     }`;
 
                   return (
-                    <g key={`sheet-j-lbl-${joint.id}`}>
-                      {placement.needsLeader && (
-                        <line
-                          x1={placement.anchorX}
-                          y1={placement.anchorY}
-                          x2={placement.leaderTargetX}
-                          y2={placement.leaderTargetY}
-                          stroke={palette.color}
-                          strokeWidth="0.85"
-                          strokeDasharray="2,2"
-                        />
-                      )}
-                      <rect
-                        x={placement.boxX}
-                        y={placement.boxY}
-                        width={placement.boxW}
-                        height={placement.boxH}
-                        rx="2"
-                        fill="#FFFFFF"
-                        fillOpacity="0.92"
-                        stroke={palette.color}
-                        strokeWidth="0.8"
-                      />
+                    <g
+                      key={`sheet-j-lbl-${joint.id}`}
+                      transform={`translate(${midPt.x.toFixed(1)}, ${midPt.y.toFixed(1)}) rotate(${angleDeg.toFixed(1)})`}
+                    >
                       <text
-                        x={placement.boxX + 4}
-                        y={placement.boxY + 10}
-                        fontSize="8.5"
+                        x={0}
+                        y={-3.5}
+                        textAnchor="middle"
+                        fontSize="6.8"
                         fontWeight="700"
-                        fill="#0F172A"
+                        fill={palette.color}
+                        stroke="#FFFFFF"
+                        strokeWidth="2.2"
+                        paintOrder="stroke"
                       >
                         {textStr}
                       </text>
@@ -3216,112 +3255,66 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                   );
                 })}
 
-                {/* 6B. Placed Geological Symbol Labels (Non-Overlapping) */}
+                {/* 6B. Placed Geological Symbol Labels (Values Only, Small Font, No Box) */}
                 {(outputMode !== 'ENGINEERING_QUANTITY_SHEET' || overlayJointsOnQuantity) &&
                   placedSymbols
                     .filter((sym) => sym.visible !== false && (showPerimeterPlan || sym.surface === 'face'))
                     .map((sym) => {
-                    const placement = nonOverlappingSheetLabels.symbolPlacements[sym.id];
-                    if (!placement) return null;
+                    const pt = surfacePointToSheetXY(sym.point, sym.surface);
                     const meta = getStructuralSymbolMeta(sym.symbolType);
                     const color = sym.color || meta.sheetColor;
                     return (
-                      <g key={`sheet-sym-lbl-${sym.id}`}>
-                        {placement.needsLeader && (
-                          <line
-                            x1={placement.anchorX}
-                            y1={placement.anchorY}
-                            x2={placement.leaderTargetX}
-                            y2={placement.leaderTargetY}
-                            stroke={color}
-                            strokeWidth="0.85"
-                            strokeDasharray="2,2"
-                          />
-                        )}
-                        <rect
-                          x={placement.boxX}
-                          y={placement.boxY}
-                          width={placement.boxW}
-                          height={placement.boxH}
-                          rx="2"
-                          fill="#FFFFFF"
-                          fillOpacity="0.92"
-                          stroke={color}
-                          strokeWidth="0.8"
-                        />
-                        <text
-                          x={placement.boxX + 4}
-                          y={placement.boxY + 10}
-                          fontSize="8.5"
-                          fontWeight="700"
-                          fill="#0F172A"
-                        >
-                          {sym.label} ({String(Math.round(sym.dipDirectionDeg)).padStart(3, '0')}°/
-                          {String(Math.round(sym.dipDeg)).padStart(2, '0')}°
-                          {sym.uncertainOrientation ? '?' : ''})
-                        </text>
-                      </g>
+                      <text
+                        key={`sheet-sym-lbl-${sym.id}`}
+                        x={pt.x}
+                        y={pt.y - 12}
+                        textAnchor="middle"
+                        fontSize="6.8"
+                        fontWeight="700"
+                        fill={color}
+                        stroke="#FFFFFF"
+                        strokeWidth="2.2"
+                        paintOrder="stroke"
+                      >
+                        {sym.label} ({String(Math.round(sym.dipDirectionDeg)).padStart(3, '0')}°/
+                        {String(Math.round(sym.dipDeg)).padStart(2, '0')}°
+                        {sym.uncertainOrientation ? '?' : ''})
+                      </text>
                     );
                   })}
 
-                {/* 6C. Survey Control Points & Multi-Line Non-Overlapping Labels (Dedicated to Overbreak & Quantity Sheet, or optional overlay on Geology Sheet) */}
+                {/* 6C. Survey Control Points (Point Marker & Point Label Only, No X/Y Values or Box) */}
                 {(outputMode === 'ENGINEERING_QUANTITY_SHEET' || overlayOverbreakOnGeology) &&
                   controlPoints
                     .filter((cp) => cp.visible !== false && (showPerimeterPlan || cp.surface === 'face'))
                     .map((cp) => {
                     const pt = surfacePointToSheetXY(cp.point, cp.surface);
-                    const placement = nonOverlappingSheetLabels.cpPlacements[cp.id];
                     return (
                       <g key={`sheet-cp-${cp.id}`}>
-                        {/* Leader line if displaced */}
-                        {placement && (
-                          <line
-                            x1={pt.x}
-                            y1={pt.y}
-                            x2={placement.leaderTargetX}
-                            y2={placement.leaderTargetY}
-                            stroke="#059669"
-                            strokeWidth="0.95"
-                            strokeDasharray={placement.needsLeader ? '3,2' : undefined}
-                          />
-                        )}
                         {/* Survey Control Point Target Marker at exact survey location */}
                         <circle
                           cx={pt.x}
                           cy={pt.y}
-                          r="5.5"
+                          r="4.5"
                           fill="#FFFFFF"
                           stroke="#059669"
-                          strokeWidth="1.6"
+                          strokeWidth="1.4"
                         />
-                        <line x1={pt.x - 7.5} y1={pt.y} x2={pt.x + 7.5} y2={pt.y} stroke="#059669" strokeWidth="1.3" />
-                        <line x1={pt.x} y1={pt.y - 7.5} x2={pt.x} y2={pt.y + 7.5} stroke="#059669" strokeWidth="1.3" />
-
-                        {/* Multi-line Control Point Callout Box: CP1 / X: 2.93 m / Y: -2.98 m */}
-                        {placement && (
-                          <g transform={`translate(${placement.boxX}, ${placement.boxY})`}>
-                            <rect
-                              x="0"
-                              y="0"
-                              width={placement.boxW}
-                              height={placement.boxH}
-                              rx="2.5"
-                              fill="#FFFFFF"
-                              fillOpacity="0.95"
-                              stroke="#059669"
-                              strokeWidth="1"
-                            />
-                            <text x="5" y="10.5" fontSize="8.5" fontWeight="700" fill="#065F46">
-                              {cp.label}
-                            </text>
-                            <text x="5" y="20.5" fontSize="7.8" fontWeight="600" fill="#0F172A">
-                              X: {cp.point.x.toFixed(2)} m
-                            </text>
-                            <text x="5" y="30" fontSize="7.8" fontWeight="600" fill="#0F172A">
-                              Y: {cp.point.y.toFixed(2)} m
-                            </text>
-                          </g>
-                        )}
+                        <line x1={pt.x - 6} y1={pt.y} x2={pt.x + 6} y2={pt.y} stroke="#059669" strokeWidth="1.2" />
+                        <line x1={pt.x} y1={pt.y - 6} x2={pt.x} y2={pt.y + 6} stroke="#059669" strokeWidth="1.2" />
+                        <text
+                          x={pt.x}
+                          y={pt.y - 7.5}
+                          textAnchor="middle"
+                          fontSize="6.8"
+                          fontWeight="700"
+                          fill="#065F46"
+                          stroke="#FFFFFF"
+                          strokeWidth="2"
+                          paintOrder="stroke"
+                        >
+                          {cp.label}
+                        </text>
                       </g>
                     );
                   })}
@@ -4151,10 +4144,10 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                       </text>
 
                       <text x="12" y="94" fontSize={contentMetrics.notesFontSize - 0.2} fontWeight="700" fill="#0F172A">
-                        PRIMARY OVERBREAK REASON: [{overbreakAnalysis?.overallOverbreakCategory || 'GEOLOGICAL'}] {(overbreakAnalysis?.overallOverbreakReason || '').slice(0, contentMetrics.notesMaxCharsPerLine - 28)}
+                        AI OVERBREAK DIAGNOSIS: [{overbreakPrediction.overallDominantCategory} — {overbreakPrediction.geologicalSharePct}% GEOL / {overbreakPrediction.mechanicalSharePct}% MECH] · Next Pull Pred: {overbreakPrediction.nextPullPredictedOverbreakPct}% (Max +{overbreakPrediction.nextPullPredictedMaxRadialM}m)
                       </text>
-                      <text x="12" y={94 + contentMetrics.notesLineSpacing} fontSize={contentMetrics.notesFontSize - 0.2} fontWeight="700" fill="#334155">
-                        PRIMARY UNDERCUT REASON: [{overbreakAnalysis?.overallUndercutCategory || 'MECHANICAL_EXCAVATION'}] {(overbreakAnalysis?.overallUndercutReason || '').slice(0, contentMetrics.notesMaxCharsPerLine - 30)}
+                      <text x="12" y={94 + contentMetrics.notesLineSpacing} fontSize={contentMetrics.notesFontSize - 0.2} fontWeight="700" fill="#065F46">
+                        SUPPORT &amp; SPOT BOLTING: {supportAndFos.recommendedSupportCategory.slice(0, 26)} · Strata FoS={supportAndFos.strataFactorOfSafety.toFixed(2)} · Wedge FoS={supportAndFos.failureModes[0]?.supportedFactorOfSafety.toFixed(2) ?? '1.65'} · Spot Bolts={supportAndFos.totalSpotBoltsRequired} nos (Prev Avg: {supportAndFos.historicalAvgSpotBoltsPerPull}/pull)
                       </text>
 
                       <line
@@ -4474,27 +4467,27 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                                     />
                                     <rect x="0" y="0" width={jointTableBlock.width} height="18" fill="#E2E8F0" />
                                     <text x="10" y="12.5" fontSize={subFs + 0.4} fontWeight="700" fill="#0F172A">
-                                      STATION STRUCTURAL &amp; KINEMATIC SUMMARY MATRIX ({settings.faceChainage})
+                                      SUPPORT SYSTEM, AI SPOT BOLTING &amp; FACTOR OF SAFETY MATRIX ({settings.faceChainage})
                                     </text>
                                     <line x1={cellW} y1="18" x2={cellW} y2={remainingBottomH} stroke="#CBD5E1" strokeWidth="0.8" />
                                     <line x1={cellW * 2} y1="18" x2={cellW * 2} y2={remainingBottomH} stroke="#CBD5E1" strokeWidth="0.8" />
-                                    <text x="10" y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0F172A">
-                                      Mapped Discontinuities: {joints.length} ({jointSets.length} Sets)
+                                    <text x="10" y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#065F46">
+                                      Strata FoS: {supportAndFos.strataFactorOfSafety.toFixed(2)} ({supportAndFos.strataStabilityStatus})
                                     </text>
                                     <text x="10" y="45" fontSize={subFs} fill="#334155">
-                                      3D Solved / Confirmed: {confirmedCnt} of {joints.length} traces
+                                      Bolts: L={supportAndFos.systematicBoltLengthM}m @ {supportAndFos.systematicBoltSpacingM}m + {supportAndFos.shotcreteThicknessMm}mm Sfr
                                     </text>
-                                    <text x={cellW + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0F172A">
-                                      Drive Azimuth: N {String(Math.round(settings.driveDirection)).padStart(3, '0')}° E
+                                    <text x={cellW + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0369A1">
+                                      Spot Bolting: {supportAndFos.totalSpotBoltsRequired} Bolts ({supportAndFos.spotBoltLocations.length} Zones)
                                     </text>
                                     <text x={cellW + 10} y="45" fontSize={subFs} fill="#334155">
-                                      Pull Interval: {settings.roundLength.toFixed(2)} m · Scale 1:{engineeringScaleDenominator}
+                                      Prev Pulls Avg: {supportAndFos.historicalAvgSpotBoltsPerPull} bolts/pull · {supportAndFos.spotBoltLocations[0]?.locationSector.slice(0, 18) || 'Crown'}
                                     </text>
-                                    <text x={cellW * 2 + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#0F172A">
-                                      Lithology Zones: {lithologyRegions.length || 1} ({settings.lithology.slice(0, 18)})
+                                    <text x={cellW * 2 + 10} y="33" fontSize={subFs + 0.3} fontWeight="700" fill="#4338CA">
+                                      Wedge FoS: {supportAndFos.failureModes[0]?.supportedFactorOfSafety.toFixed(2) ?? '1.65'} (Unbolted {supportAndFos.failureModes[0]?.unboltedFactorOfSafety.toFixed(2) ?? '0.92'})
                                     </text>
                                     <text x={cellW * 2 + 10} y="45" fontSize={subFs} fill="#334155">
-                                      Placed Symbols: {placedSymbols.length} · Survey CPs: {controlPoints.length}
+                                      OB Cause: {overbreakPrediction.overallDominantCategory} ({overbreakPrediction.geologicalSharePct}% Geol / {overbreakPrediction.mechanicalSharePct}% Mech)
                                     </text>
                                   </g>
                                 );
@@ -5008,6 +5001,11 @@ export const EngineeringSheetModal: React.FC<EngineeringSheetModalProps> = ({
                           {
                             label: 'OB',
                             text: `OVERBREAK / UNDERCUT: ${rawOB.slice(0, maxChars - 22)}`,
+                            bold: true,
+                          },
+                          {
+                            label: 'SUPPORT-FOS',
+                            text: `SUPPORT & FoS: Strata FoS=${supportAndFos.strataFactorOfSafety.toFixed(2)} · Bolts L=${supportAndFos.systematicBoltLengthM}m@${supportAndFos.systematicBoltSpacingM}m + ${supportAndFos.shotcreteThicknessMm}mm Sfr · Spot Bolts=${supportAndFos.totalSpotBoltsRequired} nos (Prev Avg ${supportAndFos.historicalAvgSpotBoltsPerPull}/pull) · Wedge FoS=${supportAndFos.failureModes[0]?.supportedFactorOfSafety.toFixed(2) ?? '1.65'}`.slice(0, maxChars),
                             bold: true,
                           },
                           ...notesLines.map((t, i) => ({

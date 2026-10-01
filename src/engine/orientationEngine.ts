@@ -1,5 +1,6 @@
 import {
   CameraCalibration,
+  GeologicalFeatureType,
   GeometricConfidenceLevel,
   Joint,
   JointConfidenceBreakdown,
@@ -1156,11 +1157,83 @@ export const JOINT_SET_PALETTE: Record<string, { color: string; defaultLabel: st
   F1: { color: '#E11D48', defaultLabel: 'F1 (Shear / Fault Zone)' },
 };
 
+export function assignJointSetBy10DegTolerance(
+  dipDirection: number,
+  dip: number,
+  featureType: GeologicalFeatureType,
+  existingJoints: Joint[],
+  fallbackSetId = 'J1'
+): string {
+  if (featureType === 'bedding' || featureType === 'shale_band' || featureType === 'foliation') {
+    return 'J0';
+  }
+  if (featureType === 'fault' || featureType === 'shear' || featureType === 'seam') {
+    return 'F1';
+  }
+
+  // Group existing joints by set to compute each set's mean Dip Direction & Dip
+  const setGroups = new Map<
+    string,
+    { dipSum: number; sinSum: number; cosSum: number; count: number }
+  >();
+  for (const j of existingJoints) {
+    if (!j.set || j.set === 'J0' || j.set === 'F1') continue;
+    const g = setGroups.get(j.set) || { dipSum: 0, sinSum: 0, cosSum: 0, count: 0 };
+    g.dipSum += j.dip;
+    const rad = (j.dipDirection * Math.PI) / 180;
+    g.sinSum += Math.sin(rad);
+    g.cosSum += Math.cos(rad);
+    g.count += 1;
+    setGroups.set(j.set, g);
+  }
+
+  let bestSet: string | null = null;
+  let bestCombined = Infinity;
+
+  for (const [setId, g] of setGroups.entries()) {
+    const avgDip = g.dipSum / g.count;
+    const avgDipDir = normalizeAzimuth((Math.atan2(g.sinSum, g.cosSum) * 180) / Math.PI);
+    const dDip = Math.abs(dip - avgDip);
+    const rawAzDiff = Math.abs(dipDirection - avgDipDir);
+    const dAz = Math.min(rawAzDiff, 360 - rawAzDiff);
+
+    // Strictly check ±10° dip direction and ±10° dip tolerance
+    if (dAz <= 10.5 && dDip <= 10.5) {
+      const score = Math.hypot(dAz, dDip);
+      if (score < bestCombined) {
+        bestCombined = score;
+        bestSet = setId;
+      }
+    }
+  }
+
+  if (bestSet) return bestSet;
+
+  // Also check individual existing joints within ±10° dip direction and ±10° dip
+  for (const j of existingJoints) {
+    if (!j.set || j.set === 'J0' || j.set === 'F1') continue;
+    const dDip = Math.abs(dip - j.dip);
+    const rawAzDiff = Math.abs(dipDirection - j.dipDirection);
+    const dAz = Math.min(rawAzDiff, 360 - rawAzDiff);
+    if (dAz <= 10.5 && dDip <= 10.5) {
+      return j.set;
+    }
+  }
+
+  // Otherwise assign the next unused set ID J1..J5
+  const usedSets = new Set(Array.from(setGroups.keys()));
+  for (const candidate of ['J1', 'J2', 'J3', 'J4', 'J5']) {
+    if (!usedSets.has(candidate)) return candidate;
+  }
+  return fallbackSetId;
+}
+
 /**
  * SECTION 23: ROBUST 3D SPHERICAL FISHER VECTOR STATISTICS & TRUE NORMAL SPACING
  * Computes the representative joint-set orientation using 3D unit normal vector
  * summation with Huber outlier suppression, Fisher concentration kappa, and 95%
  * confidence cone alpha_95.
+ * Groups joints whose Dip Direction is within ±10° and Dip is within ±10° into the same Joint Set.
  */
 export function clusterJointsIntoSets(
   joints: Joint[],
@@ -1181,17 +1254,25 @@ export function clusterJointsIntoSets(
   const updatedJoints: Joint[] = joints.map((j) => ({ ...j }));
 
   for (const joint of updatedJoints) {
-    if (joint.featureType === 'bedding' || joint.featureType === 'shale_band') {
+    if (
+      joint.featureType === 'bedding' ||
+      joint.featureType === 'shale_band' ||
+      joint.featureType === 'foliation'
+    ) {
       joint.set = 'J0';
       continue;
     }
-    if (joint.featureType === 'fault' || joint.featureType === 'shear') {
+    if (
+      joint.featureType === 'fault' ||
+      joint.featureType === 'shear' ||
+      joint.featureType === 'seam'
+    ) {
       joint.set = 'F1';
       continue;
     }
 
     let matchedCluster = null;
-    let bestAngDiff = 26;
+    let bestScore = Infinity;
 
     for (const c of clusters) {
       const avgDip = c.dipSum / c.members.length;
@@ -1201,14 +1282,22 @@ export function clusterJointsIntoSets(
       const dDip = Math.abs(joint.dip - avgDip);
       const rawAzDiff = Math.abs(joint.dipDirection - avgDipDir);
       const dAz = Math.min(rawAzDiff, 360 - rawAzDiff);
-      const dTrace = Math.min(
-        Math.abs(joint.traceAngle - c.members[0].traceAngle),
-        180 - Math.abs(joint.traceAngle - c.members[0].traceAngle)
-      );
-      const combinedDiff = Math.min(Math.hypot(dDip, dAz * 0.65), dTrace * 1.1);
-      if (combinedDiff < bestAngDiff) {
-        bestAngDiff = combinedDiff;
-        matchedCluster = c;
+
+      // Also check if within ±10° of any member in the cluster
+      const matchesMember10Deg = c.members.some((m) => {
+        const mdDip = Math.abs(joint.dip - m.dip);
+        const mRawAz = Math.abs(joint.dipDirection - m.dipDirection);
+        const mdAz = Math.min(mRawAz, 360 - mRawAz);
+        return mdAz <= 10.5 && mdDip <= 10.5;
+      });
+
+      // Rule: ±10° Dip Direction and ±10° Dip are considered the same Joint Set
+      if ((dAz <= 10.5 && dDip <= 10.5) || matchesMember10Deg) {
+        const score = Math.hypot(dAz, dDip);
+        if (score < bestScore) {
+          bestScore = score;
+          matchedCluster = c;
+        }
       }
     }
 

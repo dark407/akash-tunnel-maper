@@ -522,37 +522,62 @@ export function buildProjectNetworkCanvasLayout(
     const baseAz = ds.pulls[0]?.driveAzimuthDeg ?? 160;
 
     const getRawAzAtRd = (rd: number): number => {
+      if (ds.pulls.length === 0) return baseAz;
       for (const p of ds.pulls) {
         if (rd >= p.fromRd && rd <= p.toRd) return p.driveAzimuthDeg;
       }
-      return baseAz;
+      if (rd < ds.pulls[0].fromRd) return ds.pulls[0].driveAzimuthDeg;
+      return ds.pulls[ds.pulls.length - 1].driveAzimuthDeg;
     };
 
     const getSmoothAzAtRd = (rd: number): number => {
-      const r = 2.0;
-      let sum = 0;
-      let wSum = 0;
-      for (let i = -3; i <= 3; i++) {
-        const w = Math.cos((i / 3) * (Math.PI / 2));
-        sum += getRawAzAtRd(rd + (i / 3) * r) * w;
-        wSum += w;
+      const r = 3.5;
+      let sinSum = 0;
+      let cosSum = 0;
+      const samplesCount = 11;
+      for (let i = -samplesCount; i <= samplesCount; i++) {
+        const offsetRd = rd + (i / samplesCount) * r;
+        const rawAz = getRawAzAtRd(offsetRd);
+        const relDeg = ((((rawAz - baseAz) % 360) + 540) % 360) - 180;
+        const relRad = (relDeg * Math.PI) / 180;
+        const w = 0.5 * (1 + Math.cos((i / samplesCount) * Math.PI));
+        sinSum += Math.sin(relRad) * w;
+        cosSum += Math.cos(relRad) * w;
       }
-      return wSum > 0 ? sum / wSum : getRawAzAtRd(rd);
+      const meanRelRad = Math.atan2(sinSum, cosSum);
+      const meanRelDeg = (meanRelRad * 180) / Math.PI;
+      return baseAz + meanRelDeg;
     };
 
     const samples: SmoothRibbonSample[] = [];
     let curX = startX;
     let curY = startY;
+    const minSafeRadiusPx = Math.max(stripHeightPx * 0.85, 160);
+    const maxVisualBendRad = (35 * Math.PI) / 180;
+    let currentAngleRad = initialHeadingRad;
 
     for (let i = 0; i < numSteps; i++) {
       const rd = Math.min(endRd, startRd + i * stepM);
       const smoothAz = getSmoothAzAtRd(rd);
       const deltaDeg = smoothAz - baseAz;
-      const angleRad = initialHeadingRad + ((deltaDeg * 2.5) * Math.PI) / 180;
-      const tx = Math.cos(angleRad);
-      const ty = Math.sin(angleRad);
-      const nx = -Math.sin(angleRad);
-      const ny = Math.cos(angleRad);
+      const targetAngleRad =
+        initialHeadingRad + maxVisualBendRad * Math.tanh((deltaDeg * 1.35) / 28);
+
+      if (i === 0) {
+        currentAngleRad = initialHeadingRad;
+      } else {
+        const prevRd = Math.min(endRd, startRd + (i - 1) * stepM);
+        const dS = Math.max(0.5, (rd - prevRd) * pxPerRdM);
+        const maxStepRad = dS / minSafeRadiusPx;
+        const diffRad = targetAngleRad - currentAngleRad;
+        const clampedStepRad = Math.max(-maxStepRad, Math.min(maxStepRad, diffRad));
+        currentAngleRad += clampedStepRad;
+      }
+
+      const tx = Math.cos(currentAngleRad);
+      const ty = Math.sin(currentAngleRad);
+      const nx = -Math.sin(currentAngleRad);
+      const ny = Math.cos(currentAngleRad);
 
       samples.push({
         rd,
@@ -562,7 +587,7 @@ export function buildProjectNetworkCanvasLayout(
         ty,
         nx,
         ny,
-        azimuthDeg: smoothAz,
+        azimuthDeg: ((smoothAz % 360) + 360) % 360,
         deltaDeg,
       });
 

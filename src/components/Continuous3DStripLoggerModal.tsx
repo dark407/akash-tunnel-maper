@@ -25,6 +25,7 @@ import {
 import { ThemeToggleButton, useTheme } from '../context/ThemeContext';
 import { EswaTunnelLogo } from './EswaBrandIdentity';
 import {
+  buildAiPatternSmoothCurvePoints,
   buildSmoothRibbonTransform,
   ContinuousPullRecord,
   ContinuousStripLithologyZone,
@@ -34,6 +35,8 @@ import {
   getDefaultSheetConfig,
   loadAllContinuousStripDatasets,
   normalizePullsWithMissingGaps,
+  resolveStripTraceColor,
+  rotateUnwrapped2DTo3DClockwise90,
   runAiTrendAlignmentOnDataset,
   saveAllContinuousStripDatasets,
   SheetCustomizationConfig,
@@ -107,7 +110,7 @@ const DEFAULT_CAD_LAYERS: CadLayerVisibilityState = {
   aiRawGhost: true,
   junctions: true,
   aiCrossProj: true,
-  foliationHatch: true,
+  foliationHatch: false,
 };
 
 export interface Continuous3DStripLoggerModalProps {
@@ -172,6 +175,7 @@ export const Continuous3DStripLoggerModal: React.FC<
   rockMassSummary,
   photos,
   savedProjects,
+  onSelectSurface,
 }) => {
   const [datasets, setDatasets] = useState<ContinuousTunnelStripDataset[]>(() =>
     loadAllContinuousStripDatasets()
@@ -180,17 +184,18 @@ export const Continuous3DStripLoggerModal: React.FC<
     'dataset-fresh-workspace'
   );
 
-  // Main View Switcher: 'CANVAS' (Main Strip Canvas Only) vs 'EXPORT_STUDIO' (Printable Sheets & Multi-Page Alignment)
-  const [workspaceView, setWorkspaceView] = useState<'CANVAS' | 'EXPORT_STUDIO'>(
-    'CANVAS'
-  );
+  // Main View Switcher: 'CANVAS' (Main 3D Strip Canvas), 'UNWRAPPED_WALL_CROWN' (Unwrapped Left Wall / Crown / Right Wall Inspector), or 'EXPORT_STUDIO'
+  const [workspaceView, setWorkspaceView] = useState<
+    'CANVAS' | 'UNWRAPPED_WALL_CROWN' | 'EXPORT_STUDIO'
+  >('CANVAS');
+  const [showWallCrownZoneBands, setShowWallCrownZoneBands] = useState<boolean>(true);
 
   // Scope Switcher: 'SINGLE_LOCATION' vs 'PROJECT_NETWORK' (All Project Tunnels & Intersections)
   const [canvasScope, setCanvasScope] = useState<CanvasScopeMode>('SINGLE_LOCATION');
 
-  // Canvas Display Modes
+  // Canvas Display Modes (Default to 1:1 Exact Unwrapped Image Canvas without space filling)
   const [canvasDriveMode, setCanvasDriveMode] = useState<CanvasDriveMode>(
-    'SMOOTH_REALISTIC_CURVE'
+    'STRAIGHTENED_1M_CANVAS'
   );
   const [aiViewMode, setAiViewMode] = useState<AiAlignViewMode>('SPLIT_GHOST');
   const [aiAlignBannerMsg, setAiAlignBannerMsg] = useState<string | null>(null);
@@ -1072,25 +1077,43 @@ export const Continuous3DStripLoggerModal: React.FC<
               360
           );
 
-        // Match closest learned cluster if within 45 deg, or learn as new variation
-        let bestCluster: LearnedJointSetCluster | null = null;
-        let bestDiff = 999;
-        for (const cl of aiBrain.learnedClusters) {
-          const diff = Math.min(
-            Math.abs(cl.meanDipDir - rawDipDir),
-            360 - Math.abs(cl.meanDipDir - rawDipDir)
+        // Match existing trace in dataset within ±10° Dip Direction and ±10° Dip first!
+        let matchedBy10Deg: ContinuousStripTrace | null = null;
+        for (const existingTr of activeDataset.traces) {
+          const ddDiff = Math.min(
+            Math.abs((existingTr.dipDirectionDeg || 0) - rawDipDir),
+            360 - Math.abs((existingTr.dipDirectionDeg || 0) - rawDipDir)
           );
-          if (diff < bestDiff) {
-            bestDiff = diff;
-            bestCluster = cl;
+          const dDiff = Math.abs((existingTr.dipDeg || 0) - inferredDip);
+          if (ddDiff <= 10 && dDiff <= 10) {
+            matchedBy10Deg = existingTr;
+            break;
           }
         }
-        if (bestCluster && bestDiff <= 48) {
-          finalSetId = bestCluster.setId;
-          finalStructure = bestCluster.structureType;
-          dipDir = Math.round(bestCluster.meanDipDir * 0.65 + rawDipDir * 0.35) % 360;
-          dipVal = Math.round(bestCluster.meanDip * 0.6 + inferredDip * 0.4);
+
+        if (matchedBy10Deg) {
+          finalSetId = matchedBy10Deg.setId;
+          finalStructure = matchedBy10Deg.structureType;
+          dipDir = rawDipDir;
+          dipVal = inferredDip;
         } else {
+          // Also check learned clusters within ±10° tolerance
+          let bestCluster: LearnedJointSetCluster | null = null;
+          for (const cl of aiBrain.learnedClusters) {
+            const diffDir = Math.min(
+              Math.abs(cl.meanDipDir - rawDipDir),
+              360 - Math.abs(cl.meanDipDir - rawDipDir)
+            );
+            const diffDip = Math.abs(cl.meanDip - inferredDip);
+            if (diffDir <= 10 && diffDip <= 10) {
+              bestCluster = cl;
+              break;
+            }
+          }
+          if (bestCluster) {
+            finalSetId = bestCluster.setId;
+            finalStructure = bestCluster.structureType;
+          }
           dipDir = rawDipDir;
           dipVal = inferredDip;
         }
@@ -1098,9 +1121,22 @@ export const Continuous3DStripLoggerModal: React.FC<
         setNewTraceSetId(finalSetId);
         setNewTraceStructure(finalStructure);
         setNewTraceOrientation(finalOrient);
+      } else {
+        // Even if autoPredict is off, check if manual dipDir/dipVal matches an existing set within ±10°
+        for (const existingTr of activeDataset.traces) {
+          const ddDiff = Math.min(
+            Math.abs((existingTr.dipDirectionDeg || 0) - dipDir),
+            360 - Math.abs((existingTr.dipDirectionDeg || 0) - dipDir)
+          );
+          const dDiff = Math.abs((existingTr.dipDeg || 0) - dipVal);
+          if (ddDiff <= 10 && dDiff <= 10) {
+            finalSetId = existingTr.setId;
+            break;
+          }
+        }
       }
 
-      const newTr: ContinuousStripTrace = {
+      const draftTraceObj: ContinuousStripTrace = {
         id: `tr-${Date.now()}`,
         structureType: finalStructure,
         setId: finalSetId,
@@ -1110,6 +1146,18 @@ export const Continuous3DStripLoggerModal: React.FC<
         fillingThickness: newTraceFilling,
         rawPoints: finalGeometryPoints.map((p) => ({ ...p })),
         points: finalGeometryPoints.map((p) => ({ ...p })),
+      };
+      const smoothedPts = buildAiPatternSmoothCurvePoints(
+        draftTraceObj,
+        activeDataset.traces,
+        totalPerimM,
+        false
+      );
+
+      const newTr: ContinuousStripTrace = {
+        ...draftTraceObj,
+        points: smoothedPts,
+        aiAlignedPoints: smoothedPts,
       };
       updateActiveDataset((prev) => ({
         ...prev,
@@ -1479,7 +1527,7 @@ export const Continuous3DStripLoggerModal: React.FC<
           </div>
         </div>
 
-        {/* Right: Canvas vs Export Studio + Theme + Close */}
+          {/* Right: Canvas vs Unwrapped Wall & Crown vs Export Studio + Close */}
         <div className="flex items-center gap-2">
           <div
             className={`flex items-center border rounded-lg p-0.5 ${
@@ -1497,7 +1545,21 @@ export const Continuous3DStripLoggerModal: React.FC<
               }`}
             >
               <PenTool className="w-3.5 h-3.5" />
-              CAD Canvas
+              3D Strip Canvas
+            </button>
+            <button
+              onClick={() => setWorkspaceView('UNWRAPPED_WALL_CROWN')}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-bold flex items-center gap-1.5 cursor-pointer ${
+                workspaceView === 'UNWRAPPED_WALL_CROWN'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : isLight
+                  ? 'text-indigo-700 hover:text-indigo-900 bg-indigo-50/70'
+                  : 'text-indigo-300 hover:text-white bg-indigo-950/50'
+              }`}
+              title="See Unwrapped Left Wall, Crown Arch, and Right Wall Surfaces (3D is strictly Wall & Crown only)"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              Unwrapped Wall &amp; Crown
             </button>
             <button
               onClick={() => setWorkspaceView('EXPORT_STUDIO')}
@@ -1546,6 +1608,779 @@ export const Continuous3DStripLoggerModal: React.FC<
           }
           onBackToCanvas={() => setWorkspaceView('CANVAS')}
         />
+      ) : workspaceView === 'UNWRAPPED_WALL_CROWN' ? (
+        /* ====================================================================
+           VIEW A2: UNWRAPPED WALL & CROWN SURFACE ROLLOUT VIEW
+           Strictly displays Left Wall, Crown Arch, and Right Wall (never Face)
+           ==================================================================== */
+        <div
+          className={`flex-1 overflow-y-auto p-4 space-y-4 ${
+            isLight ? 'bg-slate-100 text-slate-900' : 'bg-[#070B14] text-slate-100'
+          }`}
+        >
+          {/* Top Explanatory & Action Banner */}
+          <div
+            className={`rounded-xl border p-3.5 flex flex-wrap items-center justify-between gap-3 ${
+              isLight
+                ? 'bg-white border-indigo-200 shadow-xs'
+                : 'bg-[#0F172A] border-indigo-500/40 shadow-lg'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400 font-black text-xs">
+                3D
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-black tracking-wide uppercase">
+                    Unwrapped Wall &amp; Crown Surface Rollout (Left Wall · Crown Arch · Right Wall)
+                  </h3>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                    FACE TRACES EXCLUDED FROM 3D
+                  </span>
+                </div>
+                <p
+                  className={`text-xs mt-0.5 ${
+                    isLight ? 'text-slate-600' : 'text-slate-400'
+                  }`}
+                >
+                  3D tunnel logging is strictly constructed from unwrapped{' '}
+                  <strong>Left Wall</strong>, <strong>Crown / Arch</strong>, and{' '}
+                  <strong>Right Wall</strong> traces. Tunnel Face traces belong to the 2D cross-section face only and are never projected onto the 3D perimeter strip.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {onSelectSurface && (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => {
+                      onSelectSurface('leftWall');
+                      onClose();
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Trace Left Wall in 2D
+                  </button>
+                  <button
+                    onClick={() => {
+                      onSelectSurface('crown');
+                      onClose();
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Trace Crown in 2D
+                  </button>
+                  <button
+                    onClick={() => {
+                      onSelectSurface('rightWall');
+                      onClose();
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Trace Right Wall in 2D
+                  </button>
+                </div>
+              )}
+              <button
+                onClick={() => setWorkspaceView('CANVAS')}
+                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black cursor-pointer"
+              >
+                Back to 3D Strip Canvas
+              </button>
+            </div>
+          </div>
+
+          {/* 3 Side-by-Side Unwrapped Surface Cards: Left Wall | Crown Arch | Right Wall */}
+          {(() => {
+            const wallH = Math.max(2.0, geometry.wallHeight || 4.5);
+            const crownArc = Math.max(3.0, geometry.crownArcLength || geometry.width * 1.25);
+            const pullLen = Math.max(1.5, settings.roundLength || 4.0);
+            const surfaceCards: Array<{
+              key: 'leftWall' | 'crown' | 'rightWall';
+              title: string;
+              subtitle: string;
+              spanMeters: number;
+              perimRangeLabel: string;
+              accentColor: string;
+            }> = [
+              {
+                key: 'leftWall',
+                title: '1. LEFT WALL (UNWRAPPED)',
+                subtitle: `Height ${wallH.toFixed(2)}m × Pull ${pullLen.toFixed(2)}m`,
+                spanMeters: wallH,
+                perimRangeLabel: `0.0m – ${(totalPerimM * 0.22).toFixed(1)}m (0%–22%)`,
+                accentColor: '#38bdf8',
+              },
+              {
+                key: 'crown',
+                title: '2. CROWN / ARCH (UNWRAPPED)',
+                subtitle: `Arc ${crownArc.toFixed(2)}m × Pull ${pullLen.toFixed(2)}m`,
+                spanMeters: crownArc,
+                perimRangeLabel: `${(totalPerimM * 0.22).toFixed(1)}m – ${(totalPerimM * 0.78).toFixed(1)}m (22%–78%)`,
+                accentColor: '#a855f7',
+              },
+              {
+                key: 'rightWall',
+                title: '3. RIGHT WALL (UNWRAPPED)',
+                subtitle: `Height ${wallH.toFixed(2)}m × Pull ${pullLen.toFixed(2)}m`,
+                spanMeters: wallH,
+                perimRangeLabel: `${(totalPerimM * 0.78).toFixed(1)}m – ${totalPerimM.toFixed(1)}m (78%–100%)`,
+                accentColor: '#22c55e',
+              },
+            ];
+
+            const ignoredFaceCount = joints.filter((j) => j.surface === 'face').length;
+
+            return (
+              <>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  {surfaceCards.map((sc) => {
+                    const surfJoints = joints.filter(
+                      (j) => j.surface === sc.key && j.geometry.length >= 2
+                    );
+                    const surfLith = lithologyRegions.filter(
+                      (l) => l.surface === sc.key && l.polygon.length >= 3
+                    );
+                    const surfPhoto = photos?.[sc.key];
+                    const hasPhoto = Boolean(surfPhoto?.warpedImage || surfPhoto?.image);
+
+                    return (
+                      <div
+                        key={sc.key}
+                        className={`rounded-xl border p-3 flex flex-col justify-between ${
+                          isLight
+                            ? 'bg-white border-slate-300 shadow-xs'
+                            : 'bg-[#0B1220] border-slate-800 shadow-md'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center justify-between border-b pb-2 mb-2 border-slate-700/40">
+                            <div>
+                              <div
+                                className="text-xs font-black tracking-wider"
+                                style={{ color: sc.accentColor }}
+                              >
+                                {sc.title}
+                              </div>
+                              <div className="text-[11px] text-slate-400">
+                                {sc.subtitle} · Strip Zone: {sc.perimRangeLabel}
+                              </div>
+                            </div>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-200">
+                              {surfJoints.length} trace{surfJoints.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+
+                          {/* SVG Unwrapped Surface Preview with Photo + Mapped Traces */}
+                          <div className="relative rounded-lg overflow-hidden border border-slate-700/50 bg-[#060A12]">
+                            <svg viewBox="0 0 360 240" className="w-full h-52">
+                              {/* Optional Registered Surface Photo */}
+                              {hasPhoto && (
+                                <image
+                                  href={surfPhoto?.warpedImage || surfPhoto?.image || ''}
+                                  x="20"
+                                  y="20"
+                                  width="320"
+                                  height="200"
+                                  preserveAspectRatio="none"
+                                  opacity="0.75"
+                                />
+                              )}
+
+                              {/* Unwrapped Surface Boundary Box */}
+                              <rect
+                                x="20"
+                                y="20"
+                                width="320"
+                                height="200"
+                                fill={hasPhoto ? 'none' : '#0F172A'}
+                                stroke={sc.accentColor}
+                                strokeWidth="1.8"
+                              />
+
+                              {/* Grid lines */}
+                              {[0.25, 0.5, 0.75].map((f, i) => (
+                                <g key={i}>
+                                  <line
+                                    x1={20 + 320 * f}
+                                    y1={20}
+                                    x2={20 + 320 * f}
+                                    y2={220}
+                                    stroke="#334155"
+                                    strokeWidth="0.6"
+                                    strokeDasharray="3,3"
+                                  />
+                                  <line
+                                    x1={20}
+                                    y1={20 + 200 * f}
+                                    x2={340}
+                                    y2={20 + 200 * f}
+                                    stroke="#334155"
+                                    strokeWidth="0.6"
+                                    strokeDasharray="3,3"
+                                  />
+                                </g>
+                              ))}
+
+                              {/* Mapped Lithology Polygons on this Wall/Crown Surface (Exact 1:1 Unwrapped Coordinates) */}
+                              {surfLith.map((lz) => {
+                                const pts = lz.polygon
+                                  .map((pt) => {
+                                    const nx =
+                                      sc.key === 'crown'
+                                        ? (pt.x + sc.spanMeters * 0.5) / Math.max(0.1, sc.spanMeters)
+                                        : pt.x / Math.max(0.1, pullLen);
+                                    const ny =
+                                      sc.key === 'crown'
+                                        ? 1 - pt.y / Math.max(0.1, pullLen)
+                                        : 1 - pt.y / Math.max(0.1, sc.spanMeters);
+                                    const px = 20 + Math.max(0, Math.min(1, nx)) * 320;
+                                    const py = 20 + Math.max(0, Math.min(1, ny)) * 200;
+                                    return `${px.toFixed(1)},${py.toFixed(1)}`;
+                                  })
+                                  .join(' ');
+                                return (
+                                  <polygon
+                                    key={lz.id}
+                                    points={pts}
+                                    fill={lz.colorHex}
+                                    fillOpacity="0.28"
+                                    stroke={lz.colorHex}
+                                    strokeWidth="1.2"
+                                  />
+                                );
+                              })}
+
+                              {/* Mapped Joint Traces on this Wall/Crown Surface (Exact Points & Locations as Traced in 2D) */}
+                              {surfJoints.map((j) => {
+                                const setInfo = jointSets.find((s) => s.id === j.set);
+                                const col = setInfo?.color || '#38bdf8';
+                                const pts = j.geometry.map((pt) => {
+                                  const nx =
+                                    sc.key === 'crown'
+                                      ? (pt.x + sc.spanMeters * 0.5) / Math.max(0.1, sc.spanMeters)
+                                      : pt.x / Math.max(0.1, pullLen);
+                                  const ny =
+                                    sc.key === 'crown'
+                                      ? 1 - pt.y / Math.max(0.1, pullLen)
+                                      : 1 - pt.y / Math.max(0.1, sc.spanMeters);
+                                  return {
+                                    x: 20 + Math.max(0, Math.min(1, nx)) * 320,
+                                    y: 20 + Math.max(0, Math.min(1, ny)) * 200,
+                                    rawX: pt.x,
+                                    rawY: pt.y,
+                                  };
+                                });
+                                const d = pts
+                                  .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                                  .join(' ');
+                                const mid = pts[Math.floor(pts.length / 2)] || pts[0];
+                                return (
+                                  <g key={j.id}>
+                                    <path
+                                      d={d}
+                                      fill="none"
+                                      stroke={col}
+                                      strokeWidth="2.4"
+                                      strokeLinecap="round"
+                                    />
+                                    {pts.map((ptObj, pIdx) => (
+                                      <g key={pIdx}>
+                                        <circle
+                                          cx={ptObj.x}
+                                          cy={ptObj.y}
+                                          r="3.2"
+                                          fill="#020617"
+                                          stroke={col}
+                                          strokeWidth="1.6"
+                                        />
+                                        {(pIdx === 0 || pIdx === pts.length - 1) && (
+                                          <text
+                                            x={ptObj.x}
+                                            y={ptObj.y + 10}
+                                            textAnchor="middle"
+                                            fontSize="7.5"
+                                            fontWeight="700"
+                                            fill="#e2e8f0"
+                                          >
+                                            P{pIdx + 1}({ptObj.rawX.toFixed(1)},{ptObj.rawY.toFixed(1)})
+                                          </text>
+                                        )}
+                                      </g>
+                                    ))}
+                                    {mid && (
+                                      <text
+                                        x={mid.x}
+                                        y={mid.y - 5}
+                                        textAnchor="middle"
+                                        fontSize="9"
+                                        fontWeight="800"
+                                        fill={col}
+                                        stroke="#020617"
+                                        strokeWidth="2"
+                                        paintOrder="stroke"
+                                      >
+                                        {j.set} ({Math.round(j.dip)}°/{String(Math.round(j.dipDirection)).padStart(3, '0')}°)
+                                      </text>
+                                    )}
+                                  </g>
+                                );
+                              })}
+
+                              {surfJoints.length === 0 && surfLith.length === 0 && (
+                                <text
+                                  x="180"
+                                  y="122"
+                                  textAnchor="middle"
+                                  fontSize="10.5"
+                                  fontWeight="700"
+                                  fill="#64748b"
+                                >
+                                  No traces mapped on {sc.key === 'leftWall' ? 'Left Wall' : sc.key === 'crown' ? 'Crown Arch' : 'Right Wall'} yet
+                                </text>
+                              )}
+                            </svg>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 flex items-center justify-between text-[11px]">
+                          <span className="text-slate-400">
+                            Lithology Zones: <strong>{surfLith.length}</strong> · Photo:{' '}
+                            <strong>{hasPhoto ? 'Loaded' : 'None'}</strong>
+                          </span>
+                          {onSelectSurface && (
+                            <button
+                              onClick={() => {
+                                onSelectSurface(sc.key);
+                                onClose();
+                              }}
+                              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-bold cursor-pointer"
+                            >
+                              Open in Core Tracing →
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* REALISTIC 3D TUNNEL ARCH SHAPE + EXACT UNWRAPPED IMAGE PLACEMENT (NO SPACE FILLING) */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {/* Left: Realistic 3D Tunnel Arch Vault with Exact Unwrapped Points */}
+                  <div
+                    className={`rounded-xl border p-3.5 ${
+                      isLight
+                        ? 'bg-white border-slate-300 shadow-xs'
+                        : 'bg-[#0B1220] border-slate-800 shadow-md'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/40 pb-2 mb-2.5">
+                      <div>
+                        <div className="text-xs font-black text-cyan-400 uppercase tracking-wide">
+                          Realistic 3D Tunnel Arch Shape (Exact Unwrapped Points · No Space Filling)
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          Exact unwrapped Left Wall, Crown Arch &amp; Right Wall points wrapped onto the realistic tunnel arch shape (not geometrical boxes). Once AI learns, it connects the traces.
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleRunAiTrendAlignment}
+                        className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Sparkles className="w-3 h-3 text-amber-300" />
+                        AI Learn From Exact Points (Gen #{aiBrain.generation})
+                      </button>
+                    </div>
+
+                    <div className="rounded-lg overflow-hidden border border-slate-700/60 bg-[#050912]">
+                      <svg viewBox="0 0 560 280" className="w-full h-60">
+                        {/* Realistic Curved Tunnel Arch Vault (Front Portal Ring + Back Portal Ring + Springlines) */}
+                        {(() => {
+                          // Sample realistic horseshoe/arch cross-section along perimeter parameter s in [0, 1]
+                          // s in [0..0.28] = Left Wall (Invert to Left Springline)
+                          // s in [0.28..0.72] = Crown Arch (Left Springline over Arch to Right Springline)
+                          // s in [0.72..1.0] = Right Wall (Right Springline down to Invert)
+                          const sampleArch3D = (sNorm: number, depthNorm: number) => {
+                            const clpS = Math.max(0, Math.min(1, sNorm));
+                            const clpD = Math.max(0, Math.min(1, depthNorm));
+                            let nx = 0; // -1 left wall .. +1 right wall
+                            let ny = 0; // 0 invert .. 1 crown apex
+                            if (clpS <= 0.28) {
+                              const t = clpS / 0.28;
+                              nx = -1;
+                              ny = t * 0.56;
+                            } else if (clpS <= 0.72) {
+                              const t = (clpS - 0.28) / 0.44;
+                              const ang = Math.PI * (1 - t); // pi (left) to 0 (right)
+                              nx = Math.cos(ang);
+                              ny = 0.56 + Math.sin(ang) * 0.44;
+                            } else {
+                              const t = (clpS - 0.72) / 0.28;
+                              nx = 1;
+                              ny = (1 - t) * 0.56;
+                            }
+                            // Perspective projection from front ring (clpD=0) to back ring (clpD=1)
+                            const cx = 250 + clpD * 85;
+                            const cy = 225 - clpD * 48;
+                            const rx = 145 * (1 - clpD * 0.32);
+                            const ry = 140 * (1 - clpD * 0.32);
+                            return {
+                              x: cx + nx * rx,
+                              y: cy - ny * ry,
+                            };
+                          };
+
+                          const ringSteps = 36;
+                          const frontPts = Array.from({ length: ringSteps + 1 }, (_, i) =>
+                            sampleArch3D(i / ringSteps, 0)
+                          );
+                          const midPts = Array.from({ length: ringSteps + 1 }, (_, i) =>
+                            sampleArch3D(i / ringSteps, 0.5)
+                          );
+                          const backPts = Array.from({ length: ringSteps + 1 }, (_, i) =>
+                            sampleArch3D(i / ringSteps, 1)
+                          );
+
+                          const frontD = frontPts
+                            .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                            .join(' ');
+                          const midD = midPts
+                            .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                            .join(' ');
+                          const backD = backPts
+                            .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                            .join(' ');
+
+                          const lInv0 = sampleArch3D(0, 0);
+                          const lInv1 = sampleArch3D(0, 1);
+                          const lSpr0 = sampleArch3D(0.28, 0);
+                          const lSpr1 = sampleArch3D(0.28, 1);
+                          const apex0 = sampleArch3D(0.5, 0);
+                          const apex1 = sampleArch3D(0.5, 1);
+                          const rSpr0 = sampleArch3D(0.72, 0);
+                          const rSpr1 = sampleArch3D(0.72, 1);
+                          const rInv0 = sampleArch3D(1, 0);
+                          const rInv1 = sampleArch3D(1, 1);
+
+                          const wallCrownJointsAll = joints.filter(
+                            (j) =>
+                              (j.surface === 'leftWall' ||
+                                j.surface === 'crown' ||
+                                j.surface === 'rightWall') &&
+                              j.geometry.length >= 2
+                          );
+
+                          return (
+                            <g>
+                              {/* Tunnel Vault Shell */}
+                              <path
+                                d={`${frontD} L ${rInv1.x.toFixed(1)} ${rInv1.y.toFixed(1)} ${backPts
+                                  .slice()
+                                  .reverse()
+                                  .map((p) => `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                                  .join(' ')} Z`}
+                                fill="#0f172a"
+                                fillOpacity="0.6"
+                              />
+                              {/* Invert Floor Lines */}
+                              <line x1={lInv0.x} y1={lInv0.y} x2={rInv0.x} y2={rInv0.y} stroke="#334155" strokeWidth="1.5" />
+                              <line x1={lInv1.x} y1={lInv1.y} x2={rInv1.x} y2={rInv1.y} stroke="#1e293b" strokeWidth="1.2" strokeDasharray="4,4" />
+                              {/* Longitudinal Springlines & Crown Centerline */}
+                              <line x1={lInv0.x} y1={lInv0.y} x2={lInv1.x} y2={lInv1.y} stroke="#38bdf8" strokeWidth="1.4" />
+                              <line x1={lSpr0.x} y1={lSpr0.y} x2={lSpr1.x} y2={lSpr1.y} stroke="#38bdf8" strokeWidth="1.2" strokeDasharray="5,4" />
+                              <line x1={apex0.x} y1={apex0.y} x2={apex1.x} y2={apex1.y} stroke="#a855f7" strokeWidth="1.2" strokeDasharray="5,4" />
+                              <line x1={rSpr0.x} y1={rSpr0.y} x2={rSpr1.x} y2={rSpr1.y} stroke="#22c55e" strokeWidth="1.2" strokeDasharray="5,4" />
+                              <line x1={rInv0.x} y1={rInv0.y} x2={rInv1.x} y2={rInv1.y} stroke="#22c55e" strokeWidth="1.4" />
+                              {/* Arch Ribs */}
+                              <path d={backD} fill="none" stroke="#475569" strokeWidth="1.6" strokeDasharray="4,3" />
+                              <path d={midD} fill="none" stroke="#334155" strokeWidth="1.1" strokeDasharray="3,3" />
+                              <path d={frontD} fill="none" stroke="#38bdf8" strokeWidth="2.2" />
+
+                              {/* Zone Labels on Realistic Tunnel Arch */}
+                              <text x={lSpr0.x - 10} y={(lInv0.y + lSpr0.y) / 2} textAnchor="end" fontSize="9" fontWeight="800" fill="#38bdf8">
+                                LEFT WALL
+                              </text>
+                              <text x={apex0.x} y={apex0.y - 10} textAnchor="middle" fontSize="9.5" fontWeight="800" fill="#c084fc">
+                                CROWN ARCH (REALISTIC TUNNEL SHAPE)
+                              </text>
+                              <text x={rSpr0.x + 10} y={(rInv0.y + rSpr0.y) / 2} textAnchor="start" fontSize="9" fontWeight="800" fill="#4ade80">
+                                RIGHT WALL
+                              </text>
+
+                              {/* Exact Traced Wall & Crown Points Rotated 90° Clockwise onto the Realistic 3D Tunnel Arch */}
+                              {wallCrownJointsAll.map((j) => {
+                                const setInfo = jointSets.find((s) => s.id === j.set);
+                                const col = setInfo?.color || '#38bdf8';
+                                const archPts = j.geometry.map((pt) => {
+                                  const u2d =
+                                    j.surface === 'crown'
+                                      ? Math.max(
+                                          0,
+                                          Math.min(1, (pt.x + crownArc * 0.5) / Math.max(0.1, crownArc))
+                                        )
+                                      : Math.max(0, Math.min(1, pt.x / Math.max(0.1, pullLen)));
+                                  const v2d =
+                                    j.surface === 'crown'
+                                      ? Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.1, pullLen)))
+                                      : Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.1, wallH)));
+
+                                  // Rotate 2D unwrapped trace 90° clockwise (2D horizontal -> 3D vertical)
+                                  const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+                                  let sNorm = 0.5;
+                                  if (j.surface === 'leftWall') {
+                                    sNorm = v3d * 0.28;
+                                  } else if (j.surface === 'crown') {
+                                    sNorm = 0.28 + v3d * 0.44;
+                                  } else {
+                                    sNorm = 0.72 + v3d * 0.28;
+                                  }
+                                  return sampleArch3D(sNorm, u3d);
+                                });
+                                const dStr = archPts
+                                  .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                                  .join(' ');
+                                const midP = archPts[Math.floor(archPts.length / 2)] || archPts[0];
+                                return (
+                                  <g key={`arch3d-${j.id}`}>
+                                    <path
+                                      d={dStr}
+                                      fill="none"
+                                      stroke={col}
+                                      strokeWidth="2.5"
+                                      strokeLinecap="round"
+                                    />
+                                    {archPts.map((ap, aIdx) => (
+                                      <circle
+                                        key={aIdx}
+                                        cx={ap.x}
+                                        cy={ap.y}
+                                        r="3.2"
+                                        fill="#020617"
+                                        stroke={col}
+                                        strokeWidth="1.6"
+                                      />
+                                    ))}
+                                    {midP && (
+                                      <text
+                                        x={midP.x}
+                                        y={midP.y - 6}
+                                        textAnchor="middle"
+                                        fontSize="8.5"
+                                        fontWeight="800"
+                                        fill={col}
+                                        stroke="#020617"
+                                        strokeWidth="2"
+                                        paintOrder="stroke"
+                                      >
+                                        {j.set} ({Math.round(j.dip)}°/{String(Math.round(j.dipDirection)).padStart(3, '0')}°)
+                                      </text>
+                                    )}
+                                  </g>
+                                );
+                              })}
+                            </g>
+                          );
+                        })()}
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* Right: 90° Clockwise Rotated Vertical 3D Unwrapped Strip + Realistic Engineering Rules */}
+                  <div
+                    className={`rounded-xl border p-4 flex flex-col justify-between space-y-3 ${
+                      isLight
+                        ? 'bg-amber-50/70 border-amber-300 text-slate-800'
+                        : 'bg-[#0F172A] border-amber-500/40 text-slate-200'
+                    }`}
+                  >
+                    <div className="space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] font-black uppercase">
+                            90° Clockwise Rotation (2D Horizontal → 3D Vertical)
+                          </span>
+                          <span className="text-xs font-black uppercase tracking-wide text-cyan-300">
+                            Same Trace &amp; Dip Angles Preserved
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Live Vertical 3D Unwrapped Strip Preview (Showing Exact 90° CW Rotated Traces) */}
+                      <div className="rounded-lg overflow-hidden border border-slate-700/70 bg-[#050912]">
+                        <svg viewBox="0 0 520 175" className="w-full h-40">
+                          {/* Vertical 3D Strip Bands: Left Wall (Top), Crown (Middle), Right Wall (Bottom) */}
+                          <rect x="115" y="12" width="380" height="42" fill="#0c192c" stroke="#38bdf8" strokeWidth="1.2" />
+                          <rect x="115" y="54" width="380" height="66" fill="#131129" stroke="#a855f7" strokeWidth="1.2" />
+                          <rect x="115" y="120" width="380" height="42" fill="#091e16" stroke="#22c55e" strokeWidth="1.2" />
+
+                          <text x="108" y="36" textAnchor="end" fontSize="8.5" fontWeight="800" fill="#38bdf8">
+                            LEFT WALL (TOP)
+                          </text>
+                          <text x="108" y="90" textAnchor="end" fontSize="8.5" fontWeight="800" fill="#c084fc">
+                            CROWN (MID)
+                          </text>
+                          <text x="108" y="144" textAnchor="end" fontSize="8.5" fontWeight="800" fill="#4ade80">
+                            RIGHT WALL (BOT)
+                          </text>
+
+                          {/* Render 90° Clockwise Rotated Traces in Vertical 3D Strip */}
+                          {joints
+                            .filter(
+                              (j) =>
+                                (j.surface === 'leftWall' ||
+                                  j.surface === 'crown' ||
+                                  j.surface === 'rightWall') &&
+                                j.geometry.length >= 2
+                            )
+                            .map((j) => {
+                              const setInfo = jointSets.find((s) => s.id === j.set);
+                              const col = setInfo?.color || '#38bdf8';
+                              const bandTop =
+                                j.surface === 'leftWall' ? 12 : j.surface === 'crown' ? 54 : 120;
+                              const bandH = j.surface === 'crown' ? 66 : 42;
+
+                              const rotPts = j.geometry.map((pt) => {
+                                const u2d =
+                                  j.surface === 'crown'
+                                    ? Math.max(
+                                        0,
+                                        Math.min(1, (pt.x + crownArc * 0.5) / Math.max(0.1, crownArc))
+                                      )
+                                    : Math.max(0, Math.min(1, pt.x / Math.max(0.1, pullLen)));
+                                const v2d =
+                                  j.surface === 'crown'
+                                    ? Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.1, pullLen)))
+                                    : Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.1, wallH)));
+                                const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+                                return {
+                                  x: 115 + u3d * 380,
+                                  y: bandTop + v3d * bandH,
+                                };
+                              });
+                              const dPath = rotPts
+                                .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+                                .join(' ');
+                              const mid = rotPts[Math.floor(rotPts.length / 2)] || rotPts[0];
+                              return (
+                                <g key={`vstrip-cw90-${j.id}`}>
+                                  <path
+                                    d={dPath}
+                                    fill="none"
+                                    stroke={col}
+                                    strokeWidth="2.4"
+                                    strokeLinecap="round"
+                                  />
+                                  {rotPts.map((rp, rIdx) => (
+                                    <circle
+                                      key={rIdx}
+                                      cx={rp.x}
+                                      cy={rp.y}
+                                      r="2.8"
+                                      fill="#020617"
+                                      stroke={col}
+                                      strokeWidth="1.4"
+                                    />
+                                  ))}
+                                  {mid && (
+                                    <text
+                                      x={mid.x}
+                                      y={mid.y - 5}
+                                      textAnchor="middle"
+                                      fontSize="8"
+                                      fontWeight="800"
+                                      fill={col}
+                                      stroke="#020617"
+                                      strokeWidth="2"
+                                      paintOrder="stroke"
+                                    >
+                                      {j.set} ({Math.round(j.dip)}°/{String(Math.round(j.dipDirection)).padStart(3, '0')}°)
+                                    </text>
+                                  )}
+                                </g>
+                              );
+                            })}
+                        </svg>
+                      </div>
+
+                      <div
+                        className={`p-2.5 rounded-lg border text-xs space-y-1 ${
+                          isLight
+                            ? 'bg-white border-slate-200'
+                            : 'bg-slate-950/80 border-slate-800'
+                        }`}
+                      >
+                        <div className="font-black text-emerald-400">
+                          1. 2D Unwrapped Traces Rotated 90° Clockwise → 3D Vertical Strip (Same Dip &amp; Trace Angles):
+                        </div>
+                        <p className="text-[11px] leading-relaxed opacity-90">
+                          Because 2D unwrapping is <strong>horizontal</strong> while the 3D strip is <strong>vertical</strong>, every 2D unwrapped Left Wall, Crown, and Right Wall trace is rotated <strong>90° clockwise</strong> into 3D while keeping the <strong>exact same trace and dip angles</strong>. Also, radial Crown &amp; Wall Overbreak is realistically plotted on the <strong>Tunnel Face (1. Face)</strong>.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-700/40">
+                      {onSelectSurface && (
+                        <button
+                          onClick={() => {
+                            onSelectSurface('face');
+                            onClose();
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold cursor-pointer"
+                        >
+                          Go to 1. Face (Plot Crown &amp; Wall Overbreak) →
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          setShowWallCrownZoneBands(true);
+                          setWorkspaceView('CANVAS');
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold cursor-pointer"
+                      >
+                        View Exact Unwrapped Strip Canvas →
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Combined Unwrapped 3D Strip Summary Bar */}
+                <div
+                  className={`rounded-xl border p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs ${
+                    isLight
+                      ? 'bg-white border-slate-300 text-slate-700'
+                      : 'bg-[#0B1220] border-slate-800 text-slate-300'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center gap-4">
+                    <span>
+                      <strong className="text-cyan-400">Total 3D Strip Traces (Wall &amp; Crown):</strong>{' '}
+                      {activeDataset.traces.length}
+                    </span>
+                    <span>
+                      <strong className="text-emerald-400">3D Lithology Zones:</strong>{' '}
+                      {activeDataset.lithologyZones.length}
+                    </span>
+                    <span>
+                      <strong className="text-amber-400">2D Face Traces Excluded from 3D:</strong>{' '}
+                      {ignoredFaceCount} (kept strictly on 2D Face cross-section)
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setShowWallCrownZoneBands(true);
+                      setWorkspaceView('CANVAS');
+                    }}
+                    className="px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold cursor-pointer"
+                  >
+                    View on Continuous 3D Strip Canvas
+                  </button>
+                </div>
+              </>
+            );
+          })()}
+        </div>
       ) : (
         /* ====================================================================
             VIEW B: DEDICATED MAIN STRIP CANVAS WINDOW (1-Meter Chainage Scale,
@@ -2521,10 +3356,25 @@ export const Continuous3DStripLoggerModal: React.FC<
                                       })
                                       .join(' ')
                                   : null;
-                              const isShear =
+                               const isShear =
                                 tr.structureType === 'Shear Zone' ||
                                 tr.structureType === 'Fault' ||
                                 tr.structureType === 'Shear Joint (5-30mm)';
+                              const traceColor = resolveStripTraceColor(tr.setId, tr.structureType);
+                              const midIdx = Math.floor(pts.length / 2);
+                              const pA = tNode.mapRdPerimToSvg(
+                                pts[Math.max(0, midIdx - 1)].x,
+                                pts[Math.max(0, midIdx - 1)].y
+                              );
+                              const pB = tNode.mapRdPerimToSvg(
+                                pts[Math.min(pts.length - 1, midIdx)].x,
+                                pts[Math.min(pts.length - 1, midIdx)].y
+                              );
+                              const mx = (pA.x + pB.x) * 0.5;
+                              const my = (pA.y + pB.y) * 0.5;
+                              let angDeg = (Math.atan2(pB.y - pA.y, pB.x - pA.x) * 180) / Math.PI;
+                              if (angDeg > 90) angDeg -= 180;
+                              if (angDeg < -90) angDeg += 180;
                               return (
                                 <g key={tr.id}>
                                   {rawNetStr && (
@@ -2540,15 +3390,24 @@ export const Continuous3DStripLoggerModal: React.FC<
                                   <polyline
                                     points={tStr}
                                     fill="none"
-                                    stroke={
-                                      isShear
-                                        ? '#ef4444'
-                                        : isLight
-                                        ? '#059669'
-                                        : '#34d399'
-                                    }
-                                    strokeWidth={isShear ? 2.4 : 1.5}
+                                    stroke={traceColor}
+                                    strokeWidth={isShear ? 2.4 : 1.6}
                                   />
+                                  <text
+                                    x={mx}
+                                    y={my - 2.5}
+                                    textAnchor="middle"
+                                    fontSize="6.5"
+                                    fontWeight="700"
+                                    fontFamily="monospace"
+                                    fill={traceColor}
+                                    stroke={isLight ? '#ffffff' : '#090D16'}
+                                    strokeWidth="2.2"
+                                    paintOrder="stroke"
+                                    transform={`rotate(${angDeg.toFixed(1)}, ${mx.toFixed(1)}, ${my.toFixed(1)})`}
+                                  >
+                                    {tr.setId} {tr.orientationLabel}
+                                  </text>
                                 </g>
                               );
                             })}
@@ -2783,6 +3642,23 @@ export const Continuous3DStripLoggerModal: React.FC<
                       1-Meter Chainage Scale: Ch. {viewStartRd}m to {viewEndRd}m (
                       {totalRdSpanM}m span)
                     </span>
+                    <span
+                      className={`px-2 py-0.5 border rounded-md text-[10px] font-black ${
+                        isLight
+                          ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                          : 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300'
+                      }`}
+                      title="Tunnel Face traces are strictly excluded from 3D mapping. Only Left Wall, Crown, and Right Wall are mapped in 3D."
+                    >
+                      WALL &amp; CROWN ONLY (FACE EXCLUDED)
+                    </span>
+                    <button
+                      onClick={() => setWorkspaceView('UNWRAPPED_WALL_CROWN')}
+                      className="px-2.5 py-0.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer shadow-xs"
+                    >
+                      <Eye className="w-3 h-3" />
+                      See Unwrapped Wall &amp; Crown
+                    </button>
                   </div>
                   <div className="flex items-center gap-4 text-[11px]">
                     {aiViewMode === 'SPLIT_GHOST' && (
@@ -2996,8 +3872,69 @@ export const Continuous3DStripLoggerModal: React.FC<
                   )}
 
                   {/* ==========================================================
-                      2. PULL SEAM BOUNDARIES & DRIVE AZIMUTH ANNOTATIONS
+                      1.5 EXACT UNWRAPPED WALL & CROWN IMAGES AT EXACT PULL LOCATIONS
+                         (No artificial space filling — only exact unwrapped images)
                      ========================================================== */}
+                  {activeDataset.pulls
+                    .filter((p) => p.status === 'MAPPED' && p.toRd > viewStartRd && p.fromRd < viewEndRd)
+                    .map((p) => {
+                      const clpFrom = Math.max(viewStartRd, p.fromRd);
+                      const clpTo = Math.min(viewEndRd, p.toRd);
+                      const lwEndPerim = totalPerimM * 0.28;
+                      const crEndPerim = totalPerimM * 0.72;
+                      const lwImg =
+                        p.surfacePhotos?.leftWall ||
+                        photos?.leftWall?.warpedImage ||
+                        photos?.leftWall?.image;
+                      const crImg =
+                        p.surfacePhotos?.crown ||
+                        photos?.crown?.warpedImage ||
+                        photos?.crown?.image;
+                      const rwImg =
+                        p.surfacePhotos?.rightWall ||
+                        photos?.rightWall?.warpedImage ||
+                        photos?.rightWall?.image;
+
+                      const bands: Array<{
+                        key: string;
+                        img?: string;
+                        p0: number;
+                        p1: number;
+                      }> = [
+                        { key: 'lw', img: lwImg, p0: 0, p1: lwEndPerim },
+                        { key: 'cr', img: crImg, p0: lwEndPerim, p1: crEndPerim },
+                        { key: 'rw', img: rwImg, p0: crEndPerim, p1: totalPerimM },
+                      ];
+
+                      return (
+                        <g key={`pull-unwrapped-imgs-${p.id}`}>
+                          {bands.map((b) => {
+                            if (!b.img) return null;
+                            const tl = mapRdPerimToSvg(clpFrom, b.p0);
+                            const br = mapRdPerimToSvg(clpTo, b.p1);
+                            const x = Math.min(tl.x, br.x);
+                            const y = Math.min(tl.y, br.y);
+                            const w = Math.max(2, Math.abs(br.x - tl.x));
+                            const h = Math.max(2, Math.abs(br.y - tl.y));
+                            const cx = x + w * 0.5;
+                            const cy = y + h * 0.5;
+                            return (
+                              <image
+                                key={b.key}
+                                href={b.img}
+                                x={cx - h * 0.5}
+                                y={cy - w * 0.5}
+                                width={h}
+                                height={w}
+                                transform={`rotate(90 ${cx.toFixed(1)} ${cy.toFixed(1)})`}
+                                preserveAspectRatio="none"
+                                opacity={0.82}
+                              />
+                            );
+                          })}
+                        </g>
+                      );
+                    })}
                   {cadLayers.pullSeams &&
                     activeDataset.pulls.map((p) => {
                     if (p.toRd <= viewStartRd || p.fromRd >= viewEndRd) return null;
@@ -3114,13 +4051,49 @@ export const Continuous3DStripLoggerModal: React.FC<
                   })}
 
                   {/* ==========================================================
-                      3. SMOOTH SPRING LINES (22% & 78%) & CROWN CENTERLINE (50%)
+                      3. SMOOTH SPRING LINES (22% & 78%) & UNWRAPPED WALL/CROWN ZONES
                      ========================================================== */}
+                  {showWallCrownZoneBands &&
+                    [
+                      {
+                        frac: 0.11,
+                        title: `UNWRAPPED LEFT WALL (0.0–${(totalPerimM * 0.22).toFixed(1)}m)`,
+                        color: isLight ? '#0284c7' : '#38bdf8',
+                      },
+                      {
+                        frac: 0.5,
+                        title: `UNWRAPPED CROWN / ARCH (${(totalPerimM * 0.22).toFixed(1)}–${(totalPerimM * 0.78).toFixed(1)}m)`,
+                        color: isLight ? '#7e22ce' : '#c084fc',
+                      },
+                      {
+                        frac: 0.89,
+                        title: `UNWRAPPED RIGHT WALL (${(totalPerimM * 0.78).toFixed(1)}–${totalPerimM.toFixed(1)}m)`,
+                        color: isLight ? '#15803d' : '#4ade80',
+                      },
+                    ].map((zoneObj, zIdx) => {
+                      const zPt = mapRdPerimToSvg(
+                        viewStartRd + 0.18,
+                        totalPerimM * zoneObj.frac
+                      );
+                      return (
+                        <text
+                          key={`zone-band-${zIdx}`}
+                          x={zPt.x}
+                          y={zPt.y - 5}
+                          fontSize="8.5"
+                          fontWeight="800"
+                          fill={zoneObj.color}
+                          opacity="0.85"
+                        >
+                          {zoneObj.title}
+                        </text>
+                      );
+                    })}
                   {cadLayers.springLines &&
                     [
-                      { frac: 0.22, label: 'LEFT SPRING LINE' },
+                      { frac: 0.22, label: 'LEFT SPRING LINE (WALL / CROWN FOLD)' },
                       { frac: 0.5, label: 'CROWN CENTERLINE' },
-                      { frac: 0.78, label: 'RIGHT SPRING LINE' },
+                      { frac: 0.78, label: 'RIGHT SPRING LINE (CROWN / WALL FOLD)' },
                     ].map((lineObj, idx) => {
                       const pts = smoothRibbon.samples
                         .map((s) => {
@@ -3357,13 +4330,24 @@ export const Continuous3DStripLoggerModal: React.FC<
                         tr.structureType === 'Fault' ||
                         tr.structureType === 'Shear Joint (5-30mm)';
 
-                      // Smoothly sample along each segment so traces bend smoothly with the tunnel ribbon!
-                      const buildSmoothTraceSvgPoints = (pts: Point2D[]) => {
+                      // Preserve exact unwrapped image points by default; only smooth when AI alignment is active or in curved ribbon mode
+                      const buildSmoothTraceSvgPoints = (pts: Point2D[], useExactLinear = false) => {
+                        const hasAiSmoothing =
+                          !useExactLinear &&
+                          aiViewMode !== 'BEFORE_AI' &&
+                          Boolean(tr.aiAlignedPoints && tr.aiAlignedPoints.length >= 2);
+                        const smoothWorldPts =
+                          hasAiSmoothing && pts.length >= 3
+                            ? interpolateCatmullRomSpline(pts, 4)
+                            : pts;
                         const sampled: Point2D[] = [];
-                        for (let i = 0; i < pts.length - 1; i++) {
-                          const a = pts[i];
-                          const b = pts[i + 1];
-                          const steps = Math.max(2, Math.ceil(Math.abs(b.x - a.x) * 2));
+                        for (let i = 0; i < smoothWorldPts.length - 1; i++) {
+                          const a = smoothWorldPts[i];
+                          const b = smoothWorldPts[i + 1];
+                          const steps =
+                            canvasDriveMode === 'SMOOTH_REALISTIC_CURVE'
+                              ? Math.max(2, Math.ceil(Math.abs(b.x - a.x) * 2))
+                              : 1;
                           for (let s = 0; s < steps; s++) {
                             const t = s / steps;
                             sampled.push(
@@ -3374,31 +4358,43 @@ export const Continuous3DStripLoggerModal: React.FC<
                             );
                           }
                         }
-                        const last = pts[pts.length - 1];
+                        const last = smoothWorldPts[smoothWorldPts.length - 1];
                         sampled.push(mapRdPerimToSvg(last.x, last.y));
-                        return sampled
-                          .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
-                          .join(' ');
+                        return {
+                          polyStr: sampled
+                            .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+                            .join(' '),
+                          sampledSvg: sampled,
+                        };
                       };
 
-                      const activePolyStr = buildSmoothTraceSvgPoints(activePts);
+                      const activeRendered = buildSmoothTraceSvgPoints(activePts, false);
+                      const activePolyStr = activeRendered.polyStr;
                       const rawPolyStr =
                         tr.rawPoints && tr.rawPoints.length >= 2
-                          ? buildSmoothTraceSvgPoints(tr.rawPoints)
+                          ? buildSmoothTraceSvgPoints(tr.rawPoints, true).polyStr
                           : null;
 
-                      const midPt = activePts[Math.floor(activePts.length / 2)];
-                      const midSvg = mapRdPerimToSvg(midPt.x, midPt.y);
+                      const midSvgIdx = Math.floor(activeRendered.sampledSvg.length / 2);
+                      const svgPA =
+                        activeRendered.sampledSvg[Math.max(0, midSvgIdx - 1)] ||
+                        mapRdPerimToSvg(activePts[0].x, activePts[0].y);
+                      const svgPB =
+                        activeRendered.sampledSvg[
+                          Math.min(activeRendered.sampledSvg.length - 1, midSvgIdx + 1)
+                        ] || mapRdPerimToSvg(activePts[activePts.length - 1].x, activePts[activePts.length - 1].y);
+                      const midSvg = {
+                        x: (svgPA.x + svgPB.x) * 0.5,
+                        y: (svgPA.y + svgPB.y) * 0.5,
+                      };
+                      let traceAngleDeg =
+                        (Math.atan2(svgPB.y - svgPA.y, svgPB.x - svgPA.x) * 180) / Math.PI;
+                      if (traceAngleDeg > 90) traceAngleDeg -= 180;
+                      if (traceAngleDeg < -90) traceAngleDeg += 180;
 
-                      const strokeColor = isSelected
-                        ? '#0284c7'
-                        : isShearOrFault
-                        ? '#ef4444'
-                        : aiViewMode === 'BEFORE_AI'
-                        ? '#f43f5e'
-                        : isLight
-                        ? '#059669'
-                        : '#34d399';
+                      const baseSetColor = resolveStripTraceColor(tr.setId, tr.structureType);
+                      const strokeColor =
+                        aiViewMode === 'BEFORE_AI' ? '#f43f5e' : baseSetColor;
 
                       return (
                         <g
@@ -3432,7 +4428,7 @@ export const Continuous3DStripLoggerModal: React.FC<
                             <polyline
                               points={activePolyStr}
                               fill="none"
-                              stroke="#ef4444"
+                              stroke={strokeColor}
                               strokeWidth="6"
                               strokeOpacity="0.22"
                             />
@@ -3443,32 +4439,27 @@ export const Continuous3DStripLoggerModal: React.FC<
                             points={activePolyStr}
                             fill="none"
                             stroke={strokeColor}
-                            strokeWidth={isSelected ? 3.0 : isShearOrFault ? 2.4 : 1.8}
+                            strokeWidth={isSelected ? 3.0 : isShearOrFault ? 2.4 : 1.85}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
                           />
 
-                          {/* Strike / Dip Orientation Callout */}
-                          <g transform={`translate(${midSvg.x}, ${midSvg.y})`}>
-                            <rect
-                              x="-28"
-                              y="-18"
-                              width="56"
-                              height="14"
-                              rx="3"
-                              fill={isLight ? '#ffffff' : '#090D16'}
-                              stroke={strokeColor}
-                              strokeWidth="1"
-                            />
-                            <text
-                              x="0"
-                              y="-8"
-                              textAnchor="middle"
-                              fontSize="8"
-                              fontWeight="800"
-                              fill={isLight ? '#0f172a' : '#fff'}
-                            >
-                              {tr.setId} {tr.orientationLabel}
-                            </text>
-                          </g>
+                          {/* On-Line Joint Set & Orientation Value (Small Font, No Box, Follows Trace Line) */}
+                          <text
+                            x={midSvg.x}
+                            y={midSvg.y - 3}
+                            textAnchor="middle"
+                            fontSize="7.4"
+                            fontWeight="800"
+                            fontFamily="monospace"
+                            fill={strokeColor}
+                            stroke={isLight ? '#ffffff' : '#090D16'}
+                            strokeWidth="2.5"
+                            paintOrder="stroke"
+                            transform={`rotate(${traceAngleDeg.toFixed(1)}, ${midSvg.x.toFixed(1)}, ${midSvg.y.toFixed(1)})`}
+                          >
+                            {tr.setId} {tr.orientationLabel}
+                          </text>
 
                           {/* Draggable CAD Vertices when in SELECT mode */}
                           {activeTool === 'SELECT' &&
@@ -4423,6 +5414,30 @@ export const Continuous3DStripLoggerModal: React.FC<
                               />
                             </label>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const smoothed = interpolateCatmullRomSpline(
+                                selectedTrace.points,
+                                5
+                              );
+                              updateActiveDataset((prev) => ({
+                                ...prev,
+                                traces: prev.traces.map((t) =>
+                                  t.id === selectedTrace.id
+                                    ? { ...t, points: smoothed, aiAlignedPoints: smoothed }
+                                    : t
+                                ),
+                              }));
+                              setCadCmdStatus(
+                                `SPLINE Smooth Complete: Fitted smooth curve on ${selectedTrace.setId} (${selectedTrace.orientationLabel}).`
+                              );
+                            }}
+                            className="w-full py-1.5 px-2 rounded-md bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-bold text-[10.5px] flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            Smooth Spline Curve
+                          </button>
                         </div>
                       )}
 

@@ -77,6 +77,10 @@ export interface ContinuousStripTrace {
   rawPoints?: Point2D[];
   /** AI trend-aligned smooth points across pull boundaries */
   aiAlignedPoints?: Point2D[];
+  /** Source unwrapped surface ('leftWall' | 'crown' | 'rightWall') */
+  sourceSurface?: 'leftWall' | 'crown' | 'rightWall';
+  /** Exact normalized (0..1, 0..1) image UV coordinates from the 2D unwrapped surface */
+  uvPoints?: Point2D[];
   colorHex?: string;
 }
 
@@ -137,6 +141,12 @@ export interface ContinuousPullRecord {
   status: 'MAPPED' | 'MISSING_GAP';
   linkedSavedProjectId?: string;
   dateMapped?: string;
+  /** Exact unwrapped photos for Left Wall, Crown Arch, and Right Wall at this pull */
+  surfacePhotos?: {
+    leftWall?: string;
+    crown?: string;
+    rightWall?: string;
+  };
 }
 
 export interface SheetCustomizationConfig {
@@ -208,7 +218,7 @@ export interface ContinuousTunnelStripDataset {
   updatedAt: string;
 }
 
-const STORAGE_KEY = 'eswa_continuous_3d_strip_datasets_v5_clean';
+const STORAGE_KEY = 'eswa_continuous_3d_strip_datasets_v6_cw90';
 
 export function getDefaultSheetConfig(
   dataset?: Partial<ContinuousTunnelStripDataset>
@@ -1388,14 +1398,14 @@ export function runAiTrendAlignmentOnDataset(
     const tA = workingTraces[i];
     if (consumedIds.has(tA.id)) continue;
 
-    let combinedRaw = [...(tA.rawPoints || tA.points)].sort((a, b) => a.x - b.x);
+    let combinedRaw = [...(tA.rawPoints || tA.points)];
 
     for (let j = i + 1; j < workingTraces.length; j++) {
       const tB = workingTraces[j];
       if (consumedIds.has(tB.id)) continue;
       if (tB.setId !== tA.setId) continue;
 
-      const ptsB = [...(tB.rawPoints || tB.points)].sort((a, b) => a.x - b.x);
+      const ptsB = [...(tB.rawPoints || tB.points)];
       const endA = combinedRaw[combinedRaw.length - 1];
       const startB = ptsB[0];
       const rdGap = Math.abs(startB.x - endA.x);
@@ -1409,47 +1419,67 @@ export function runAiTrendAlignmentOnDataset(
       }
     }
 
-    // Step 3: Compute least-squares trend-guided smooth polyline for combinedRaw
+    // Step 3: Compute AI pattern-guided smooth curved trajectory (preserving exact 90° CW rotated angle & endpoints)
     const n = combinedRaw.length;
     if (n >= 2) {
       const first = combinedRaw[0];
       const last = combinedRaw[n - 1];
       const totalDx = last.x - first.x;
       const totalDy = last.y - first.y;
+      const chordLen = Math.hypot(totalDx, totalDy);
+      const perpNx = chordLen > 1e-4 ? -totalDy / chordLen : 0;
+      const perpNy = chordLen > 1e-4 ? totalDx / chordLen : 1;
 
-      const alignedPts: Point2D[] = combinedRaw.map((pt, idx) => {
-        if (idx === 0 || idx === n - 1) {
-          return { x: Number(pt.x.toFixed(2)), y: Number(pt.y.toFixed(2)) };
-        }
-        const frac =
-          Math.abs(totalDx) > 0.05
-            ? (pt.x - first.x) / totalDx
-            : idx / Math.max(1, n - 1);
-        const trendY = first.y + frac * totalDy;
-        // Blend 82% structural strike/dip trend line + 18% local geological curvature
-        const smoothY = trendY * 0.82 + pt.y * 0.18;
-        return {
-          x: Number(pt.x.toFixed(2)),
-          y: Number(smoothY.toFixed(2)),
-        };
-      });
+      // Estimate pattern curvature from same-set traces or 3D dip/dipDirection
+      const dipRad = ((tA.dipDeg || 65) * Math.PI) / 180;
+      const dipDirRad = ((tA.dipDirectionDeg || 180) * Math.PI) / 180;
+      const archBowAmplitudeM =
+        Math.sin(dipDirRad) * Math.cos(dipRad) * Math.min(0.65, Math.max(0.12, chordLen * 0.05));
 
-      // Remove duplicate/clustered seam kink points that are < 0.6m apart in RD
-      const filteredAligned: Point2D[] = [alignedPts[0]];
-      for (let k = 1; k < alignedPts.length - 1; k++) {
-        const prev = filteredAligned[filteredAligned.length - 1];
-        if (Math.abs(alignedPts[k].x - prev.x) >= 0.75) {
-          filteredAligned.push(alignedPts[k]);
+      let baseControlPts: Point2D[] = [];
+      if (n === 2) {
+        // Synthesize smooth intermediate pattern control points along the exact 90° CW rotated chord
+        for (let s = 0; s <= 4; s++) {
+          const frac = s / 4;
+          const archCurve = Math.sin(frac * Math.PI) * archBowAmplitudeM;
+          baseControlPts.push({
+            x: Number((first.x + frac * totalDx + perpNx * archCurve).toFixed(3)),
+            y: Number((first.y + frac * totalDy + perpNy * archCurve).toFixed(3)),
+          });
         }
+      } else {
+        const alignedPts: Point2D[] = combinedRaw.map((pt, idx) => {
+          if (idx === 0 || idx === n - 1) {
+            return { x: Number(pt.x.toFixed(3)), y: Number(pt.y.toFixed(3)) };
+          }
+          const frac = idx / Math.max(1, n - 1);
+          const archCurve = Math.sin(frac * Math.PI) * (archBowAmplitudeM * 0.35);
+          const trendX = first.x + frac * totalDx + perpNx * archCurve;
+          const trendY = first.y + frac * totalDy + perpNy * archCurve;
+          // Blend 35% smooth structural pattern curve + 65% exact 90° CW rotated local geometry
+          return {
+            x: Number((trendX * 0.35 + pt.x * 0.65).toFixed(3)),
+            y: Number((trendY * 0.35 + pt.y * 0.65).toFixed(3)),
+          };
+        });
+
+        // Remove only near-duplicate points (< 0.12m apart) while keeping all real vertices
+        baseControlPts = [alignedPts[0]];
+        for (let k = 1; k < alignedPts.length - 1; k++) {
+          const prev = baseControlPts[baseControlPts.length - 1];
+          if (Math.hypot(alignedPts[k].x - prev.x, alignedPts[k].y - prev.y) >= 0.12) {
+            baseControlPts.push(alignedPts[k]);
+          }
+        }
+        baseControlPts.push(alignedPts[alignedPts.length - 1]);
       }
-      filteredAligned.push(alignedPts[alignedPts.length - 1]);
 
       alignedCount++;
       mergedTraces.push({
         ...tA,
         rawPoints: combinedRaw,
-        aiAlignedPoints: filteredAligned,
-        points: filteredAligned,
+        aiAlignedPoints: baseControlPts,
+        points: baseControlPts,
       });
     } else {
       mergedTraces.push(tA);
@@ -1468,9 +1498,179 @@ export function runAiTrendAlignmentOnDataset(
 }
 
 /**
+ * Resolves the authoritative color for any joint trace or geological feature in 3D Strip Logging,
+ * matching the Joint Set Palette (J0, J1/JS1, J2/JS2, J3/JS3, J4/JS4, J5/JS5, F1/Fault/Shear)
+ * so that trace lines and on-trace values always share the exact same color.
+ */
+export function resolveStripTraceColor(
+  setId?: string,
+  structureType?: string,
+  customColor?: string
+): string {
+  if (customColor && customColor.trim().startsWith('#')) {
+    return customColor.trim();
+  }
+  const normSet = (setId || '').trim().toUpperCase();
+  const normStruct = (structureType || '').trim().toLowerCase();
+
+  if (normSet.startsWith('J0') || normStruct.includes('bedding')) return '#0284C7';
+  if (normSet.startsWith('J1') || normSet.startsWith('JS1')) return '#DC2626';
+  if (normSet.startsWith('J2') || normSet.startsWith('JS2')) return '#16A34A';
+  if (normSet.startsWith('J3') || normSet.startsWith('JS3')) return '#D97706';
+  if (normSet.startsWith('J4') || normSet.startsWith('JS4')) return '#7C3AED';
+  if (normSet.startsWith('J5') || normSet.startsWith('JS5')) return '#0D9488';
+  if (
+    normSet.startsWith('F1') ||
+    normSet.startsWith('SZ') ||
+    normSet.startsWith('SJ') ||
+    normStruct.includes('fault') ||
+    normStruct.includes('shear')
+  ) {
+    return '#E11D48';
+  }
+  if (normStruct.includes('foliation')) return '#0284C7';
+  if (normStruct.includes('gouge') || normStruct.includes('clay')) return '#D97706';
+  if (normStruct.includes('litholog') || normStruct.includes('boundary')) return '#7C3AED';
+  return '#DC2626';
+}
+
+/**
+ * AI Pattern-Guided Smooth Curve Evaluator for 3D Strip Traces:
+ * Uses the trace's own control points PLUS learned curvature pattern from previous/neighboring
+ * traces of the same joint set (`setId`) and 3D cylindrical projection geometry (`dipDirectionDeg`, `dipDeg`)
+ * so traces render as smooth, organic geological curves rather than brittle straight segments.
+ */
+export function buildAiPatternSmoothCurvePoints(
+  trace: ContinuousStripTrace,
+  allTraces: ContinuousStripTrace[],
+  totalPerimM: number,
+  useAiAligned = true
+): Point2D[] {
+  const basePts =
+    useAiAligned && trace.aiAlignedPoints && trace.aiAlignedPoints.length >= 2
+      ? trace.aiAlignedPoints
+      : trace.points && trace.points.length >= 2
+      ? trace.points
+      : trace.rawPoints || [];
+
+  if (basePts.length < 2) return basePts;
+
+  let controlPts = basePts.map((p) => ({ x: p.x, y: p.y }));
+
+  // If the trace only has 2 points (or collinear points), infer natural curvature from:
+  // 1) Previous/neighboring traces of the same Joint Set (pattern memory), and
+  // 2) Unfolded cylindrical intersection of a dipping plane across Crown/Walls
+  const p0 = controlPts[0];
+  const pEnd = controlPts[controlPts.length - 1];
+  const dx = pEnd.x - p0.x;
+  const dy = pEnd.y - p0.y;
+  const chordLen = Math.hypot(dx, dy);
+
+  // Measure average mid-chord sag/camber from other traces in the same joint set
+  let patternSagRatio = 0;
+  let patternCount = 0;
+  for (const other of allTraces) {
+    if (other.id === trace.id) continue;
+    const sameSet =
+      (other.setId && trace.setId && other.setId === trace.setId) ||
+      (Math.abs((other.dipDirectionDeg ?? 0) - (trace.dipDirectionDeg ?? 0)) <= 10 &&
+        Math.abs((other.dipDeg ?? 0) - (trace.dipDeg ?? 0)) <= 10);
+    if (!sameSet) continue;
+    const oPts = other.points || [];
+    if (oPts.length >= 3) {
+      const oStart = oPts[0];
+      const oLast = oPts[oPts.length - 1];
+      const oMid = oPts[Math.floor(oPts.length / 2)];
+      const oLen = Math.hypot(oLast.x - oStart.x, oLast.y - oStart.y);
+      if (oLen > 0.5) {
+        const linY = (oStart.y + oLast.y) * 0.5;
+        patternSagRatio += (oMid.y - linY) / oLen;
+        patternCount++;
+      }
+    }
+  }
+
+  const meanPatternSag =
+    patternCount > 0 ? Math.max(-0.18, Math.min(0.18, patternSagRatio / patternCount)) : 0;
+
+  if (controlPts.length === 2 && chordLen > 0.4) {
+    const dipRad = ((trace.dipDeg || 65) * Math.PI) / 180;
+    const dipDirRad = ((trace.dipDirectionDeg || 180) * Math.PI) / 180;
+    // Cylindrical unwrap sinusoidal bow when crossing tunnel arch
+    const defaultSag = Math.sin(dipDirRad) * Math.cos(dipRad) * 0.085;
+    const effectiveSag = patternCount > 0 ? meanPatternSag * 0.7 + defaultSag * 0.3 : defaultSag;
+    const nx = -dy / chordLen;
+    const ny = dx / chordLen;
+    const mid1: Point2D = {
+      x: p0.x + dx * 0.33 + nx * chordLen * effectiveSag * 0.86,
+      y: Math.max(0.15, Math.min(totalPerimM - 0.15, p0.y + dy * 0.33 + ny * chordLen * effectiveSag * 0.86)),
+    };
+    const mid2: Point2D = {
+      x: p0.x + dx * 0.67 + nx * chordLen * effectiveSag * 0.86,
+      y: Math.max(0.15, Math.min(totalPerimM - 0.15, p0.y + dy * 0.67 + ny * chordLen * effectiveSag * 0.86)),
+    };
+    controlPts = [p0, mid1, mid2, pEnd];
+  } else if (controlPts.length >= 3) {
+    // Gently relax any sharp brittle vertex angles using a 1-pass Chaikin/Laplacian blend
+    const relaxed: Point2D[] = [controlPts[0]];
+    for (let i = 1; i < controlPts.length - 1; i++) {
+      const prev = controlPts[i - 1];
+      const curr = controlPts[i];
+      const next = controlPts[i + 1];
+      relaxed.push({
+        x: prev.x * 0.22 + curr.x * 0.56 + next.x * 0.22,
+        y: Math.max(
+          0.1,
+          Math.min(totalPerimM - 0.1, prev.y * 0.22 + curr.y * 0.56 + next.y * 0.22)
+        ),
+      });
+    }
+    relaxed.push(controlPts[controlPts.length - 1]);
+    controlPts = relaxed;
+  }
+
+  // Evaluate smooth Catmull-Rom spline across controlPts
+  const dense: Point2D[] = [];
+  const subdivisions = 8;
+  for (let i = 0; i < controlPts.length - 1; i++) {
+    const pA = controlPts[Math.max(0, i - 1)];
+    const pB = controlPts[i];
+    const pC = controlPts[i + 1];
+    const pD = controlPts[Math.min(controlPts.length - 1, i + 2)];
+    for (let s = 0; s < subdivisions; s++) {
+      const t = s / subdivisions;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const x =
+        0.5 *
+        (2 * pB.x +
+          (-pA.x + pC.x) * t +
+          (2 * pA.x - 5 * pB.x + 4 * pC.x - pD.x) * t2 +
+          (-pA.x + 3 * pB.x - 3 * pC.x + pD.x) * t3);
+      const y =
+        0.5 *
+        (2 * pB.y +
+          (-pA.y + pC.y) * t +
+          (2 * pA.y - 5 * pB.y + 4 * pC.y - pD.y) * t2 +
+          (-pA.y + 3 * pB.y - 3 * pC.y + pD.y) * t3);
+      dense.push({
+        x,
+        y: Math.max(0.08, Math.min(totalPerimM - 0.08, y)),
+      });
+    }
+  }
+  dense.push(controlPts[controlPts.length - 1]);
+  return dense;
+}
+
+/**
  * Smooth Ribbon Warping Engine:
- * Converts any (rd, perimOffset) coordinate into a smooth, non-brittle curved ribbon SVG coordinate
- * by continuously integrating the tunnel drive azimuth with cosine smoothing across pull boundaries.
+ * Converts any (rd, perimOffset) coordinate into a smooth, non-collapsing curved ribbon SVG coordinate
+ * when the tunnel drive direction changes across pulls.
+ * Enforces:
+ * 1) Shortest signed angular unwrap across 0°/360°
+ * 2) Strict minimum radius of curvature (R >= stripHeightPx * 1.15) so inner walls NEVER pinch, cross, or collapse
+ * 3) Smooth end-tapering so the start and end of the tunnel strip remain clean and orthogonal
  */
 export interface SmoothRibbonSample {
   rd: number;
@@ -1493,52 +1693,95 @@ export function buildSmoothRibbonTransform(
   centerY: number,
   pxPerRdM: number,
   stripHeightPx: number,
-  angularExaggeration = 3.2
+  angularExaggeration = 1.0
 ) {
   const stepM = 0.25;
   const spanM = Math.max(1, viewEndRd - viewStartRd);
   const numSteps = Math.ceil(spanM / stepM) + 1;
-  const baseAz = pulls[0]?.driveAzimuthDeg ?? 160;
+  const sortedPulls = [...pulls].sort((a, b) => a.fromRd - b.fromRd);
+  const baseAz = sortedPulls[0]?.driveAzimuthDeg ?? 160;
 
-  // Helper to get raw pull azimuth at any RD
-  const getRawAzAtRd = (rd: number): number => {
-    for (const p of pulls) {
-      if (rd >= p.fromRd && rd <= p.toRd) return p.driveAzimuthDeg;
+  // Build continuous unwrapped azimuth profile per pull so crossing 0°/360° never causes a 360° spin
+  const unwrappedPullAz: { fromRd: number; toRd: number; unwrappedAz: number; rawAz: number }[] = [];
+  let prevUnwrapped = baseAz;
+  for (const p of sortedPulls) {
+    const rawAz = typeof p.driveAzimuthDeg === 'number' && Number.isFinite(p.driveAzimuthDeg)
+      ? p.driveAzimuthDeg
+      : baseAz;
+    const signedDiff = ((rawAz - prevUnwrapped + 540) % 360) - 180;
+    const nextUnwrapped = prevUnwrapped + signedDiff;
+    unwrappedPullAz.push({
+      fromRd: p.fromRd,
+      toRd: p.toRd,
+      unwrappedAz: nextUnwrapped,
+      rawAz,
+    });
+    prevUnwrapped = nextUnwrapped;
+  }
+
+  const getUnwrappedAzAtRd = (rd: number): number => {
+    for (const p of unwrappedPullAz) {
+      if (rd >= p.fromRd && rd <= p.toRd) return p.unwrappedAz;
     }
-    if (pulls.length === 0) return baseAz;
-    if (rd < pulls[0].fromRd) return pulls[0].driveAzimuthDeg;
-    return pulls[pulls.length - 1].driveAzimuthDeg;
+    if (unwrappedPullAz.length === 0) return baseAz;
+    if (rd < unwrappedPullAz[0].fromRd) return unwrappedPullAz[0].unwrappedAz;
+    return unwrappedPullAz[unwrappedPullAz.length - 1].unwrappedAz;
   };
 
-  // Smooth azimuth using a +/- 2.0m Gaussian/Cosine window so pull transitions bend smoothly without brittle corners
+  // Wide cosine-bell smoothing window so drive direction changes curve gently
+  const windowRadiusM = Math.max(3.5, Math.min(8.0, spanM * 0.18));
   const getSmoothAzAtRd = (rd: number): number => {
-    const windowRadius = 2.2;
-    const samples = 9;
+    const kernelSteps = 13;
     let weightedSum = 0;
     let weightTotal = 0;
-    for (let i = 0; i < samples; i++) {
-      const frac = (i / (samples - 1)) * 2 - 1; // -1 .. +1
-      const sampleRd = rd + frac * windowRadius;
-      const w = Math.cos((frac * Math.PI) / 2); // Smooth cosine bell
-      weightedSum += getRawAzAtRd(sampleRd) * w;
+    for (let i = 0; i < kernelSteps; i++) {
+      const frac = (i / (kernelSteps - 1)) * 2 - 1; // -1 .. +1
+      const sampleRd = Math.max(viewStartRd, Math.min(viewEndRd, rd + frac * windowRadiusM));
+      const w = 0.5 * (1 + Math.cos(frac * Math.PI)); // Raised cosine Hann window
+      weightedSum += getUnwrappedAzAtRd(sampleRd) * w;
       weightTotal += w;
     }
-    return weightTotal > 0 ? weightedSum / weightTotal : getRawAzAtRd(rd);
+    return weightTotal > 0 ? weightedSum / weightTotal : getUnwrappedAzAtRd(rd);
   };
 
   const samples: SmoothRibbonSample[] = [];
   let curX = startX;
   let curY = centerY;
+  let currentAngleRad = 0;
+
+  // CRITICAL ANTI-COLLAPSE CONSTRAINT:
+  // For a ribbon of height `stripHeightPx`, the half-width is `stripHeightPx / 2`.
+  // To guarantee the inner wall NEVER folds, pinches, or self-intersects, the centerline
+  // radius of curvature R = dS / |dTheta| MUST be strictly greater than `stripHeightPx * 1.15`.
+  const minSafeRadiusPx = Math.max(120, stripHeightPx * 1.15);
+  const maxVisualBendRad = (24 * Math.PI) / 180; // Never rotate ribbon > ±24° on 2D sheet
 
   for (let i = 0; i < numSteps; i++) {
     const rd = Math.min(viewEndRd, viewStartRd + i * stepM);
     const smoothAz = getSmoothAzAtRd(rd);
-    const deltaDeg = smoothAz - baseAz;
-    const angleRad = ((deltaDeg * angularExaggeration) * Math.PI) / 180;
-    const tx = Math.cos(angleRad);
-    const ty = Math.sin(angleRad);
-    const nx = -Math.sin(angleRad);
-    const ny = Math.cos(angleRad);
+    const rawDeltaDeg = smoothAz - baseAz;
+
+    // Soft-saturate target visual angle so small turns (1°–10°) are clearly visible
+    // while large turns (30°–90°) never fold the 2D strip back onto itself
+    const scaledDeg = rawDeltaDeg * Math.max(0.5, Math.min(1.8, angularExaggeration));
+    const targetAngleRad =
+      maxVisualBendRad * Math.tanh(scaledDeg / 28);
+
+    if (i === 0) {
+      currentAngleRad = 0;
+    } else {
+      const prevRd = Math.min(viewEndRd, viewStartRd + (i - 1) * stepM);
+      const dS = Math.max(0.5, (rd - prevRd) * pxPerRdM);
+      const maxStepRad = dS / minSafeRadiusPx;
+      const diffRad = targetAngleRad - currentAngleRad;
+      const clampedStepRad = Math.max(-maxStepRad, Math.min(maxStepRad, diffRad));
+      currentAngleRad += clampedStepRad;
+    }
+
+    const tx = Math.cos(currentAngleRad);
+    const ty = Math.sin(currentAngleRad);
+    const nx = -Math.sin(currentAngleRad);
+    const ny = Math.cos(currentAngleRad);
 
     samples.push({
       rd,
@@ -1548,8 +1791,8 @@ export function buildSmoothRibbonTransform(
       ty,
       nx,
       ny,
-      azimuthDeg: smoothAz,
-      deltaDeg,
+      azimuthDeg: ((smoothAz % 360) + 360) % 360,
+      deltaDeg: rawDeltaDeg,
     });
 
     if (i < numSteps - 1) {
@@ -1711,8 +1954,29 @@ function mapInfillingToFillingThickness(infilling?: string, apertureMm?: string)
 }
 
 /**
+ * Rotates normalized 2D unwrapped surface coordinates (u2d in [0, 1] left-to-right, v2d in [0, 1] top-to-bottom)
+ * 90 degrees clockwise around the center (0.5, 0.5) to map from the horizontal 2D unwrapped view
+ * onto the vertical 3D unwrapped strip, while keeping trace and dip angles identical.
+ *
+ * Mathematical 90° clockwise rotation in screen/image space (+u right, +v down):
+ *   u3d = 1 - v2d   (maps 2D bottom-to-top axis onto 3D left-to-right chainage axis)
+ *   v3d = u2d       (maps 2D left-to-right axis onto 3D top-to-bottom perimeter axis)
+ */
+export function rotateUnwrapped2DTo3DClockwise90(
+  u2d: number,
+  v2d: number
+): { u3d: number; v3d: number } {
+  const clampedU = Math.max(0, Math.min(1, u2d));
+  const clampedV = Math.max(0, Math.min(1, v2d));
+  return {
+    u3d: Math.max(0, Math.min(1, 1 - clampedV)),
+    v3d: clampedU,
+  };
+}
+
+/**
  * Unwraps a 2D point from any of the 4 mapping surfaces ('leftWall', 'crown', 'rightWall', 'face')
- * into authoritative 3D continuous strip coordinates:
+ * into authoritative 3D continuous strip coordinates by rotating the 2D unwrapped trace 90° clockwise:
  * - x = Chainage RD (m) within [interval.fromRd, interval.toRd]
  * - y = Unfolded Perimeter Offset (m) within [0, totalPerimM]
  *       where [0 .. leftWallArc] = Left Wall (Floor to Left Springline),
@@ -1741,30 +2005,36 @@ export function mapUnwrappedSurfacePointTo3DStrip(
   const wallH = Math.max(0.5, geom?.wallHeight || height * 0.58);
 
   if (surface === 'leftWall') {
-    // leftWall world coords: x in [0, roundLen], y in [0, leftWallArc] (0 = floor, leftWallArc = springline)
-    const fracRd = Math.max(0, Math.min(1, pt.x / safeRound));
-    const rdX = interval.fromRd + fracRd * pullSpan;
-    const perimY = Math.max(0.15, Math.min(leftWallArc, (pt.y / Math.max(0.5, leftWallArc)) * leftWallArc));
-    return { x: Number(rdX.toFixed(2)), y: Number(perimY.toFixed(2)) };
+    // 2D unwrapped image coordinates: u2d in [0, 1] (left-to-right), v2d in [0, 1] (top-to-bottom of 2D image)
+    const u2d = Math.max(0, Math.min(1, pt.x / safeRound));
+    const v2d = Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.5, leftWallArc)));
+    // Rotate 90° clockwise because 2D unwrapping is horizontal and 3D strip is vertical
+    const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+    const rdX = interval.fromRd + u3d * pullSpan;
+    const perimY = v3d * leftWallArc;
+    return { x: Number(rdX.toFixed(3)), y: Number(perimY.toFixed(3)) };
   }
 
   if (surface === 'crown') {
-    // crown world coords: x in [-crownArc/2, +crownArc/2], y in [0, roundLen]
-    const fracRd = Math.max(0, Math.min(1, pt.y / safeRound));
-    const rdX = interval.fromRd + fracRd * pullSpan;
-    const normAcross = Math.max(0, Math.min(1, (pt.x + crownArc * 0.5) / Math.max(0.5, crownArc)));
-    const perimY = leftWallArc + normAcross * crownArc;
-    return { x: Number(rdX.toFixed(2)), y: Number(perimY.toFixed(2)) };
+    // 2D unwrapped image coordinates: u2d in [0, 1] (left-to-right), v2d in [0, 1] (top-to-bottom of 2D image)
+    const u2d = Math.max(0, Math.min(1, (pt.x + crownArc * 0.5) / Math.max(0.5, crownArc)));
+    const v2d = Math.max(0, Math.min(1, 1 - pt.y / safeRound));
+    // Rotate 90° clockwise because 2D unwrapping is horizontal and 3D strip is vertical
+    const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+    const rdX = interval.fromRd + u3d * pullSpan;
+    const perimY = leftWallArc + v3d * crownArc;
+    return { x: Number(rdX.toFixed(3)), y: Number(perimY.toFixed(3)) };
   }
 
   if (surface === 'rightWall') {
-    // rightWall world coords: x in [0, roundLen], y in [0, rightWallArc] (0 = floor, rightWallArc = springline)
-    const fracRd = Math.max(0, Math.min(1, pt.x / safeRound));
-    const rdX = interval.fromRd + fracRd * pullSpan;
-    // Unfolded strip goes Crown -> Right Springline -> Right Wall Floor
-    const distFromSpringline = Math.max(0, Math.min(rightWallArc - 0.15, rightWallArc - pt.y));
-    const perimY = leftWallArc + crownArc + distFromSpringline;
-    return { x: Number(rdX.toFixed(2)), y: Number(perimY.toFixed(2)) };
+    // 2D unwrapped image coordinates: u2d in [0, 1] (left-to-right), v2d in [0, 1] (top-to-bottom of 2D image)
+    const u2d = Math.max(0, Math.min(1, pt.x / safeRound));
+    const v2d = Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.5, rightWallArc)));
+    // Rotate 90° clockwise because 2D unwrapping is horizontal and 3D strip is vertical
+    const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+    const rdX = interval.fromRd + u3d * pullSpan;
+    const perimY = leftWallArc + crownArc + v3d * rightWallArc;
+    return { x: Number(rdX.toFixed(3)), y: Number(perimY.toFixed(3)) };
   }
 
   // 'face' surface: x in [-width/2, +width/2], y in [0, height]
@@ -1814,7 +2084,10 @@ function derivePullReportDetailsFromRecord(
   const qParams = rec.qIndexParams;
   const gsiParams = rec.gsiParams;
   const summary = rec.rockMassSummary;
-  const joints = rec.joints || [];
+  // 3D mapping is strictly based on Wall & Crown (leftWall, crown, rightWall) — never Face traces
+  const joints = (rec.joints || []).filter(
+    (j) => j.surface === 'leftWall' || j.surface === 'crown' || j.surface === 'rightWall'
+  );
 
   // 1. Calculate RMR Value & Rock Class
   let rmrValue: number | undefined;
@@ -2101,9 +2374,16 @@ export function syncSavedProjectsIntoStripDatasets(
 
   const effSettings = liveSessionExtra?.settings || activeSettings;
   const effGeometry = liveSessionExtra?.geometry || activeGeometry;
-  const effJoints = liveSessionExtra?.joints || activeJoints || [];
-  const effLithology = liveSessionExtra?.lithologyRegions || activeLithology || [];
-  const effSymbols = liveSessionExtra?.placedSymbols || activeSymbols || [];
+  // 3D mapping is strictly based on Wall & Crown (leftWall, crown, rightWall) — exclude Face ('face')
+  const effJoints = (liveSessionExtra?.joints || activeJoints || []).filter(
+    (j) => j.surface === 'leftWall' || j.surface === 'crown' || j.surface === 'rightWall'
+  );
+  const effLithology = (liveSessionExtra?.lithologyRegions || activeLithology || []).filter(
+    (lr) => lr.surface === 'leftWall' || lr.surface === 'crown' || lr.surface === 'rightWall'
+  );
+  const effSymbols = (liveSessionExtra?.placedSymbols || activeSymbols || []).filter(
+    (sym) => sym.surface === 'leftWall' || sym.surface === 'crown' || sym.surface === 'rightWall'
+  );
   const effRmr = liveSessionExtra?.rmrParams;
   const effQ = liveSessionExtra?.qIndexParams;
   const effGsi = liveSessionExtra?.gsiParams;
@@ -2111,15 +2391,24 @@ export function syncSavedProjectsIntoStripDatasets(
   const effOverbreak = liveSessionExtra?.overbreakAnalysis;
   const effPhotos = liveSessionExtra?.photos;
 
+  const hasLiveWallCrownPhotos = Boolean(
+    effPhotos?.leftWall?.warpedImage ||
+      effPhotos?.leftWall?.image ||
+      effPhotos?.crown?.warpedImage ||
+      effPhotos?.crown?.image ||
+      effPhotos?.rightWall?.warpedImage ||
+      effPhotos?.rightWall?.image
+  );
+
   const hasLiveContent =
-    Boolean(effSettings?.projectName?.trim() || effSettings?.locationName?.trim() || effSettings?.tunnelName?.trim()) &&
-    (effJoints.length > 0 ||
-      effLithology.length > 0 ||
-      effSymbols.length > 0 ||
-      Boolean(effSummary?.rockType?.trim()) ||
-      Boolean(effSummary?.weatheringGrade?.trim()) ||
-      Boolean(effRmr?.intactStrengthRating !== null && effRmr?.intactStrengthRating !== undefined) ||
-      Boolean(effQ?.rqd));
+    effJoints.length > 0 ||
+    effLithology.length > 0 ||
+    effSymbols.length > 0 ||
+    hasLiveWallCrownPhotos ||
+    Boolean(effSummary?.rockType?.trim()) ||
+    Boolean(effSummary?.weatheringGrade?.trim()) ||
+    Boolean(effRmr?.intactStrengthRating !== null && effRmr?.intactStrengthRating !== undefined) ||
+    Boolean(effQ?.rqd);
 
   if (effSettings && effGeometry && hasLiveContent) {
     const liveProjName = (effSettings.projectName || 'Underground Project').trim();
@@ -2317,6 +2606,12 @@ export function syncSavedProjectsIntoStripDatasets(
       dataset.tunnelArchHeightM = firstGeom?.height || dataset.tunnelArchHeightM;
     }
 
+    // Purge all previous auto-synced items before re-populating strictly from Wall & Crown surfaces (leftWall, crown, rightWall).
+    // This ensures any previously synced Face traces from older sessions are completely removed from 3D mapping.
+    dataset.traces = dataset.traces.filter((t) => !t.id.startsWith('sync-'));
+    dataset.lithologyZones = dataset.lithologyZones.filter((l) => !l.id.startsWith('sync-'));
+    dataset.waterSymbols = dataset.waterSymbols.filter((w) => !w.id.startsWith('sync-'));
+
     for (const rec of records) {
       const roundLen = Math.max(1.0, rec.settings?.roundLength || 3.5);
       const interval = parsePullIntervalFromRecord(
@@ -2386,6 +2681,11 @@ export function syncSavedProjectsIntoStripDatasets(
         status: 'MAPPED',
         linkedSavedProjectId: rec.id,
         dateMapped: rec.date,
+        surfacePhotos: {
+          leftWall: rec.photos?.leftWall?.warpedImage || rec.photos?.leftWall?.image || undefined,
+          crown: rec.photos?.crown?.warpedImage || rec.photos?.crown?.image || undefined,
+          rightWall: rec.photos?.rightWall?.warpedImage || rec.photos?.rightWall?.image || undefined,
+        },
       };
 
       if (existingPullIdx >= 0) {
@@ -2401,7 +2701,9 @@ export function syncSavedProjectsIntoStripDatasets(
       // Remove previous auto-synced traces/lithology/water for this record ID so updates in Face/Unwrapped Log refresh cleanly
       const recPrefix = `sync-${rec.id}-`;
       dataset.traces = dataset.traces.filter((t) => !t.id.startsWith(recPrefix));
-      dataset.lithologyZones = dataset.lithologyZones.filter((l) => !l.id.startsWith(recPrefix));
+      dataset.lithologyZones = dataset.lithologyZones.filter(
+        (l) => !l.id.startsWith(recPrefix) && !l.id.endsWith('-lith-base')
+      );
       dataset.waterSymbols = dataset.waterSymbols.filter((w) => !w.id.startsWith(recPrefix));
 
       const recGeom = rec.geometry || firstGeom;
@@ -2410,7 +2712,8 @@ export function syncSavedProjectsIntoStripDatasets(
       const recCrownArc = Number((recGeom?.crownArcLength || 6.0).toFixed(2));
       const recTotalPerim = Number((recLeftWallArc + recCrownArc + recRightWallArc).toFixed(2));
 
-      // 1. Sync All Unwrapped & Face Joint Traces (leftWall, crown, rightWall, face)
+      // 1. Sync ONLY Unwrapped Wall & Crown Joint Traces (leftWall, crown, rightWall) — NEVER Face ('face') traces!
+      // Preserve exact points and exact locations as traced on the unwrapped image (no sorting or auto-bending until AI Learn is clicked).
       const structMap: Record<string, StripStructureTypeId> = {
         bedding: 'Bedding',
         shale_band: 'Bedding',
@@ -2428,14 +2731,40 @@ export function syncSavedProjectsIntoStripDatasets(
         joint: 'JS2 - Main Joint',
       };
 
-      for (const j of rec.joints || []) {
+      const wallCrownJoints = (rec.joints || []).filter(
+        (j) => j.surface === 'leftWall' || j.surface === 'crown' || j.surface === 'rightWall'
+      );
+
+      for (const j of wallCrownJoints) {
         if (!j.geometry || j.geometry.length < 2) continue;
         const traceId = `${recPrefix}tr-${j.id}`;
-        const mappedPts: Point2D[] = j.geometry.map((pt, idx) => {
+        const safeRound = Math.max(0.5, roundLen);
+        const uvPts: Point2D[] = j.geometry.map((pt) => {
+          if (j.surface === 'leftWall') {
+            const u2d = Math.max(0, Math.min(1, pt.x / safeRound));
+            const v2d = Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.5, recLeftWallArc)));
+            const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+            return { x: u3d, y: v3d };
+          }
+          if (j.surface === 'crown') {
+            const u2d = Math.max(
+              0,
+              Math.min(1, (pt.x + recCrownArc * 0.5) / Math.max(0.5, recCrownArc))
+            );
+            const v2d = Math.max(0, Math.min(1, 1 - pt.y / safeRound));
+            const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+            return { x: u3d, y: v3d };
+          }
+          const u2d = Math.max(0, Math.min(1, pt.x / safeRound));
+          const v2d = Math.max(0, Math.min(1, 1 - pt.y / Math.max(0.5, recRightWallArc)));
+          const { u3d, v3d } = rotateUnwrapped2DTo3DClockwise90(u2d, v2d);
+          return { x: u3d, y: v3d };
+        });
+        const exactMappedPts: Point2D[] = j.geometry.map((pt, idx) => {
           const vFrac = idx / Math.max(1, j.geometry.length - 1);
           return mapUnwrappedSurfacePointTo3DStrip(
             pt,
-            j.surface || 'face',
+            j.surface,
             interval,
             roundLen,
             recGeom,
@@ -2450,9 +2779,7 @@ export function syncSavedProjectsIntoStripDatasets(
           );
         });
 
-        // Sort points by chainage RD if they span across RD so trend alignment works smoothly
-        const sortedPts = [...mappedPts].sort((a, b) => a.x - b.x);
-        const setLabel = j.set || 'JS1';
+        const setLabel = j.set || 'J1';
         let structureType: StripStructureTypeId =
           structMap[j.featureType || 'joint'] || 'JS2 - Main Joint';
         if (j.featureType === 'joint') {
@@ -2462,7 +2789,7 @@ export function syncSavedProjectsIntoStripDatasets(
           else structureType = 'Secondary Joint';
         }
 
-        dataset.traces.push({
+        const rawTraceObj: ContinuousStripTrace = {
           id: traceId,
           structureType,
           setId: setLabel,
@@ -2472,9 +2799,13 @@ export function syncSavedProjectsIntoStripDatasets(
           dipDirectionDeg: Math.round(j.dipDirection),
           dipDeg: Math.round(j.dip),
           fillingThickness: mapInfillingToFillingThickness(j.infilling, j.apertureMm),
-          rawPoints: sortedPts,
-          points: sortedPts,
-        });
+          sourceSurface: j.surface as 'leftWall' | 'crown' | 'rightWall',
+          uvPoints: uvPts,
+          rawPoints: exactMappedPts,
+          points: exactMappedPts,
+        };
+
+        dataset.traces.push(rawTraceObj);
 
         // If joint has wet/dripping/flowing groundwater condition, also place a water symbol at its midpoint
         if (
@@ -2482,7 +2813,7 @@ export function syncSavedProjectsIntoStripDatasets(
           j.waterCondition !== 'Dry' &&
           j.waterCondition !== 'Completely Dry'
         ) {
-          const midPt = sortedPts[Math.floor(sortedPts.length / 2)];
+          const midPt = exactMappedPts[Math.floor(exactMappedPts.length / 2)];
           if (midPt) {
             const condMap: Record<string, StripGroundwaterId> = {
               Damp: 'Moist/Damp',
@@ -2501,9 +2832,13 @@ export function syncSavedProjectsIntoStripDatasets(
         }
       }
 
-      // 2. Sync All Unwrapped & Face Lithology Regions into 3D Strip Lithology Zones
-      if (rec.lithologyRegions && rec.lithologyRegions.length > 0) {
-        for (const lr of rec.lithologyRegions) {
+      // 2. Sync ONLY Unwrapped Wall & Crown Lithology Regions (leftWall, crown, rightWall) — NEVER Face ('face')
+      // Do NOT fill empty space with synthetic base lithology polygons! Only show exact user-traced polygons.
+      const wallCrownLithology = (rec.lithologyRegions || []).filter(
+        (lr) => lr.surface === 'leftWall' || lr.surface === 'crown' || lr.surface === 'rightWall'
+      );
+      if (wallCrownLithology.length > 0) {
+        for (const lr of wallCrownLithology) {
           const polyPts = lr.polygon || lr.polygonPoints || [];
           if (polyPts.length < 3) continue;
           const rockMeta = mapRawRockToStripRockType(
@@ -2512,7 +2847,7 @@ export function syncSavedProjectsIntoStripDatasets(
           const mappedPoly = polyPts.map((pt, idx) =>
             mapUnwrappedSurfacePointTo3DStrip(
               pt,
-              lr.surface || 'face',
+              lr.surface,
               interval,
               roundLen,
               recGeom,
@@ -2545,28 +2880,17 @@ export function syncSavedProjectsIntoStripDatasets(
               patLower.includes('fault'),
           });
         }
-      } else {
-        // Ensure a base lithology zone covers this pull interval if user specified rockType in summary/settings
-        dataset.lithologyZones.push({
-          id: `${recPrefix}lith-base`,
-          rockType: mappedRockMeta.rockType,
-          codeSymbol: mappedRockMeta.codeSymbol,
-          label: `${mappedRockMeta.codeSymbol} - ${primaryRockName} (RD ${interval.fromRd}–${interval.toRd}m)`,
-          polygon: [
-            { x: interval.fromRd, y: 0 },
-            { x: interval.toRd, y: 0 },
-            { x: interval.toRd, y: recTotalPerim },
-            { x: interval.fromRd, y: recTotalPerim },
-          ],
-        });
       }
 
-      // 3. Sync Placed Geological Symbols (Water Seepage, Water Flow, Shear/Fault/Vein markers)
-      for (const sym of rec.placedSymbols || []) {
+      // 3. Sync ONLY Wall & Crown Placed Geological Symbols (leftWall, crown, rightWall) — NEVER Face ('face')
+      const wallCrownSymbols = (rec.placedSymbols || []).filter(
+        (sym) => sym.surface === 'leftWall' || sym.surface === 'crown' || sym.surface === 'rightWall'
+      );
+      for (const sym of wallCrownSymbols) {
         if (sym.visible === false) continue;
         const stripPt = mapUnwrappedSurfacePointTo3DStrip(
           sym.point,
-          sym.surface || 'face',
+          sym.surface,
           interval,
           roundLen,
           recGeom,
@@ -2624,40 +2948,10 @@ export function syncSavedProjectsIntoStripDatasets(
 export function normalizePullsWithMissingGaps(
   rawPulls: ContinuousPullRecord[]
 ): ContinuousPullRecord[] {
-  const mappedOnly = rawPulls
+  // Do NOT insert synthetic MISSING_GAP filler spaces — strictly return exact mapped pulls sorted by chainage.
+  return rawPulls
     .filter((p) => p.status === 'MAPPED')
     .sort((a, b) => a.fromRd - b.fromRd);
-
-  if (mappedOnly.length === 0) return rawPulls;
-
-  const result: ContinuousPullRecord[] = [];
-  for (let i = 0; i < mappedOnly.length; i++) {
-    const curr = mappedOnly[i];
-    if (i > 0) {
-      const prev = mappedOnly[i - 1];
-      const gap = Number((curr.fromRd - prev.toRd).toFixed(2));
-      if (gap > 0.25) {
-        result.push({
-          id: `gap-${prev.toRd}-${curr.fromRd}`,
-          fromRd: prev.toRd,
-          toRd: curr.fromRd,
-          driveAzimuthDeg: prev.driveAzimuthDeg,
-          gradientPct: prev.gradientPct || 0.166,
-          leftBoundaryAzimuthDeg: prev.leftBoundaryAzimuthDeg,
-          rockType: 'UNMAPPED PULL SPACE',
-          rockDescription: 'Pending Excavation / Field Mapping',
-          rockClass: '-',
-          supportDescription: 'Pending Excavation / Field Mapping',
-          seepageCondition: '-',
-          weatheringCondition: '-',
-          ucsRangeMpa: '-',
-          status: 'MISSING_GAP',
-        });
-      }
-    }
-    result.push(curr);
-  }
-  return result;
 }
 
 export function exportContinuousStripToDXF(dataset: ContinuousTunnelStripDataset): string {
