@@ -75,6 +75,10 @@ import {
   ContinuousStripExportStudio,
   CadLayerVisibilityState,
 } from './ContinuousStripExportStudio';
+import {
+  MatlabAnalyzerTab,
+  MatlabJointAnalyzerModal,
+} from './MatlabJointAnalyzerModal';
 
 export interface LearnedJointSetCluster {
   setId: string;
@@ -248,6 +252,9 @@ export const Continuous3DStripLoggerModal: React.FC<
   const { theme } = useTheme();
   const isLight = theme === 'light';
   const [showLayersPopover, setShowLayersPopover] = useState<boolean>(false);
+  const [showMatlabModal, setShowMatlabModal] = useState<boolean>(false);
+  const [matlabModalTab, setMatlabModalTab] =
+    useState<MatlabAnalyzerTab>('WALL_CROWN_3D_SVD');
   const [activeTool, setActiveTool] = useState<StripCanvasTool>('SELECT');
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
   const [selectedLithId, setSelectedLithId] = useState<string | null>(null);
@@ -987,6 +994,10 @@ export const Continuous3DStripLoggerModal: React.FC<
       setCadCmdStatus('ESWACAD DIST active: Click two points on the strip to measure ΔRD, ΔPerim & True Length.');
     } else if (cmd === 'AIALIGN' || cmd === 'ALIGN') {
       handleRunAiTrendAlignment();
+    } else if (cmd === 'MATLAB' || cmd === 'SVD' || cmd === 'MATRIX') {
+      setMatlabModalTab('WALL_CROWN_3D_SVD');
+      setShowMatlabModal(true);
+      setCadCmdStatus('Opened MATLAB Matrix & 3D SVD Coplanarity Analyzer.');
     } else if (cmd === 'NETWORK' || cmd === 'INTERSECT' || cmd === 'PROJECT') {
       setCanvasScope((prev) =>
         prev === 'PROJECT_NETWORK' ? 'SINGLE_LOCATION' : 'PROJECT_NETWORK'
@@ -1575,6 +1586,18 @@ export const Continuous3DStripLoggerModal: React.FC<
               Export &amp; Sheet Studio
             </button>
           </div>
+
+          <button
+            onClick={() => {
+              setMatlabModalTab('WALL_CROWN_3D_SVD');
+              setShowMatlabModal(true);
+            }}
+            className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-black flex items-center gap-1.5 shadow-xs cursor-pointer"
+            title="Open MATLAB Matrix + 3D SVD Coplanarity & Face Joint Analyzer"
+          >
+            <FileCode2 className="w-3.5 h-3.5" />
+            MATLAB 3D SVD &amp; Face Joiner
+          </button>
 
           <button
             onClick={onClose}
@@ -6579,6 +6602,20 @@ export const Continuous3DStripLoggerModal: React.FC<
           </div>
         </div>
       )}
+
+      <MatlabJointAnalyzerModal
+        isOpen={showMatlabModal}
+        onClose={() => setShowMatlabModal(false)}
+        initialTab={matlabModalTab}
+        geometry={geometry}
+        settings={settings}
+        photos={photos}
+        joints={joints}
+        jointSets={jointSets}
+        stripDataset={activeDataset}
+        onUpdateStripDataset={updateActiveDataset}
+        onStatusMessage={(msg) => setCadCmdStatus(msg)}
+      />
     </div>
   );
 };

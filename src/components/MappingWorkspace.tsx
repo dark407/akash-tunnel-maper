@@ -167,6 +167,10 @@ import {
   Interactive3DStrikeDipVisualizerModal,
   Mini3DStrikeDipPreview,
 } from './Interactive3DStrikeDipVisualizer';
+import {
+  MatlabAnalyzerTab,
+  MatlabJointAnalyzerModal,
+} from './MatlabJointAnalyzerModal';
 
 interface MappingWorkspaceProps {
   geometry: TunnelGeometry;
@@ -565,6 +569,9 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
   const [simpleAccuracyInitialTab, setSimpleAccuracyInitialTab] =
     useState<SimpleAddonTab>('full_photo_1ft_scale');
   const [show3DStrikeDipModal, setShow3DStrikeDipModal] = useState<boolean>(false);
+  const [showMatlabAnalyzerModal, setShowMatlabAnalyzerModal] = useState<boolean>(false);
+  const [matlabInitialTab, setMatlabInitialTab] =
+    useState<MatlabAnalyzerTab>('FACE_JOIN_AND_BLOCKS');
 
   // Live cursor coordinates in real-world meters & canvas pixels
   const [cursorMeters, setCursorMeters] = useState<Point2D | null>(null);
@@ -4097,6 +4104,46 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
                   >
                     <Box className="w-3.5 h-3.5" />
                     3D Strike &amp; Dip vs. Drive
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setMatlabInitialTab('TRAIC_AI_SEGMENTATION');
+                      setShowMatlabAnalyzerModal(true);
+                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-bold bg-fuchsia-600 hover:bg-fuchsia-500 text-white rounded-md shadow-2xs cursor-pointer"
+                    title="Open TRaiC AI Fracture & Trace Segmentation (adapthisteq -> fibermetric -> bwmorph('skel') -> PCA Linking)"
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    TRaiC AI Fracture &amp; Trace Segmentation
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setMatlabInitialTab('JOINT_NETWORK_3D_PCA_SVD');
+                      setShowMatlabAnalyzerModal(true);
+                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-bold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md shadow-2xs cursor-pointer"
+                    title="3D Joint Network & Plane Fitting (PCA / SVD): Fits 3D planes to trace vertices to calculate Dip, Dip Direction, Trace Persistence, and True Normal Set Spacing"
+                  >
+                    <Box className="w-3.5 h-3.5" />
+                    3D Plane Fit: Dip, Persistence &amp; Spacing
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setMatlabInitialTab(
+                        activeSurface === 'face'
+                          ? 'FACE_JOIN_AND_BLOCKS'
+                          : 'WALL_CROWN_3D_SVD'
+                      );
+                      setShowMatlabAnalyzerModal(true);
+                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-md shadow-2xs cursor-pointer"
+                    title="Open MATLAB Matrix + AI Joint & Face/3D SVD Coplanarity Analyzer"
+                  >
+                    <Calculator className="w-3.5 h-3.5" />
+                    MATLAB + AI Joint &amp; Face/3D Analyzer
                   </button>
 
                   {/* ADVANCED GEOLOGY & STRUCTURAL TOOLS (Shown when Advanced is active) */}
@@ -8949,6 +8996,20 @@ export const MappingWorkspace: React.FC<MappingWorkspaceProps> = ({
           setShow3DStrikeDipModal(false);
           setShowUnfoldedRolloutModal(true);
         }}
+      />
+
+      <MatlabJointAnalyzerModal
+        isOpen={showMatlabAnalyzerModal}
+        onClose={() => setShowMatlabAnalyzerModal(false)}
+        initialTab={matlabInitialTab}
+        geometry={geometry}
+        settings={settings}
+        photos={photos}
+        activeSurface={activeSurface}
+        joints={joints}
+        jointSets={jointSets}
+        onUpdateJoints={onUpdateJointsWithHistory}
+        onStatusMessage={onUpdateStatusMessage}
       />
     </div>
   );

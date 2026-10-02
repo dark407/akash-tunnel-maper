@@ -985,15 +985,21 @@ export function surfacePointTo3DTunnelCoords(
         : 'FACE';
   } else if (surface === 'crown') {
     const crownSpan = Math.max(0.5, geometry.crownArcLength || geometry.width);
-    const ratio01 = Math.max(0, Math.min(1, (pt.x + crownSpan / 2) / crownSpan));
+    const roundLen = Math.max(0.5, settings.roundLength || 4.0);
+    // 2D unwrapped coordinates (u2d horizontal left-to-right, v2d vertical top-to-bottom)
+    const u2d = Math.max(0, Math.min(1, (pt.x + crownSpan / 2) / crownSpan));
+    const v2d = Math.max(0, Math.min(1, 1 - pt.y / roundLen));
+    // Rotate 90 degrees clockwise: u3d = 1 - v2d (along drive), v3d = u2d (across crown arch)
+    const u3d = 1 - v2d;
+    const v3d = u2d;
     const customSample = isCustomOrAsymmetric
-      ? sampleCrossSectionZoneArcLength('crown', ratio01, geometry)
+      ? sampleCrossSectionZoneArcLength('crown', v3d, geometry)
       : null;
 
     if (customSample) {
       localRight = customSample.x;
       localUp = customSample.y;
-      localDrive = -pt.y;
+      localDrive = -u3d * roundLen;
       normal = {
         nx: Number(customSample.nx.toFixed(4)),
         ny: Number(customSample.ny.toFixed(4)),
@@ -1001,9 +1007,10 @@ export function surfacePointTo3DTunnelCoords(
       };
     } else {
       // Section 14: Crown is NOT a flat rectangle in 3D — intersect with curved crown profile
-      const phi = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pt.x / R));
+      const arcPos = (v3d - 0.5) * crownSpan;
+      const phi = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, arcPos / R));
       localRight = R * Math.sin(phi);
-      localDrive = -pt.y; // behind face along Z axis
+      localDrive = -u3d * roundLen; // behind face along Z axis
       const centerY = totalH - R;
       localUp = Math.max(wallH, centerY + R * Math.cos(phi));
       // Inward unit normal to curved crown arch
@@ -1019,15 +1026,21 @@ export function surfacePointTo3DTunnelCoords(
       0.5,
       geometry.leftWallArcLength ?? geometry.leftWallHeight ?? geometry.wallHeight ?? 4.2
     );
-    const ratio01 = Math.max(0, Math.min(1, pt.y / leftSpan));
+    const roundLen = Math.max(0.5, settings.roundLength || 4.0);
+    // 2D unwrapped coordinates (u2d horizontal left-to-right, v2d vertical top-to-bottom)
+    const u2d = Math.max(0, Math.min(1, pt.x / roundLen));
+    const v2d = Math.max(0, Math.min(1, 1 - pt.y / leftSpan));
+    // Rotate 90 degrees clockwise: u3d = 1 - v2d (along drive), v3d = u2d (invert to springline)
+    const u3d = 1 - v2d;
+    const v3d = u2d;
     const customSample = isCustomOrAsymmetric
-      ? sampleCrossSectionZoneArcLength('leftWall', ratio01, geometry)
+      ? sampleCrossSectionZoneArcLength('leftWall', v3d, geometry)
       : null;
 
     if (customSample) {
       localRight = customSample.x;
       localUp = customSample.y;
-      localDrive = -pt.x;
+      localDrive = -u3d * roundLen;
       normal = {
         nx: Number(customSample.nx.toFixed(4)),
         ny: Number(customSample.ny.toFixed(4)),
@@ -1036,8 +1049,8 @@ export function surfacePointTo3DTunnelCoords(
     } else {
       // Section 13: Left wall surface in Master Tunnel Coordinate System
       localRight = geometry.minX ?? -halfW;
-      localDrive = -pt.x;
-      localUp = pt.y;
+      localDrive = -u3d * roundLen;
+      localUp = v3d * leftSpan;
       normal = { nx: 1, ny: 0, nz: 0 };
     }
     surfaceCategory = 'LEFT_WALL';
@@ -1046,15 +1059,21 @@ export function surfacePointTo3DTunnelCoords(
       0.5,
       geometry.rightWallArcLength ?? geometry.rightWallHeight ?? geometry.wallHeight ?? 4.2
     );
-    const ratio01 = Math.max(0, Math.min(1, pt.y / rightSpan));
+    const roundLen = Math.max(0.5, settings.roundLength || 4.0);
+    // 2D unwrapped coordinates (u2d horizontal left-to-right, v2d vertical top-to-bottom)
+    const u2d = Math.max(0, Math.min(1, pt.x / roundLen));
+    const v2d = Math.max(0, Math.min(1, 1 - pt.y / rightSpan));
+    // Rotate 90 degrees clockwise: u3d = 1 - v2d (along drive), v3d = u2d (springline to invert)
+    const u3d = 1 - v2d;
+    const v3d = u2d;
     const customSample = isCustomOrAsymmetric
-      ? sampleCrossSectionZoneArcLength('rightWall', ratio01, geometry)
+      ? sampleCrossSectionZoneArcLength('rightWall', 1 - v3d, geometry)
       : null;
 
     if (customSample) {
       localRight = customSample.x;
       localUp = customSample.y;
-      localDrive = -pt.x;
+      localDrive = -u3d * roundLen;
       normal = {
         nx: Number(customSample.nx.toFixed(4)),
         ny: Number(customSample.ny.toFixed(4)),
@@ -1063,8 +1082,8 @@ export function surfacePointTo3DTunnelCoords(
     } else {
       // Section 13: Right wall surface in Master Tunnel Coordinate System
       localRight = geometry.maxX ?? halfW;
-      localDrive = -pt.x;
-      localUp = pt.y;
+      localDrive = -u3d * roundLen;
+      localUp = (1 - v3d) * rightSpan;
       normal = { nx: -1, ny: 0, nz: 0 };
     }
     surfaceCategory = 'RIGHT_WALL';
