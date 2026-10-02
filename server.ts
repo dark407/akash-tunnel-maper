@@ -644,6 +644,361 @@ ${safeJsContent}
     }
   });
 
+  /**
+   * Helper to recursively collect all workspace source files for direct GitHub push
+   * (including .github/workflows/*.yml so GitHub Actions builds the .EXE installers).
+   */
+  function collectWorkspaceFiles(
+    dirPath: string,
+    baseDir: string,
+    includeWorkflows: boolean
+  ): Array<{ path: string; content: string }> {
+    const results: Array<{ path: string; content: string }> = [];
+    const ignoredDirs = new Set([
+      'node_modules',
+      'dist',
+      'release',
+      'build',
+      '.git',
+      'coverage',
+    ]);
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (ignoredDirs.has(entry.name)) continue;
+      if (!includeWorkflows && entry.name === '.github') continue;
+      if (entry.name.startsWith('.env') && entry.name !== '.env.example') continue;
+      if (entry.name === 'bun.lock' || entry.name === 'package-lock.json') continue;
+
+      const fullPath = path.join(dirPath, entry.name);
+      const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
+
+      if (entry.isDirectory()) {
+        results.push(...collectWorkspaceFiles(fullPath, baseDir, includeWorkflows));
+      } else if (entry.isFile()) {
+        try {
+          const stat = fs.statSync(fullPath);
+          // Skip binary or huge files > 1.5MB
+          if (stat.size > 1500000) continue;
+          const content = fs.readFileSync(fullPath, 'utf8');
+          results.push({ path: relPath, content });
+        } catch {
+          // Skip unreadable file
+        }
+      }
+    }
+    return results;
+  }
+
+  /**
+   * POST /api/github/push-and-build-exe
+   * Pushes all project source files + .github/workflows directly to GitHub via Git Data REST API
+   * and triggers the GitHub Actions Windows .EXE Installer workflow.
+   */
+  app.post('/api/github/push-and-build-exe', async (req, res) => {
+    try {
+      const {
+        repoSlug = '',
+        githubToken = '',
+        commitMessage = 'Update AKASH TUNNEL MAPPER + Trigger Windows .EXE Build',
+      } = req.body || {};
+
+      const cleanRepo = String(repoSlug || '')
+        .trim()
+        .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+        .replace(/\.git$/i, '')
+        .replace(/^\/+|\/+$/g, '');
+      const token = String(githubToken || process.env.GITHUB_TOKEN || '').trim();
+
+      if (!cleanRepo || !cleanRepo.includes('/')) {
+        res.status(400).json({
+          ok: false,
+          error: 'Please enter a valid GitHub repository (e.g. username/repository).',
+        });
+        return;
+      }
+      if (!token) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'Please provide a GitHub Personal Access Token (with repo + workflow permissions) to push directly to GitHub.',
+        });
+        return;
+      }
+
+      const ghHeaders: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'AKASH-Tunnel-Mapper-GitHub-Sync',
+      };
+
+      // 1. Get repository info & default branch
+      const repoResp = await fetch(`https://api.github.com/repos/${cleanRepo}`, {
+        headers: ghHeaders,
+      });
+      if (!repoResp.ok) {
+        const errJson = await repoResp.json().catch(() => ({}));
+        res.status(repoResp.status).json({
+          ok: false,
+          error:
+            errJson.message ||
+            `Could not access repository ${cleanRepo} (HTTP ${repoResp.status}). Check repo name and token permissions.`,
+        });
+        return;
+      }
+      const repoData = (await repoResp.json()) as { default_branch?: string };
+      const branch = repoData.default_branch || 'main';
+
+      // 2. Get latest commit SHA on default branch
+      const refResp = await fetch(
+        `https://api.github.com/repos/${cleanRepo}/git/ref/heads/${branch}`,
+        { headers: ghHeaders }
+      );
+      if (!refResp.ok) {
+        const errJson = await refResp.json().catch(() => ({}));
+        res.status(refResp.status).json({
+          ok: false,
+          error:
+            errJson.message ||
+            `Could not read branch '${branch}' on ${cleanRepo}. Make sure the repository is initialized.`,
+        });
+        return;
+      }
+      const refData = (await refResp.json()) as { object?: { sha?: string } };
+      const latestCommitSha = refData.object?.sha;
+      if (!latestCommitSha) {
+        res.status(400).json({ ok: false, error: 'Could not resolve latest commit SHA.' });
+        return;
+      }
+
+      // 3. Get base tree SHA
+      const commitResp = await fetch(
+        `https://api.github.com/repos/${cleanRepo}/git/commits/${latestCommitSha}`,
+        { headers: ghHeaders }
+      );
+      const commitData = (await commitResp.json()) as { tree?: { sha?: string } };
+      const baseTreeSha = commitData.tree?.sha;
+
+      // 4. Collect workspace files (first try WITH .github/workflows; if token lacks workflow scope, retry without .github/workflows)
+      const rootDir = process.cwd();
+      let filesToPush = collectWorkspaceFiles(rootDir, rootDir, true);
+      let pushedWorkflows = true;
+
+      const buildTreePayload = (files: Array<{ path: string; content: string }>) => ({
+        base_tree: baseTreeSha,
+        tree: files.map((f) => ({
+          path: f.path,
+          mode: '100644',
+          type: 'blob',
+          content: f.content,
+        })),
+      });
+
+      let treeResp = await fetch(`https://api.github.com/repos/${cleanRepo}/git/trees`, {
+        method: 'POST',
+        headers: ghHeaders,
+        body: JSON.stringify(buildTreePayload(filesToPush)),
+      });
+
+      // Fallback if token doesn't have 'workflow' scope
+      if (!treeResp.ok) {
+        filesToPush = collectWorkspaceFiles(rootDir, rootDir, false);
+        pushedWorkflows = false;
+        treeResp = await fetch(`https://api.github.com/repos/${cleanRepo}/git/trees`, {
+          method: 'POST',
+          headers: ghHeaders,
+          body: JSON.stringify(buildTreePayload(filesToPush)),
+        });
+      }
+
+      if (!treeResp.ok) {
+        const errJson = await treeResp.json().catch(() => ({}));
+        res.status(treeResp.status).json({
+          ok: false,
+          error: errJson.message || 'Failed to create Git tree on GitHub.',
+        });
+        return;
+      }
+      const treeData = (await treeResp.json()) as { sha?: string };
+
+      // 5. Create Commit
+      const newCommitResp = await fetch(
+        `https://api.github.com/repos/${cleanRepo}/git/commits`,
+        {
+          method: 'POST',
+          headers: ghHeaders,
+          body: JSON.stringify({
+            message: commitMessage,
+            tree: treeData.sha,
+            parents: [latestCommitSha],
+          }),
+        }
+      );
+
+      let finalNewCommitData: { sha?: string } = {};
+      if (!newCommitResp.ok && pushedWorkflows) {
+        // GitHub sometimes rejects .github/workflows at commit creation if 'workflow' scope is missing
+        filesToPush = collectWorkspaceFiles(rootDir, rootDir, false);
+        pushedWorkflows = false;
+        const retryTreeResp = await fetch(
+          `https://api.github.com/repos/${cleanRepo}/git/trees`,
+          {
+            method: 'POST',
+            headers: ghHeaders,
+            body: JSON.stringify(buildTreePayload(filesToPush)),
+          }
+        );
+        const retryTreeData = (await retryTreeResp.json()) as { sha?: string };
+        const retryCommitResp = await fetch(
+          `https://api.github.com/repos/${cleanRepo}/git/commits`,
+          {
+            method: 'POST',
+            headers: ghHeaders,
+            body: JSON.stringify({
+              message: commitMessage,
+              tree: retryTreeData.sha,
+              parents: [latestCommitSha],
+            }),
+          }
+        );
+        if (!retryCommitResp.ok) {
+          const errJson = await retryCommitResp.json().catch(() => ({}));
+          res.status(retryCommitResp.status).json({
+            ok: false,
+            error: errJson.message || 'Failed to create commit on GitHub.',
+          });
+          return;
+        }
+        finalNewCommitData = (await retryCommitResp.json()) as { sha?: string };
+      } else if (!newCommitResp.ok) {
+        const errJson = await newCommitResp.json().catch(() => ({}));
+        res.status(newCommitResp.status).json({
+          ok: false,
+          error: errJson.message || 'Failed to create commit on GitHub.',
+        });
+        return;
+      } else {
+        finalNewCommitData = (await newCommitResp.json()) as { sha?: string };
+      }
+
+      // 6. Update branch reference to point to new commit
+      const updateRefResp = await fetch(
+        `https://api.github.com/repos/${cleanRepo}/git/refs/heads/${branch}`,
+        {
+          method: 'PATCH',
+          headers: ghHeaders,
+          body: JSON.stringify({
+            sha: finalNewCommitData.sha,
+            force: true,
+          }),
+        }
+      );
+      if (!updateRefResp.ok) {
+        const errJson = await updateRefResp.json().catch(() => ({}));
+        res.status(updateRefResp.status).json({
+          ok: false,
+          error: errJson.message || `Failed to update branch ${branch} on GitHub.`,
+        });
+        return;
+      }
+
+      // 7. Explicitly trigger workflow_dispatch on build-installer.yml in case push didn't trigger it
+      let workflowTriggered = false;
+      try {
+        const dispatchResp = await fetch(
+          `https://api.github.com/repos/${cleanRepo}/actions/workflows/build-installer.yml/dispatches`,
+          {
+            method: 'POST',
+            headers: ghHeaders,
+            body: JSON.stringify({ ref: branch }),
+          }
+        );
+        workflowTriggered = dispatchResp.ok;
+      } catch {
+        // Push event itself already triggers on: push
+      }
+
+      res.json({
+        ok: true,
+        repo: cleanRepo,
+        branch,
+        commitSha: finalNewCommitData.sha,
+        filesCount: filesToPush.length,
+        pushedWorkflows,
+        workflowTriggered,
+        actionsUrl: `https://github.com/${cleanRepo}/actions`,
+        releasesUrl: `https://github.com/${cleanRepo}/releases/tag/latest`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'GitHub push error';
+      res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  /**
+   * GET /api/github/actions-status
+   * Checks the latest GitHub Actions workflow runs and latest .EXE Release for a repository.
+   */
+  app.get('/api/github/actions-status', async (req, res) => {
+    try {
+      const rawRepo = String(req.query.repo || '')
+        .trim()
+        .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+        .replace(/\.git$/i, '')
+        .replace(/^\/+|\/+$/g, '');
+      const token = String(req.query.token || process.env.GITHUB_TOKEN || '').trim();
+
+      if (!rawRepo || !rawRepo.includes('/')) {
+        res.status(400).json({ ok: false, error: 'Invalid repo slug' });
+        return;
+      }
+
+      const ghHeaders: Record<string, string> = {
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'AKASH-Tunnel-Mapper-GitHub-Sync',
+      };
+      if (token) {
+        ghHeaders.Authorization = `Bearer ${token}`;
+      }
+
+      const runsResp = await fetch(
+        `https://api.github.com/repos/${rawRepo}/actions/runs?per_page=5`,
+        { headers: ghHeaders }
+      );
+      const runsData = runsResp.ok
+        ? ((await runsResp.json()) as {
+            workflow_runs?: Array<{
+              id: number;
+              name: string;
+              status: string;
+              conclusion: string | null;
+              html_url: string;
+              created_at: string;
+              head_sha: string;
+            }>;
+          })
+        : { workflow_runs: [] };
+
+      res.json({
+        ok: true,
+        runs: (runsData.workflow_runs || []).map((r) => ({
+          id: r.id,
+          name: r.name,
+          status: r.status,
+          conclusion: r.conclusion,
+          htmlUrl: r.html_url,
+          createdAt: r.created_at,
+          headSha: (r.head_sha || '').slice(0, 7),
+        })),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to fetch Actions status';
+      res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

@@ -122,6 +122,19 @@ export const MasterAdminPortalWebsite: React.FC<MasterAdminPortalWebsiteProps> =
   const [githubRepoInput, setGithubRepoInput] = useState<string>(() =>
     getConfiguredGithubRepo()
   );
+  const [ghActionsRuns, setGhActionsRuns] = useState<
+    Array<{
+      id: number;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      htmlUrl: string;
+      createdAt: string;
+      headSha: string;
+    }>
+  >([]);
+  const [ghPushBusy, setGhPushBusy] = useState<boolean>(false);
+  const [ghStatusBusy, setGhStatusBusy] = useState<boolean>(false);
 
   // Publish Software Update Form
   const [relVersion, setRelVersion] = useState<string>('1.1.0');
@@ -190,6 +203,60 @@ export const MasterAdminPortalWebsite: React.FC<MasterAdminPortalWebsiteProps> =
         ? `Saved GitHub Repository (${saved})! User Software .EXE Link is now: ${userExeLink}`
         : 'Cleared custom GitHub Repository slug.'
     );
+    if (saved) {
+      handleCheckGithubActionsStatus(saved);
+    }
+  };
+
+  const handleCheckGithubActionsStatus = async (customRepo?: string) => {
+    const targetRepo = (customRepo ?? githubRepoSlug) || githubRepoInput;
+    if (!targetRepo || !targetRepo.includes('/')) return;
+    setGhStatusBusy(true);
+    try {
+      const resp = await fetch(
+        `/api/github/actions-status?repo=${encodeURIComponent(targetRepo)}`
+      );
+      const data = await resp.json();
+      if (data.ok && Array.isArray(data.runs)) {
+        setGhActionsRuns(data.runs);
+      }
+    } catch {
+      // Ignore network errors
+    } finally {
+      setGhStatusBusy(false);
+    }
+  };
+
+  const handleDirectServerPushAndTriggerActions = async () => {
+    const targetRepo = githubRepoSlug || githubRepoInput;
+    if (!targetRepo || !targetRepo.includes('/')) {
+      showToast('Please enter and save your GitHub repository (username/repository) first.');
+      return;
+    }
+    setGhPushBusy(true);
+    try {
+      const resp = await fetch('/api/github/push-and-build-exe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repoSlug: targetRepo,
+          commitMessage: `Update AKASH TUNNEL MAPPER (${new Date().toISOString().slice(0, 16)}) + Trigger .EXE Build`,
+        }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        showToast(
+          `Pushed ${data.filesCount} files to ${data.repo}@${data.branch} and triggered GitHub Actions .EXE build!`
+        );
+        handleCheckGithubActionsStatus(targetRepo);
+      } else {
+        showToast(data.error || 'GitHub push failed.');
+      }
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'GitHub push error.');
+    } finally {
+      setGhPushBusy(false);
+    }
   };
 
   const bumpPatchVersion = (ver: string): string => {
@@ -709,15 +776,84 @@ export const MasterAdminPortalWebsite: React.FC<MasterAdminPortalWebsiteProps> =
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <button
                   type="button"
+                  onClick={handleDirectServerPushAndTriggerActions}
+                  disabled={ghPushBusy}
+                  className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold cursor-pointer shadow-lg"
+                  title="Pushes workspace files + .github/workflows to GitHub and triggers the Windows .EXE GitHub Actions workflow"
+                >
+                  <RefreshCw className={`w-4 h-4 ${ghPushBusy ? 'animate-spin' : ''}`} />
+                  <span>
+                    {ghPushBusy
+                      ? 'Pushing & Triggering Actions...'
+                      : '1. Push Code & Trigger GitHub Actions (.EXE)'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={handleOneClickPushGithubUpdateToUsers}
                   className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold cursor-pointer shadow-lg"
                   title="Broadcasts a new update notification to all users with the GitHub User Software .EXE link"
                 >
                   <Send className="w-4 h-4" />
-                  <span>Push Update &amp; Send Link to All Users Now</span>
+                  <span>2. Notify All Users of New .EXE Update</span>
                 </button>
               </div>
             </div>
+
+            {/* Live GitHub Actions Workflow Status & Direct Quick Links */}
+            {githubRepoSlug && (
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-slate-400">GitHub Actions (.EXE Builder):</span>
+                  {ghActionsRuns.length > 0 ? (
+                    <a
+                      href={ghActionsRuns[0].htmlUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 hover:border-cyan-500 text-cyan-300 font-bold"
+                    >
+                      {ghActionsRuns[0].name} · {ghActionsRuns[0].status.toUpperCase()}{' '}
+                      {ghActionsRuns[0].conclusion
+                        ? `(${ghActionsRuns[0].conclusion.toUpperCase()})`
+                        : ''}{' '}
+                      [{ghActionsRuns[0].headSha}]
+                    </a>
+                  ) : (
+                    <span className="text-slate-400">
+                      Workflow ready in <code className="text-emerald-400">.github/workflows/build-installer.yml</code>
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleCheckGithubActionsStatus()}
+                    disabled={ghStatusBusy}
+                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer"
+                  >
+                    {ghStatusBusy ? 'Checking...' : 'Check Actions Status'}
+                  </button>
+                  <a
+                    href={`https://github.com/${githubRepoSlug}/actions`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700"
+                  >
+                    Open GitHub Actions ↗
+                  </a>
+                  <a
+                    href={`https://github.com/${githubRepoSlug}/releases`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700"
+                  >
+                    Open GitHub .EXE Releases ↗
+                  </a>
+                </div>
+              </div>
+            )}
 
             {/* GitHub Repository Slug Configuration Row */}
             <form
